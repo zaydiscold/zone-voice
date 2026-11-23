@@ -25,7 +25,7 @@ Only the Zone app contains this code. The keyboard and the other extensions do n
 
 `ZoneKeyboard/Resources/en-pairs.bin` holds pruned, quantized next-word probabilities counted from the English OpenSubtitles2018 corpus as distributed by OPUS (https://opus.nlpl.eu/), built by `scripts/swipe-eval/build-wordpairs.py`. No subtitle text is shipped. OPUS asks users to cite P. Lison and J. Tiedemann, "OpenSubtitles2016: Extracting Large Parallel Corpora from Movie and TV Subtitles", LREC 2016, and the source site http://www.opensubtitles.org/; the in-app acknowledgments do.
 
-Short lists of texting words and of words that are valid but never suggested were written for Zone and are covered by Zone's own MIT License.
+Short lists of texting words were written for Zone and are covered by Zone's own MIT License.
 
 ### SCOWL copyright notice (verbatim from `scowl-2020.12.07/Copyright`)
 

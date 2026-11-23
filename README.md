@@ -1,6 +1,6 @@
 # Zone
 
-I built this because I broke my hand kickboxing and god damn it Apple stuff sucks; the keyboard, the dictation, the swipe. So we have all of that made to be wonderful and more
+I broke my hand kickboxing. After about a week of my non-dominant hand on Apple's keyboard, I realized it sucked. So did the dictation. So did the swipe. So I used Mythos to build my own, and made it a bit more fun.
 
 <p align="center"><img src="media/xray.jpg" width="360" alt="X-ray of my broken right hand, with the plate holding it together"></p>
 
@@ -10,7 +10,7 @@ I built this because I broke my hand kickboxing and god damn it Apple stuff suck
 ![On-device](https://img.shields.io/badge/speech-on--device-brightgreen)
 ![No account](https://img.shields.io/badge/account-none-brightgreen)
 
-An iPhone keyboard and app for dictation. Tap the mic, talk, and the text lands at the cursor in any app. Speech recognition runs on the phone: no account, no server, no analytics. Models download when needed; recognition then works offline. Optional sharing and cloud-backed backup destinations are under your control.
+An iPhone keyboard and app for dictation. Tap the mic, talk, and the text lands at the cursor in any app. Speech recognition runs on the phone: no account, no server, no analytics. Models download when needed; after that it works offline.
 
 **This is the production version of Zone 1.0.5 on the App Store. Feel free to take it and modify it.**
 
