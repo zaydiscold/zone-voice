@@ -12,6 +12,8 @@ An iPhone keyboard and app for dictation. Tap the mic, talk, and the text lands 
 
 Status: free on the [App Store](https://apps.apple.com/app/id6830955448) for iPhone. This repository is the source of Zone 1.0.5, the version on the App Store. [TestFlight invitation](https://testflight.apple.com/join/cStumGN1).
 
+**Two open source parts.** This repository is the iPhone app and keyboard. The computer side, with an MCP server for your AI agents (Claude Code, Codex, Cursor and more), a command line and wireless sync, is [zaydiscold/zone-mcp](https://github.com/zaydiscold/zone-mcp).
+
 Start with the [feature guide](docs/features.md) and the [build changelog](CHANGELOG.md).
 
 ## Features
