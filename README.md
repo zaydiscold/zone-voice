@@ -22,7 +22,8 @@ Start with the [feature guide](docs/features.md) and the [build changelog](CHANG
 
 **Keyboard**
 - Dictation from the keyboard in any app, with Undo and Redo after each insert
-- Full keyboard with autocorrect (77,000 words, tap-position aware), suggestions, clicks and haptics
+- Full keyboard with autocorrect (77,000 words), suggestions, clicks and haptics
+- Adaptive tap learning: the keyboard learns where your thumb actually lands on each key, the method from Google's Gboard research (see [Built on public research](#built-on-public-research))
 - Optional English swipe typing, alternatives, whole-word Delete and local learning from explicit choices
 - The space bar is a trackpad: slide sideways to move the cursor, up or down to change lines; lift to resume typing
 - Compact dictation face: mic, Stop and Pause, live voice graphic, Delete, Return, optional Paste
@@ -46,6 +47,12 @@ Start with the [feature guide](docs/features.md) and the [build changelog](CHANG
 - Controls for the Action Button, Control Center and Lock Screen
 - Home Screen and StandBy widget, Live Activity in the Dynamic Island
 - Computers (Beta): your library on your own computer and in your AI agents, with [zone](https://github.com/zaydiscold/zone-mcp)
+
+## Built on public research
+
+- **Adaptive tap learning:** Gary Sivek and Michael Riley, [Spatial model personalization in Gboard](https://arxiv.org/abs/2209.11311) (MobileHCI 2022), and Shiri Azenkot and Shumin Zhai, *Touch behavior with different postures on soft smartphone keyboards* (MobileHCI 2012). Per-key offsets learned from your own committed words, pooled by key cluster, about the last 800 taps, never the text itself.
+- **Swipe:** a template decoder in the SHARK2 family (Per Ola Kristensson and Shumin Zhai, *SHARK2: a large vocabulary shorthand writing system for pen-based computers*, UIST 2004), tuned on human swipes from the public [swipe.futo.org](https://huggingface.co/datasets/futo-org/swipe.futo.org) corpus and reranked by the [FUTO Swipe](https://huggingface.co/futo-org/futo-swipe) neural model, with your own choices, word pairs and start and end offsets learned on top.
+- **Speech:** Fluid Speech Mini from FluidVoice, built on NVIDIA Parakeet, running on the iPhone through [FluidAudio](https://github.com/FluidInference/FluidAudio).
 
 ## On your computer: zone
 
@@ -253,7 +260,7 @@ Zone's MIT source code.
 The frozen decoder scored 90.91% top-1 and 96.40% top-3 on 46,362 eligible traces from the
 49,970-row public FUTO test split. Dictionary/suggestibility and gesture criteria excluded
 3,608 rows. This measures corpus recognition, not iPhone typing quality or superiority to
-another keyboard. The bundled encoder was trained upstream; Zone did not train a new model.
+another keyboard. Zone's own decoder, in the SHARK2 family, was tuned on 2,000 human swipes, and the keyboard learns from your swipes on top of the model.
 
 Reproduce with `scripts/swipe-eval/build-fixtures.py`, then set `ZONE_SWIPE_NEURAL=1`,
 `ZONE_SWIPE_FIXTURES` to the generated fixture and
