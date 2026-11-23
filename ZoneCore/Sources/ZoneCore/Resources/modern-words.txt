@@ -1,0 +1,1051 @@
+# One per line: the spelling, a tab, a swipe frequency rank (lower is commoner; blank is
+# 4000), a tab, then the forms a recognizer writes for it. See ModernVocabulary.swift.
+Claude	1500	claud,clawd,klaud
+Anthropic	3000
+OpenAI	2500	open ai,open a.i.,openi
+ChatGPT	1500	chat gpt,chat g p t,chatgbt,chat gbt
+CLIs	7000	c l i s
+GPT	3000
+Gemini	3000
+Grok	4000	groc,grock
+Copilot
+DeepSeek		deep seek
+Qwen	6000	quen,kwen
+Mistral	6000
+Llama	6000
+Perplexity	5000
+Midjourney	6000
+Sora	6000
+Codex	5000
+Nvidia	3000	nvidia
+LLM	3000
+LLMs	4000
+AGI	5000
+MCP	5000
+API	2500	api
+APIs	3500
+SDK	5000
+CLI	5000	c l i,c.l.i.,clea
+GPU	3500
+GPUs	4500
+chatbot	3500	chat bot
+chatbots	5000	chat bots
+agentic	5000	a gentic
+subagent	7000	sub agent,sub-agent
+subagents	7000	sub agents,sub-agents
+tokenizer	7000
+embeddings	6000
+multimodal	6000	multi modal,multi-modal
+finetune	7000	finatoon
+finetuning	7000	finatuning,finitoning,finituning
+deepfake	6000	deep fake
+deepfakes	6000	deep fakes
+diarization	7000	diorization
+diarize	7000
+Wispr Flow		whisper flow,whisperflow,wisper flow,wispr flow
+Firecrawl	8000	fire crawl
+Hugging Face		huggingface
+Google	800	google
+YouTube	900	you tube,youtube
+Instagram	1000	instagram,insta gram
+TikTok	1000	tik tok,tiktok
+Snapchat	1500	snap chat
+Facebook	1200	face book,facebook
+Twitter	1500	twitter
+Reddit	1500
+Spotify	1500
+Netflix	1500
+Amazon	1000	amazon
+Uber	1500
+Lyft	3000
+DoorDash	3000	door dash,doordash
+Venmo	2000
+Zelle	3000	zell
+PayPal	3000	pay pal,paypal
+Robinhood	5000	robin hood
+Coinbase	5000	coin base
+WhatsApp	1500	whats app,whatsapp
+iMessage	2000	imessage
+FaceTime	1500	facetime
+LinkedIn	2500	linked in,linkedin
+Pinterest	4000
+Airbnb	2500	air bnb,air b and b,airbnb
+Shopify	5000
+Substack	6000	sub stack
+Figma	5000
+GitHub	3000	git hub,github
+Vercel	7000	versal,versel
+Supabase	7000	super base,superbass
+Tailscale	7000	tail scale
+Kubernetes	7000
+Xcode	5000	x code,xcode
+SwiftUI	7000	swift ui
+TestFlight	5000	test flight,testflight
+SolidWorks	7000	solid works,solidworks
+Goodreads	7000	godreads,good reads
+Costco	2500
+Walmart	2500	wal-mart
+Chipotle	3000
+Starbucks	2500
+IKEA	3500	ikea,iike
+iPhone	800	iphone
+iPhones	2500	iphones
+iPad	1500	ipad
+iCloud	3000	icloud
+MacBook	2500	mac book,macbook
+AirPods	2000	air pods,airpods
+AirTag	5000	air tag,airtag
+CarPlay	4000	car play,carplay
+Tesla	2000
+Cybertruck	6000	cyber truck
+SpaceX	4000	space x,spacex
+Starlink	5000	star link
+Neuralink	6000	neural link
+Bitcoin	2500	bitcoin,bit coin
+Ethereum	5000
+Solana	7000	salana
+crypto	2500
+blockchain	5000	block chain
+stablecoin	7000	stable coin,stablocoin
+memecoin	7000	memacoin,memocoin
+NFT	5000
+NFTs	6000
+EV	4000
+EVs	5000
+VPN	4000
+OLED	6000
+eSIM	7000	e sim,esim
+passkey	6000	pass key,pasky
+passkeys	6000	pass keys,paskies
+homelab	8000	home lab
+repo	3000
+repos	4000
+frontend	5000
+backend	5000
+fullstack	7000
+devops	7000	dev ops
+webhook	7000	web hook,wethook
+serverless	7000
+autocorrect	3000	auto correct,auto-correct
+spacebar	5000
+config	4000
+configs	5000
+readme	6000
+roadmap	4000
+workaround	4000
+onboarding	4000	on boarding
+onboarded	5000	on boarded
+screenshotting	7000	screenshitting
+livestream	5000	live a stream,liverstream
+speedrun	7000
+laggy	5000
+natively	6000
+impactful	5000
+Ozempic	4000
+Wegovy	6000	wegavi
+Mounjaro	6000	mount jaro
+semaglutide	8000
+mRNA	6000	mrna,manah,munar
+telehealth	6000	tele health
+pickleball	4000	pickle ball
+matcha	4000
+boba	4000
+kombucha	5000
+birria	7000	biria
+doomscrolling	6000	doom scrolling
+doomscroll	7000	doom scroll
+situationship	6000	situation ship
+gaslighting	4000	gas lighting
+gaslit	5000	gaslet
+influencer	3500
+influencers	4000
+subreddit	6000	sub reddit,subreddited
+rideshare	6000	ridershare
+bingeing	7000
+adulting	7000
+hangry	6000
+zoomer	7000	zumer
+copium	8000
+doxxed	7000
+homies	5000
+normies	7000	nommies,normese
+broski	8000	brasky,browski
+smth	6000
+mins	5000	minz
+vid	6000
+vids	7000
+rly	7000
+ily	7000	eiley
+obvi	8000	abvi
+hru	8000
+wym	8000	wime
+aight	8000
+dawg	7000
+otw	8000
+ttys	8000
+yessir	8000	yesair,yeser
+Gmail	2500
+Siri	2500
+Alexa	2500
+Xbox	2500
+Hulu	2500
+Etsy	2500
+Zillow	2500
+Pokemon	2500	pokémon
+Minecraft	2500
+Fortnite	2500
+Roblox	2500	robalox
+Instacart	2500	insta cart,instacut
+Waymo	2500	waymar,wimo
+Duolingo	2500	duo lingo
+Sephora	2500
+Lululemon	2500	lulu lemon,lululaman,lululeman
+Grubhub	2500	grub hub
+Waze	2500	wazay
+Comcast	2500	comicast
+Xfinity	2500	sfinity
+Pixar	2500
+Peloton	2500	peladon
+Fitbit	2500
+Canva	2500
+Tumblr	2500
+Patreon	2500	patrion
+Temu	2500	tamu,timu
+Shein	2500
+Popeyes	2500
+Dunkin	2500
+Panera	2500	paneirar
+Uniqlo	2500
+Expedia	2500	axpedia
+JetBlue	2500	jet blue
+Schwab	2500
+Moderna	2500	madurna
+Nordstrom	2500
+GameStop	2500	game stop
+Wayfair	2500
+Aldi	2500
+Lenovo	6000
+Huawei	6000
+Xiaomi	6000	xiami
+Wingstop	6000
+Ulta	6000	ulata
+Rivian	6000
+Amex	6000
+Citi	6000
+BlackRock	6000	black rock
+JPMorgan	6000	jp morgan,j.p. morgan,j morgan
+Klarna	6000	klana
+SoFi	6000	so fi
+Binance	6000	binans
+Palantir	6000	palanta,palanti,palantra
+Databricks	6000
+Cloudflare	6000	cloud flare
+Twilio	6000
+Atlassian	6000	atlasian
+Jira	6000
+Asana	6000	asna
+Trello	6000	trillo
+Zapier	6000	zapia
+HubSpot	6000	hub spot,hubsput
+Squarespace	6000	square a space,square space
+Wix	6000
+Strava	6000	stravos
+Garmin	6000
+GoPro	6000	go pro,goppro
+Sonos	6000	sonus
+Logitech	6000
+Razer	6000
+Zelda	6000
+Grindr	6000	grinda
+Redfin	6000	redfan
+Postmates	6000	postmits
+Turo	6000
+Zocdoc	6000	zoc dog,zok doc
+Oura	6000	bura
+Theranos	6000	theranus,thoranos
+TSMC	6000
+ASML	6000	asnl
+Broadcom	6000
+Raytheon	6000	rathean
+Anduril	6000	andoral,andril
+xAI	6000	x ai
+ElevenLabs	6000	eleven labs
+Replit	6000	replet,riplet
+Ollama	6000	olimer
+LangChain	6000	lang chain,langshan
+Jupyter	6000
+Kaggle	6000	caggle
+Postgres	6000
+OneDrive	6000	one drive
+Cortana	6000
+Bluesky	6000	blue ski,blueski
+Quora	6000
+OnlyFans	6000	only fans
+Kickstarter	6000
+GoFundMe	6000	go fund me
+Wegmans	6000
+Lidl	6000
+REI	6000
+Alibaba	6000	ali baba
+Tencent	6000
+ByteDance	6000	byte dance,bite dance
+SoundCloud	6000	sound cloud
+Letterboxd	6000
+IMDb	6000
+Crunchyroll	6000	crunchural,crunchy roll
+MLB	6000
+UFC	6000
+FIFA	6000
+Yelp	3000	yelp
+Tinder	3000	tinder
+Android	3000	android
+Kindle	3000	kindle
+Dell	3000	dell
+Adobe	3000	adobe
+Airbus	3000	airbus
+Azure	3000	azure
+McDonald's	3000	mcdonalds,mc donalds,mcdonald's
+T-Mobile	4000	t mobile,tmobile,t-mobile
+Chick-fil-A	3000	chick fil a,chickfila
+Trader Joe's	3000	trader joes
+Uber Eats	3000
+Photoshop	3000
+Craigslist	3000
+Crocs	3000
+Bing	3000
+Nutella	3000
+Adderall	3000
+Xanax	3000	xanox
+Benadryl	3000
+DIY	3000
+bestie	3000
+besties	3000
+unfollow	3000
+upvote	3000
+downvote	3000
+creatine	3000
+CapCut	6000	cap cut
+BeReal	6000
+Depop	6000	deepop,deput
+Poshmark	6000
+StubHub	6000	stub hub
+Shazam	6000
+Kahoot	6000
+Quizlet	6000	quislet
+Chegg	6000	cheg
+Coursera	6000	corsara
+Grammarly	6000	grammary
+Evernote	6000
+Afterpay	6000
+Valorant	6000
+Labubu	6000
+Hoka	6000	hoker
+CeraVe	6000
+Chobani	6000	chabani,chibani
+Sweetgreen	6000
+Wawa	6000	wava
+Publix	6000
+Zipcar	6000	zip car,zipka
+Ryanair	6000
+Vrbo	6000	verbo,vravo
+Tripadvisor	6000	trip advisor,tripathvisor
+OpenTable	6000	open table,openable
+Resy	6000
+Eventbrite	6000
+Nextdoor	6000
+NotebookLM	6000	notebook lm
+Suno	6000
+OpenRouter	6000	open router
+Groq	6000
+Cerebras	6000	cerebros,cerebrus
+Zepbound	6000	zetbound,zipbound
+Narcan	6000	nakan,narcid
+Paxlovid	6000	pax lovid,paxlavid
+Lightroom	6000
+Fanta	6000
+Nespresso	6000
+Keurig	6000	courig
+Roomba	6000
+Chromecast	6000	chromacast
+OkCupid	6000	ok cupid
+Crumbl	6000
+Owala	6000
+Carhartt	6000	carhard,carhurt
+Aritzia	6000	iritza
+Abercrombie	6000
+Madewell	6000	maidwell
+Allbirds	6000	alberts
+Vuori	6000
+Gymshark	6000
+SoulCycle	6000	soul cycle
+Orangetheory	6000	orange theory
+ClassPass	6000	class pass
+Headspace	6000
+BetterHelp	6000	better help
+MyFitnessPal	6000	my fitness pal
+Theragun	6000
+Zyrtec	6000	zertec,ztec
+Claritin	6000	claridon
+Lexapro	6000	luxapro,lyxapro
+Wellbutrin	6000	well boutrin,well butrin
+Vyvanse	6000
+Invisalign	6000	invisaline
+LASIK	6000	lassic,lassig
+WFH	6000
+delulu	6000	dululu
+brainrot	6000
+ick	6000
+girlboss	6000	gilboss
+ragebait	6000	rajabate
+cringey	6000
+ashwagandha	6000	ashwagandhar,yashwaganda
+vlogger	6000
+wearables	6000
+zoomers	6000
+millennials	6000
+vibecoding	6000	viba coding,vibacoding,vibcoding
+yeet	6000	yeat
+Discord	5000	discord
+TJ's	4000	tjs,t j's,t.j.'s
+B-Dubs	6000	b dubs,bdubs,bee dubs,b dub's,b-dub's
+Buffalo Wild Wings	5000
+Mickey D's	6000	mickey ds,mickey dees
+Buc-ee's	6000	buc-ees,buckees,buc ees
+In-N-Out	5000	in n out
+Whataburger	6000	wadaburger
+Raising Cane's	5000	raising canes
+Erewhon	7000
+Dutch Bros	6000
+Shake Shack	5000	shakeshak
+Taco Bell	4000
+Wendy's	4000	wendys
+Applebee's	5000	applebees
+Olive Garden	5000
+Jersey Mike's	6000	jersey mikes
+Jimmy John's	6000	jimmy johns
+Hokas	7000
+Birkenstocks	6000	birken stocks
+Uggs	6000
+Poppi	7000
+Olipop	7000	oli pop,ollie pop,ollipop
+Zyn	6000	zyne
+Zyns	7000
+Juul	6000
+Partiful	7000
+StockX	7000
+Kalshi	7000	calci,kulchi
+Polymarket	6000	poly market
+FanDuel	6000	fan duel
+DraftKings	6000	draft kings
+PrizePicks	7000	prize picks
+Cash App	4000	cashapp
+Wordle	5000	wertle
+AirDrop	4000	air drop
+rizzed	7000
+rizzler	7000	risla,risler
+gyatt	7000	gyat,jyat
+skibidi	6000	skibbidy,skibidy,skibbity
+mogging	7000	mogking
+mogged	7000
+looksmaxxing	7000	looks maxing,looksmaxing,looks maxxing
+crashout	7000
+yapper	6000	yappa
+unc	7000	untg
+fanum tax	7000
+bussin	6000	busin
+deadass	5000	dead ass
+finna	5000
+tryna	4500	trynna
+periodt	7000
+situationships	7000	situation ships,situation chips
+pick-me	7000
+doomscrolled	7000	doom scrolled
+bedrotting	7000	bed rotting,bedretting
+clanker	7000
+vibe coding	5000	vibecoding
+vibe coded	6000	vibecoded
+huzz	7000	huzzes
+tuff	6000
+pookie	6000
+jit	7000
+sheesh	5000
+oomf	7000
+thrifting	6000
+unalive	6000	un alive
+unalived	7000
+simping	6000
+ratioed	7000	ratio'd
+npc	5000
+iykyk	6000	ikik
+bffr	7000
+hyperfixation	7000	hyper fixation
+hyperfixate	7000	hyper fixate,hyperfixet
+neurodivergent	6000	neuro divergent
+neurospicy	7000	neuro spicy,neurospacy
+maxxing	7000	max xing
+gymmaxxing	8000
+jestermaxxing	8000
+gng	7000
+sybau	7000	sibat
+shawty	6000	shotty
+Micro Center	6000
+Home Depot	4000
+Burger King	5000
+Pizza Hut	5000	pitzahut
+Panda Express	6000	pandar express
+Dollar Tree	6000
+Silicon Valley	5000
+Bay Area	5000
+Golden Gate	6000
+Apple Watch	4000
+AAPL	6000
+ADHD	6000
+AIO	9286
+AliExpress	8848
+AMZN	7174
+Ansible	12077
+AppleCare	13648
+arXiv	9830	axiv
+ASICs	11627
+AVAX	13648	avix,avox
+Bambu	24642
+BAYC	11173
+Beelink	11173
+Bitwarden	8686	bithwarden
+BNB	6000
+Bronny	14359
+BTC	6000
+Bybit	22024
+CachyOS	9830	cachio s
+CFA	7306
+Chalamet	15101	chalamat,chalamut,chalomet
+Charizard	10158	cherizard
+ClawHub	6000	claw hub
+Clippy	11173
+CNBC	13648
+Coachella	6000	kachella
+Colab	16030
+ComfyUI	6000	comfy ui
+Composio	9050
+Coolify	16030	koolify
+CoreWeave	13648	core weave
+CRM	6000
+CSV	9286
+CUDA	6000
+DCA	6240
+DeepMind	12077	deep mind
+DEX	8848
+EDM	12513
+Elo	7306
+Elon	6000
+EOY	6685
+ETF	6000
+ETH	6000
+EVM	14359
+Feishu	6000	fishu,fleishu
+FTX	12077
+FYP	10158
+GBP	18385
+GC	6000
+GCP	14359
+GGUF	6000
+Ghidra	10473	gidra
+Ghostty	9050	ghosty,gosty
+Gitea	8099	jitia
+GMKtec	12513	gmtek
+Grafana	11627	grafano
+GTA	6000
+GTX	8463
+Haaland	6685
+Headscale	27839	head scale
+Hetzner	6000
+Higgsfield	8270	hicksfield
+Homebrew	13648
+Hostinger	6000
+HVAC	14359
+Hyatt	13053
+Hynix	9830	hinex,hinux
+Hyperliquid	6000
+iGPU	10784	igbu,igpoo
+iMessages	12513
+INTC	6000
+iPads	12077
+Jellyfin	18385	jelifin,jellifin
+JPM	7583
+Kimi	6000
+Kiro	9577
+Knicks	6000
+Kokoro	20041	kakora,kakoro
+KYC	6000
+LeBron	6000
+LFG	6000
+LiteLLM	6000	littlem
+Lorcana	16030
+MacBooks	9286
+MAGA	6470
+Mattermost	8270
+Mavs	13053
+Maybach	16030	mayback,maybart
+MBP	7583
+McGregor	15101
+McLaren	14359
+Menards	10784	mennards
+MetaMask	9050
+Meteora	20041
+Mewtwo	12513
+MMO	15101
+Monero	15101
+Mossad	7923
+MSRP	6000
+MSTR	6000
+Mullvad	11173	mulved
+Nebius	8848	nebias
+Nemotron	6000	nematron
+Newegg	27839	new egg
+Nextcloud	7434
+NixOS	10158	nix os,nixus
+NUC	11173
+NVDA	6000	mvda
+NVMe	6000
+OAuth	6000
+OCuLink	13053	oculin,oku link
+OGs	14359
+Omarchy	6000	amarchy,omaki
+OOS	6000	oose
+OpenClaw	6000	a penclaw,open claw
+OPSEC	14359
+ORCL	6000
+OSINT	12077	ossent
+OSS	6000
+PCIe	6000
+PewDiePie	10784
+PFP	6000
+Pikachu	11627
+PLTR	6000
+PnL	6000
+PoC	7923
+Ponzi	12077
+PostHog	9577	post hog
+POV	6000
+PowerShell	6000
+Proxmox	6000
+PSA	6000
+PSU	8848
+PvP	6000
+Qdrant	10473
+QoL	9577
+RGB	11173
+ROG	16030
+RPi	7741
+RTX	6000
+RunPod	12077	run pod
+Ryzen	6000
+SanDisk	12513	sand disk,sandisp
+SearXNG	10158
+Seedance	12513	sedance
+SGLang	11627	sg lang,sklan
+Sixers	10473
+SKU	8270
+SKUs	11627	scus
+Skynet	10784
+Skyrim	13648
+SoCal	11627	so cal,sockle
+SOTA	6000
+SpongeBob	8099
+SSDs	13648
+SSN	8848
+SVG	12077
+Synology	12077
+Taobao	12077	tao bao,teobo
+Tavily	16030	tavali,tavili
+TCG	6000
+TempleOS	10158	temple os,templius
+Termux	6000	turmux
+Tetris	13053
+TG	6000
+Thiel	10158
+ThinkPad	13053	think pad
+Threadripper	15101
+TMZ	15101
+Topps	6797
+TPS	6000
+TrueNAS	11627	true naz
+TSA	6000
+UGC	8270
+UniFi	11173
+Unsloth	6000	unslot
+UPCs	6000
+USDC	6000
+USDT	14359
+Valheim	13053	valheem
+VCs	6685
+VMs	6685
+VOO	9050
+VPNs	16030
+VPS	6000
+VR	6331
+VRAM	6000
+Vulkan	7923
+Warhammer	20041
+Warzone	17132
+Wayland	14359
+Waymos	12077	waymous
+Wemby	6000
+WireGuard	13053	wire guard
+WNBA	11627
+XMR	6000
+XP	7434
+XRP	9050
+Yeezy	6000
+Yeezys	14359
+YTD	15101
+Zcash	6240	scash
+Zuck	6000
+abliterated	6000
+abliteration	15101
+accs	8848
+addon	17132
+addons	13053	addens
+addys	10784
+attn	13053	attin
+automod	11627
+benchmaxxed	6000
+bogo	9830
+bois	15101
+botted	13053
+botting	6000
+bugfix	12077
+bugfixes	16030	budfixes
+capex	9050	capac,cappux,kpex
+cashapp	17132
+cashout	6000
+cashouts	11627
+changelog	7174	change log
+chungus	6000	chungas
+clankers	6000
+cloudflared	18385
+compat	9830
+corpo	7923	coppo
+cowork	6000	cowok
+creds	7174
+crons	6000	cronz
+cybersec	14359
+datacenters	6000
+dedup	12513
+degen	6000	degan
+degens	16030	degans,dejens
+deps	11173
+distro	6000
+distros	13053	distross
+dmed	9286
+dw	6000
+ebike	15101
+ecom	12077	eccam
+ez	6000
+fent	6000
+ffmpeg	8686	fimpeg,fipeg
+finetuned	14359	finatooned
+finetunes	13648	finatoons
+footgun	17132	foot gun,futgun
+frontran	27839
+frontrun	18385
+gacha	14359
+gg	6000
+ggs	6000
+gn	6000
+godmode	10784
+grailed	7741	grild
+groupchat	11173	grubchat
+hacky	12513
+huggingface	6000
+hyperscalers	11627
+idgi	9577
+idrc	13648
+ik	6000
+inspo	14359	in spo
+jank	12513
+jkjk	15101
+joever	7434	jover
+kanban	6000
+kek	7434
+lambo	10473
+larp	6000
+larper	14359	larpa
+larpers	17132	lapas
+larping	6000
+larps	13648
+llamacpp	6331	lamac
+lmstudio	6000	lum studio
+maxxed	14359
+mcap	6000	macab
+memecoins	6000
+mfw	10784
+minmax	13053
+mobo	11627
+mog	6797
+mogs	16030	moggs
+monorepo	16030	monaripo,monoripo
+nanogpt	8099	nanog,nanogt
+neet	6157
+nepo	13053	napo,nipo
+nginx	9286	ginks
+ngmi	7923
+normie	6088
+notif	9830	nautif
+notifs	6000
+notis	11173	nodis
+npm	6000
+oneshot	17132
+opencode	6000
+pacman	17132
+pepe	6000	peipe
+perma	9577
+pnpm	8099
+podman	13053
+prefill	6000
+presales	10784
+pretrained	22024
+pretraining	12513
+psyop	6000	psyot,syup
+pumpfun	6000	pumpfin
+pytest	11173
+ratelimit	13053	ratelemit,retelemit,rotelemit
+recs	6000	rext
+rekt	10158
+relist	22024
+requeue	30000
+resi	13053	resai,resie,ressi
+roleplay	17132
+royale	12513
+rugging	11173
+smurf	11173
+stablecoins	7306
+stimmy	8099
+stonk	6577
+stonks	13648
+superintelligence	16030
+superintelligent	22024
+systemd	6000	systemed
+szn	6577
+tailnet	9830	tail net,tailnut
+testnet	14359	testnut
+tiktoks	10784
+tmux	6000
+tokenmaxxing	13053
+topup	18385
+tren	13648
+txn	12513
+typesafe	14359
+tyty	14359
+ultrawide	13648
+venv	9050
+vibecode	8463	ribicode,viba code,vibacode,vibicode
+vibecoded	7174	vibacoded
+vscode	6000	viscode,vskode
+vtuber	24642	fuber
+vuln	13648	valne
+vulns	16030
+waifu	9050	waithu,weifu
+webapp	6000	webup
+webhooks	7174
+webui	6000	webu
+webview	17132
+worktree	8270	work three,work tree
+worktrees	7174	work trees
+xyz	6000
+youtuber	6797	yaotuber
+youtubers	10158
+analyse	40000
+ayo	40000
+behaviour	40000
+breh	40000
+colour	40000
+cookin	40000
+dayum	40000
+defence	40000
+dolla	40000
+favour	40000
+favourite	40000
+fosho	40000	fasha
+funsies	40000
+hittin	40000
+luh	40000
+modelling	40000
+onchain	40000
+oop	40000
+optimise	40000
+optimised	40000
+organisation	40000
+poppin	40000	pop pin
+rando	40000
+realise	40000
+realised	40000
+rockin	40000
+rq	40000
+smol	40000
+specialised	40000
+talkin	40000	telkin
+thinkin	40000
+tks	40000
+travelling	40000
+trynna	40000
+typa	40000
+wallahi	40000	walahi
+wtv	40000
+yday	40000
+yh	40000
+yk	40000
+yw	40000
+ffs	9050
+glazer	17132
+Clawd	6000
+Clawdbot	6000
+Moltbook	6000
+StepFun	6000	step fun
+Strix	6000
+ASUS	6000
+OpenSea	6000	open sea
+RuneScape	9830	rune scape
+Patek	8848
+IMAX	6000
+ROCm	9577
+Rainbet	10784
+Saylor	6470
+Cenat	10473
+macOS	6000
+HackerOne	30000	hacker one
+PETG	30000	pet g
+GLM	6000
+DGX	6000
+NIM	6000
+Karpathy	11627
+Bezos	7306
+Diddy	6000
+Fartcoin	6000
+SuperGrok	7056	super grok
+Mbappe	6000
+Carti	6000
+Bovada	9286
+xhigh	6000
+webchat	6000
+microcenter	10158
+gatekeep	11173
+courtside	9286
+tendies	6000
+uncs	10473
+sitrep	30000	sit rep
+Gemma	5000
+TUI	30000
+MTP	30000
+WSL	30000
+Veo	30000
+OAI	30000
+WebSocket	6000
+WebSockets	7000
+STT	30000
+ROI	30000
+MoA	30000
+RPC	30000
+OOM	30000
+ZDR	30000
+LFM	30000
+FSD	30000
+TLS	30000
+NPU	30000
+GDG	30000
+UMA	30000
+WIP	30000
+FastAPI	7000
+NDA	30000
+BYOK	30000
+KOLs	30000
+UTF	30000
+DEI	30000
+CVE	30000
+CVEs	30000
+GTC	30000
+TTFT	30000
+KVM	30000
+SSRF	30000
+GGUFs	7000
+GTM	30000
+LGTM	30000
+TTL	30000
+MrBeast	7000
+TPU	30000
+TPUs	30000
+DBs	30000
+PRD	30000
+SLM	30000
+NPCs	30000
+GRPO	30000
+DeFi	30000
+MoEs	30000
+DLSS	30000
+FAFO	30000
+CNC	30000
+RCE	30000
+JSONL	8000
+QLoRA	8000
+ISPs	30000
+HBM	30000
+JEPA	30000
+JetBrains	8000
+DYOR	30000
+ETFs	30000
+VLM	30000
+VLMs	30000
+APU	30000
+TradingView	8000
+HFT	30000
+IPOs	30000
+UBI	30000
+SFW	30000
+RLHF	30000
+PII	30000
+Jetson	7000
+Unitree	7000
+DuckDuckGo	8000
+Hyprland	8000
+Elden	8000
+LeetCode	8000
+YubiKey	8000
+ONNX	30000
+Ministral	8000
+LoRAs	8000
+PRs	30000
+Wispr	7000
+AirPod	7000
+Chainlink	7000
+Lua	30000
+EPYC	30000
+NVLink	8000
+Fairlife	8000
+Kling	8000
+MRR	30000
+FDV	30000
+TWAP	30000
+jinja	7000
+latencies	7000
+orderbook	7000
+retryable	7000
+websearch	8000
+toolcalls	8000
+openweight	8000
+overengineered	8000
+backtest	8000
+safetensors	8000
+upscaled	8000
+hopium	8000
+toks	30000
+vibecoders	8000
+autoresearch	8000
+copytrading	8000
+minipc	8000
+dirs	30000
+adb	30000
+hodl	30000
+ayy	30000
+grats	8000
+mayhaps	8000
+wsg	30000

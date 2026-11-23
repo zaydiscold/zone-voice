@@ -1,0 +1,37 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved.bak
+
+# iroh for Zone Link: built by scripts/build-iroh.sh, copied here by scripts/fetch-iroh.sh, never checked in
+ZoneLink/Vendor/
+
+# macOS
+.DS_Store
+
+# Scratch
+*.log
+
+# Claude Desktop session worktrees
+.claude/worktrees/
+
+# asc CLI local state (docs/tools/asc.md)
+.asc/runs/
+.asc/artifacts/
+.asc/metadata/review/
+
+# Per-developer signing (Config/Local.xcconfig.example)
+Config/Local.xcconfig

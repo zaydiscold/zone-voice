@@ -1,0 +1,13 @@
+// by zayd/cold @ zayd.wtf
+//
+// Copy to Config/Local.xcconfig (gitignored) to build Zone under your own Apple team.
+// scripts/install-on-iphone.sh writes this file for you on its first run.
+//
+// DEVELOPMENT_TEAM: the OU= field of
+//   security find-certificate -c "Apple Development" -p | openssl x509 -noout -subject
+// (the code in parentheses in the certificate's name is the certificate's ID, not the team's).
+// ZONE_BUNDLE_PREFIX: any reverse domain that is yours. Bundle IDs and the App Group are made from it
+//   (com.example.zone, com.example.zone.keyboard, group.com.example.zone).
+
+DEVELOPMENT_TEAM = ABCDE12345
+ZONE_BUNDLE_PREFIX = com.example

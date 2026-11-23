@@ -1,0 +1,6 @@
+# Swipe starter vocabulary: everyday words that formal frequency lists underweight.
+# One category per line: name, then words. Ranks come from build-starter.py.
+# ayy is left out: it took "at" in human swipes (dev and held-out test).
+slang lol lmao lmfao lmaoo rofl omg omfg wtf wth idk idc ikr imo imho tbh ngl fr frfr ong istg smh fyi btw brb afk rn irl dm dms jk nvm np ty tysm ily ilysm hbu wbu wyd wya hmu lmk omw otw tf stfu gtfo fml af asf bruh bro bros sis bestie bae fam sus cap bet deadass finna tryna imma gonna wanna gotta kinda sorta lemme gimme dunno yall y'all cuz bc tho thru ur pls plz thx ppl bussin slay slayed lowkey highkey rizz delulu mid periodt sheesh yeet vibe vibes vibing simp stan ratio based cringe goated drip salty savage lit woke yikes oop welp ugh hmm mhm yea yeah yep yup nah nope okay ok haha hahaha ayo aight ight boomer ick unalive gyat skibidi sigma aura cooked crashout opp opps iykyk pov fyp ootd glazing mewing hella dope bffr yolo
+profanity fuck fucking fuckin fucked fucker fucks motherfucker shit shitty shitting bullshit damn dammit goddamn ass asshole badass bitch bitches bitchy crap piss pissed dick dickhead cock pussy hoe hoes thot slut whore bastard twat wanker prick douche douchebag jackass dumbass smartass hell
+names Neuralink

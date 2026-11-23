@@ -1,0 +1,315 @@
+# Zone: XcodeGen spec. Regenerate the Xcode project with `xcodegen generate`.
+# Signing: Automatic. The team, the bundle ID prefix and the App Group come from
+# Config/Signing.xcconfig (the maintainer's free Personal Team: 7-day profiles, 3 sideloaded apps max), which
+# a gitignored Config/Local.xcconfig overrides to build under another team. Simulator builds ignore it.
+name: Zone
+options:
+  bundleIdPrefix: wtf.zayd
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+  generateEmptyDirectories: true
+  # Fills ZoneLink/Vendor with Zone's pinned build of iroh (scripts/build-iroh.sh), from this
+  # Mac's cache, building it once when the cache is empty. Does nothing when it is already there.
+  preGenCommand: scripts/fetch-iroh.sh
+
+configFiles:
+  Debug: Config/Signing.xcconfig
+  Release: Config/Signing.xcconfig
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.0.5"
+    CURRENT_PROJECT_VERSION: 1
+    TARGETED_DEVICE_FAMILY: "1"
+    # iOS 18: Fluid Speech Mini, the one speech model, requires it. Every iPhone that runs
+    # iOS 17 can install iOS 18.
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    GENERATE_INFOPLIST_FILE: NO
+    ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      ENABLE_TESTABILITY: YES
+
+packages:
+  # Fluid Speech Mini (and the retired Parakeet TDT-CTC 110M) through FluidAudio.
+  ZoneFluidAudio:
+    path: Packages/ZoneFluidAudio
+  ZoneCore:
+    path: ZoneCore
+  # Zone Link's transport (iroh). The app links it; no extension does.
+  ZoneLink:
+    path: ZoneLink
+
+targets:
+  Zone:
+    type: application
+    platform: iOS
+    sources:
+      - path: Zone
+        excludes: [ReleaseNotes]
+      # Each version's release notes, copied as a folder so the app reads ReleaseNotes/<version>.md.
+      - path: Zone/ReleaseNotes
+        type: folder
+        buildPhase: resources
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_NAME: Zone
+        PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_BUNDLE_PREFIX).zone
+        INFOPLIST_FILE: Zone/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Zone/Zone.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        # ZoneExceptionCatcher: AVAudioEngine raises Objective-C exceptions Swift cannot catch.
+        SWIFT_OBJC_BRIDGING_HEADER: Zone/Zone-Bridging-Header.h
+        SUPPORTS_MACCATALYST: NO
+        TARGETED_DEVICE_FAMILY: "1"
+    dependencies:
+      - target: ZoneKeyboard
+      - target: ZoneActivity
+      - target: ZoneMessages
+      - target: ZoneWatch
+      - package: ZoneFluidAudio
+        product: ZoneFluidAudio
+      - package: ZoneCore
+        product: ZoneCore
+      - package: ZoneLink
+        product: ZoneLink
+
+  # Live Activity plus the voice-note widget (Home Screen, StandBy, CarPlay).
+  ZoneActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget:
+      iOS: "18.0"
+    sources:
+      - path: ZoneActivity
+      - path: Shared/RecordingActivityAttributes.swift
+      - path: Shared/ZoneIntents.swift
+      - path: Shared/CarWidgetState.swift
+    settings:
+      base:
+        PRODUCT_NAME: ZoneActivity
+        PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_BUNDLE_PREFIX).zone.activity
+        INFOPLIST_FILE: ZoneActivity/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ZoneActivity/ZoneActivity.entitlements
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        SKIP_INSTALL: YES
+        TARGETED_DEVICE_FAMILY: "1"
+
+  ZoneKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ZoneKeyboard
+      - path: Shared
+        excludes: [RecordingActivityAttributes.swift, ZoneIntents.swift, CarWidgetState.swift]
+    settings:
+      base:
+        PRODUCT_NAME: ZoneKeyboard
+        PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_BUNDLE_PREFIX).zone.keyboard
+        INFOPLIST_FILE: ZoneKeyboard/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ZoneKeyboard/ZoneKeyboard.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: ZoneKeyboard/ZoneKeyboard-Bridging-Header.h
+        SKIP_INSTALL: YES
+        TARGETED_DEVICE_FAMILY: "1"
+      configs:
+        # Typed on every key: an unoptimized keyboard lags on the phone (spelling ran about 50 times
+        # slower at -Onone), so even Debug builds are optimized. Debug with logs, not breakpoints.
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: -O
+    dependencies:
+      - package: ZoneCore
+        product: ZoneCore
+
+  ZoneMessages:
+    type: app-extension.messages
+    platform: iOS
+    sources:
+      - path: ZoneMessages
+      - path: Shared/CompanionNoteEnvelope.swift
+    settings:
+      base:
+        PRODUCT_NAME: ZoneMessages
+        PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_BUNDLE_PREFIX).zone.messages
+        INFOPLIST_FILE: ZoneMessages/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ZoneMessages/ZoneMessages.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: iMessage App Icon
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        SKIP_INSTALL: YES
+        TARGETED_DEVICE_FAMILY: "1"
+    dependencies:
+      - sdk: Messages.framework
+
+  # Single-target SwiftUI watchOS app. Notes remain usable without the phone nearby.
+  ZoneWatch:
+    type: application
+    platform: watchOS
+    deploymentTarget: "10.0"
+    sources:
+      - path: ZoneWatch
+      - path: Shared/CompanionNoteEnvelope.swift
+    settings:
+      base:
+        PRODUCT_NAME: ZoneWatch
+        PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_BUNDLE_PREFIX).zone.watchkitapp
+        INFOPLIST_FILE: ZoneWatch/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        WATCHOS_DEPLOYMENT_TARGET: "10.0"
+        SKIP_INSTALL: YES
+        TARGETED_DEVICE_FAMILY: "4"
+
+  KeyboardTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: KeyboardTests
+      - path: ZoneKeyboard/SwipeEngine.swift
+      - path: ZoneKeyboard/KeyboardModel.swift
+      - path: ZoneKeyboard/SpellingStore.swift
+      - path: ZoneKeyboard/TextProxyActions.swift
+      - path: ZoneKeyboard/TextProxyGate.swift
+      - path: ZoneKeyboard/KeyFeedback.swift
+      - path: ZoneKeyboard/KeyboardLog.swift
+      - path: ZoneKeyboard/KeyTrace.swift
+      - path: ZoneKeyboard/Layout/KeyboardLayout.swift
+      - path: ZoneKeyboard/Views/KeyGridView.swift
+      - path: ZoneKeyboard/Views/KeyBalloonLayer.swift
+      - path: ZoneKeyboard/Views/KeyGlyphs.swift
+      - path: ZoneKeyboard/Views/KeyboardTheme.swift
+      - path: ZoneKeyboard/Views/PasteControlKey.swift
+      - path: ZoneKeyboard/Layout/KeyGridLayout.swift
+      - path: ZoneKeyboard/Layout/KeyGridPrediction.swift
+      - path: Shared/ColorHex.swift
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: wtf.zayd.zone.keyboard-tests
+    dependencies:
+      - package: ZoneCore
+        product: ZoneCore
+
+  KeyboardTestHost:
+    type: application
+    platform: iOS
+    sources:
+      - path: KeyboardTestHost
+      - path: ZoneKeyboard/SwipeEngine.swift
+      - path: ZoneKeyboard/KeyboardModel.swift
+      - path: ZoneKeyboard/SpellingStore.swift
+      - path: ZoneKeyboard/TextProxyActions.swift
+      - path: ZoneKeyboard/TextProxyGate.swift
+      - path: ZoneKeyboard/KeyFeedback.swift
+      - path: ZoneKeyboard/KeyboardLog.swift
+      - path: ZoneKeyboard/KeyTrace.swift
+      - path: ZoneKeyboard/Layout/KeyboardLayout.swift
+      - path: ZoneKeyboard/Views/KeyGridView.swift
+      - path: ZoneKeyboard/Views/KeyBalloonLayer.swift
+      - path: ZoneKeyboard/Views/KeyGlyphs.swift
+      - path: ZoneKeyboard/Views/KeyboardTheme.swift
+      - path: ZoneKeyboard/Views/PasteControlKey.swift
+      - path: ZoneKeyboard/Layout/KeyGridLayout.swift
+      - path: ZoneKeyboard/Layout/KeyGridPrediction.swift
+      - path: Shared/ColorHex.swift
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: wtf.zayd.zone.swipeqa
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+    dependencies:
+      - package: ZoneCore
+        product: ZoneCore
+
+  KeyboardUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: KeyboardUITests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: wtf.zayd.zone.swipeqa-tests
+    dependencies:
+      - target: KeyboardTestHost
+
+  # Drives the Zone app itself. Kept out of the Zone scheme: run it with the ZoneUI scheme.
+  ZoneUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: ZoneUITests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_BUNDLE_PREFIX).zone.ui-tests
+        CODE_SIGN_ENTITLEMENTS: ""
+    dependencies:
+      - target: Zone
+
+  ZoneMeetingTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ZoneMeetingTests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_BUNDLE_PREFIX).zone.meeting-tests
+        CODE_SIGN_ENTITLEMENTS: ""
+    dependencies:
+      - target: Zone
+      - package: ZoneCore
+        product: ZoneCore
+
+schemes:
+  KeyboardUI:
+    build:
+      targets:
+        KeyboardTestHost: all
+    test:
+      targets:
+        - KeyboardUITests
+        - KeyboardTests
+  KeyboardTests:
+    build:
+      targets:
+        KeyboardTests: all
+    test:
+      targets:
+        - KeyboardTests
+  Zone:
+    build:
+      targets:
+        Zone: all
+        ZoneKeyboard: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - ZoneMeetingTests
+    archive:
+      config: Release
+  ZoneUI:
+    build:
+      targets:
+        Zone: all
+        ZoneKeyboard: all
+        ZoneUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - ZoneUITests
+  ZoneWatch:
+    build:
+      targets:
+        ZoneWatch: all
+    run:
+      config: Debug

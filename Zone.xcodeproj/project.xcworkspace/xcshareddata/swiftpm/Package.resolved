@@ -1,0 +1,13 @@
+{
+  "pins" : [
+    {
+      "identity" : "fluidaudio",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/zaydiscold/FluidAudio",
+      "state" : {
+        "revision" : "9405f1d5fdd29179d15c3ffab359df2fc0472876"
+      }
+    }
+  ],
+  "version" : 2
+}

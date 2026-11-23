@@ -1,0 +1,121 @@
+[
+  {
+    "metadataOutputVersion" : "3.0",
+    "shortDescription" : "Fluid Speech Mini joint (FluidVoice-Labs\/fluid-speech-mini-coreml@d81c316, CC BY 4.0) with top-64 token logits added, FluidAudio JointDecisionv3 schema. Same int8 weights.",
+    "outputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Int32",
+        "formattedType" : "MultiArray (Int32 1 × 1 × 1)",
+        "shortDescription" : "",
+        "shape" : "[1, 1, 1]",
+        "name" : "token_id",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 1 × 1)",
+        "shortDescription" : "",
+        "shape" : "[1, 1, 1]",
+        "name" : "token_prob",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Int32",
+        "formattedType" : "MultiArray (Int32 1 × 1 × 1)",
+        "shortDescription" : "",
+        "shape" : "[1, 1, 1]",
+        "name" : "duration",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Int32",
+        "formattedType" : "MultiArray (Int32 1 × 1 × 64)",
+        "shortDescription" : "",
+        "shape" : "[1, 1, 64]",
+        "name" : "top_k_ids",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 1 × 64)",
+        "shortDescription" : "",
+        "shape" : "[1, 1, 64]",
+        "name" : "top_k_logits",
+        "type" : "MultiArray"
+      }
+    ],
+    "storagePrecision" : "Mixed (Float16, Int8)",
+    "modelParameters" : [
+
+    ],
+    "specificationVersion" : 9,
+    "mlProgramOperationTypeHistogram" : {
+      "Ios16.reduceMax" : 1,
+      "Ios18.relu" : 1,
+      "Ios18.reduceArgmax" : 2,
+      "Ios18.linear" : 3,
+      "Ios18.constexprBlockwiseShiftScale" : 3,
+      "Ios18.topk" : 1,
+      "Ios18.transpose" : 2,
+      "Ios18.cast" : 5,
+      "Ios18.sliceByIndex" : 2,
+      "Ios18.add" : 1,
+      "Ios18.softmax" : 1
+    },
+    "computePrecision" : "Mixed (Float16, Float32, Int32, UInt16)",
+    "isUpdatable" : "0",
+    "stateSchema" : [
+
+    ],
+    "availability" : {
+      "macOS" : "15.0",
+      "tvOS" : "18.0",
+      "visionOS" : "2.0",
+      "watchOS" : "11.0",
+      "iOS" : "18.0",
+      "macCatalyst" : "18.0"
+    },
+    "modelType" : {
+      "name" : "MLModelType_mlProgram"
+    },
+    "inputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 640 × 1)",
+        "shortDescription" : "",
+        "shape" : "[1, 640, 1]",
+        "name" : "decoder_step",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 1024 × 1)",
+        "shortDescription" : "",
+        "shape" : "[1, 1024, 1]",
+        "name" : "encoder_step",
+        "type" : "MultiArray"
+      }
+    ],
+    "userDefinedMetadata" : {
+      "com.github.apple.coremltools.version" : "9.0",
+      "com.github.apple.coremltools.conversion_date" : "2026-11-15",
+      "com.github.apple.coremltools.source" : "milinternal"
+    },
+    "generatedClassName" : "JointDecisionv3",
+    "method" : "predict"
+  }
+]

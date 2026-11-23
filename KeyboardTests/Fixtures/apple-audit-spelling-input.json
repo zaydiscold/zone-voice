@@ -1,0 +1,2417 @@
+[
+  {
+    "typed": "thst",
+    "wanted": "that",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "whst",
+    "wanted": "what",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "rhe",
+    "wanted": "the",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yhe",
+    "wanted": "the",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thw",
+    "wanted": "the",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tge",
+    "wanted": "the",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "anf",
+    "wanted": "and",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "abd",
+    "wanted": "and",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "amd",
+    "wanted": "and",
+    "category": "junk",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "fot",
+    "wanted": "for",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "gor",
+    "wanted": "for",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "hsve",
+    "wanted": "have",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "hace",
+    "wanted": "have",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "bave",
+    "wanted": "have",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "lile",
+    "wanted": "like",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "goinf",
+    "wanted": "going",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "cpuld",
+    "wanted": "could",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wpuld",
+    "wanted": "would",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ckuld",
+    "wanted": "could",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "eould",
+    "wanted": "would",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thete",
+    "wanted": "there",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "whete",
+    "wanted": "where",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ehat",
+    "wanted": "what",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "qhat",
+    "wanted": "what",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "sre",
+    "wanted": "are",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "arw",
+    "wanted": "are",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ypu",
+    "wanted": "you",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yiu",
+    "wanted": "you",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "abiut",
+    "wanted": "about",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wjen",
+    "wanted": "when",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "nefore",
+    "wanted": "before",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "rhink",
+    "wanted": "think",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thibk",
+    "wanted": "think",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tbink",
+    "wanted": "think",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "eill",
+    "wanted": "will",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "sounfs",
+    "wanted": "sounds",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "gpod",
+    "wanted": "good",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "giod",
+    "wanted": "good",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "nkce",
+    "wanted": "nice",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "jist",
+    "wanted": "just",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tgis",
+    "wanted": "this",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "jow",
+    "wanted": "how",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wjat",
+    "wanted": "what",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tgat",
+    "wanted": "that",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "hpw",
+    "wanted": "how",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yoi",
+    "wanted": "you",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "kryboard",
+    "wanted": "keyboard",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "keyboarf",
+    "wanted": "keyboard",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "leyboard",
+    "wanted": "keyboard",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tomorrpw",
+    "wanted": "tomorrow",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tonught",
+    "wanted": "tonight",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "peoplw",
+    "wanted": "people",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "somethimg",
+    "wanted": "something",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "anythinf",
+    "wanted": "anything",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "evertthing",
+    "wanted": "everything",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "becausw",
+    "wanted": "because",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "pleasr",
+    "wanted": "please",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thamks",
+    "wanted": "thanks",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thabks",
+    "wanted": "thanks",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "sorrt",
+    "wanted": "sorry",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "aorry",
+    "wanted": "sorry",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "sirry",
+    "wanted": "sorry",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "hekko",
+    "wanted": "hello",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "helko",
+    "wanted": "hello",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "hellp",
+    "wanted": "hello",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "mewting",
+    "wanted": "meeting",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "workimg",
+    "wanted": "working",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "realky",
+    "wanted": "really",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "reallt",
+    "wanted": "really",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "probabky",
+    "wanted": "probably",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "alreafy",
+    "wanted": "already",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "actualky",
+    "wanted": "actually",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "diwn",
+    "wanted": "down",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "siund",
+    "wanted": "sound",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "gwt",
+    "wanted": "get",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wsnt",
+    "wanted": "want",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wamt",
+    "wanted": "want",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "neex",
+    "wanted": "need",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "kniw",
+    "wanted": "know",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "lnow",
+    "wanted": "know",
+    "category": "adjacent",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "teh",
+    "wanted": "the",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "adn",
+    "wanted": "and",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "taht",
+    "wanted": "that",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wiht",
+    "wanted": "with",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "becuase",
+    "wanted": "because",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thier",
+    "wanted": "their",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "goign",
+    "wanted": "going",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "gonig",
+    "wanted": "going",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "knwo",
+    "wanted": "know",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "jsut",
+    "wanted": "just",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "abotu",
+    "wanted": "about",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yeha",
+    "wanted": "yeah",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "okya",
+    "wanted": "okay",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thnaks",
+    "wanted": "thanks",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "whta",
+    "wanted": "what",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thsi",
+    "wanted": "this",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yuo",
+    "wanted": "you",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "mkae",
+    "wanted": "make",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wnat",
+    "wanted": "want",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "woudl",
+    "wanted": "would",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "shoudl",
+    "wanted": "should",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "coudl",
+    "wanted": "could",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "hte",
+    "wanted": "the",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "waht",
+    "wanted": "what",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "liek",
+    "wanted": "like",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "mabye",
+    "wanted": "maybe",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "peopel",
+    "wanted": "people",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "somehting",
+    "wanted": "something",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thign",
+    "wanted": "thing",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thigns",
+    "wanted": "things",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "nwo",
+    "wanted": "now",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "konw",
+    "wanted": "know",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tihs",
+    "wanted": "this",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "htat",
+    "wanted": "that",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wrok",
+    "wanted": "work",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "porbably",
+    "wanted": "probably",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "keybaord",
+    "wanted": "keyboard",
+    "category": "transposition",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "becuse",
+    "wanted": "because",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tomorow",
+    "wanted": "tomorrow",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "remeber",
+    "wanted": "remember",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "probaly",
+    "wanted": "probably",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "definitly",
+    "wanted": "definitely",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "actully",
+    "wanted": "actually",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "beause",
+    "wanted": "because",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "somthing",
+    "wanted": "something",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "anythng",
+    "wanted": "anything",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "evrything",
+    "wanted": "everything",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thnks",
+    "wanted": "thanks",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "pleae",
+    "wanted": "please",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "helo",
+    "wanted": "hello",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "excitd",
+    "wanted": "excited",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "awsome",
+    "wanted": "awesome",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "awesom",
+    "wanted": "awesome",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "whch",
+    "wanted": "which",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wuld",
+    "wanted": "would",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "shuld",
+    "wanted": "should",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tonigt",
+    "wanted": "tonight",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "realy",
+    "wanted": "really",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "finaly",
+    "wanted": "finally",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "basicaly",
+    "wanted": "basically",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "diffrent",
+    "wanted": "different",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "intresting",
+    "wanted": "interesting",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "keybord",
+    "wanted": "keyboard",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "keyoard",
+    "wanted": "keyboard",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "agin",
+    "wanted": "again",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yeterday",
+    "wanted": "yesterday",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "bcause",
+    "wanted": "because",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thik",
+    "wanted": "think",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wht",
+    "wanted": "what",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "occured",
+    "wanted": "occurred",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "accomodate",
+    "wanted": "accommodate",
+    "category": "missing",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "untill",
+    "wanted": "until",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "meeeting",
+    "wanted": "meeting",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "calll",
+    "wanted": "call",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "whaat",
+    "wanted": "what",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thhe",
+    "wanted": "the",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thaat",
+    "wanted": "that",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "reallly",
+    "wanted": "really",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "gooing",
+    "wanted": "going",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "abouut",
+    "wanted": "about",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tyhe",
+    "wanted": "the",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thje",
+    "wanted": "the",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wherre",
+    "wanted": "where",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "okayy",
+    "wanted": "okay",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yeahh",
+    "wanted": "yeah",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thankss",
+    "wanted": "thanks",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "pleasee",
+    "wanted": "please",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "heyy",
+    "wanted": "hey",
+    "category": "extra",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "recieve",
+    "wanted": "receive",
+    "category": "spelling",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "definately",
+    "wanted": "definitely",
+    "category": "spelling",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "seperate",
+    "wanted": "separate",
+    "category": "spelling",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wierd",
+    "wanted": "weird",
+    "category": "spelling",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "beleive",
+    "wanted": "believe",
+    "category": "spelling",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tommorow",
+    "wanted": "tomorrow",
+    "category": "spelling",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "alot",
+    "wanted": "a lot",
+    "category": "spelling",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "neccessary",
+    "wanted": "necessary",
+    "category": "spelling",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "goverment",
+    "wanted": "government",
+    "category": "spelling",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "xang",
+    "wanted": "can't",
+    "category": "two-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "rhw",
+    "wanted": "the",
+    "category": "two-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yjr",
+    "wanted": "the",
+    "category": "two-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ehst",
+    "wanted": "what",
+    "category": "two-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wgst",
+    "wanted": "what",
+    "category": "two-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "gwy",
+    "wanted": "guy",
+    "category": "two-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yiy",
+    "wanted": "you",
+    "category": "two-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tgay",
+    "wanted": "that",
+    "category": "two-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "kist",
+    "wanted": "just",
+    "category": "two-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "jdybiard",
+    "wanted": "keyboard",
+    "category": "two-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "Teh",
+    "wanted": "The",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Thsi",
+    "wanted": "This",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Wjat",
+    "wanted": "What",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Yeha",
+    "wanted": "Yeah",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Ehat",
+    "wanted": "What",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Tge",
+    "wanted": "The",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Jist",
+    "wanted": "Just",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Hwy",
+    "wanted": "Hey",
+    "category": "junk",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Hry",
+    "wanted": "Hey",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Thamks",
+    "wanted": "Thanks",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Ypu",
+    "wanted": "You",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Becuase",
+    "wanted": "Because",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Dont",
+    "wanted": "Don't",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Im",
+    "wanted": "I'm",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Okya",
+    "wanted": "Okay",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Sorrt",
+    "wanted": "Sorry",
+    "category": "capital",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "Dahlsson",
+    "wanted": "Dahlsson",
+    "category": "keep",
+    "autoCap": true,
+    "set": "existing"
+  },
+  {
+    "typed": "dont",
+    "wanted": "don't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "cant",
+    "wanted": "can't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wont",
+    "wanted": "won't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "didnt",
+    "wanted": "didn't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "doesnt",
+    "wanted": "doesn't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "isnt",
+    "wanted": "isn't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wasnt",
+    "wanted": "wasn't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "arent",
+    "wanted": "aren't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "havent",
+    "wanted": "haven't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "couldnt",
+    "wanted": "couldn't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wouldnt",
+    "wanted": "wouldn't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "shouldnt",
+    "wanted": "shouldn't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "werent",
+    "wanted": "weren't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "hadnt",
+    "wanted": "hadn't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "neednt",
+    "wanted": "needn't",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "im",
+    "wanted": "I'm",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ive",
+    "wanted": "I've",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "youre",
+    "wanted": "you're",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "theyre",
+    "wanted": "they're",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thats",
+    "wanted": "that's",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "whats",
+    "wanted": "what's",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "theyll",
+    "wanted": "they'll",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "itll",
+    "wanted": "it'll",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wouldve",
+    "wanted": "would've",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "shouldve",
+    "wanted": "should've",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "couldve",
+    "wanted": "could've",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "mustve",
+    "wanted": "must've",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "theyd",
+    "wanted": "they'd",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "youd",
+    "wanted": "you'd",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "weve",
+    "wanted": "we've",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "youve",
+    "wanted": "you've",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "youll",
+    "wanted": "you'll",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thatll",
+    "wanted": "that'll",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "howd",
+    "wanted": "how'd",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "i",
+    "wanted": "I",
+    "category": "contraction",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ot",
+    "wanted": "to",
+    "category": "two-letter",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "fo",
+    "wanted": "of",
+    "category": "two-letter",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "si",
+    "wanted": "is",
+    "category": "two-letter",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ti",
+    "wanted": "it",
+    "category": "two-letter",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "og",
+    "wanted": "of",
+    "category": "two-letter",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thisis",
+    "wanted": "this is",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "inthe",
+    "wanted": "in the",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ofthe",
+    "wanted": "of the",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tothe",
+    "wanted": "to the",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "onthe",
+    "wanted": "on the",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "andthe",
+    "wanted": "and the",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "forthe",
+    "wanted": "for the",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "atthe",
+    "wanted": "at the",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "itis",
+    "wanted": "it is",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "iam",
+    "wanted": "I am",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ican",
+    "wanted": "I can",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "youare",
+    "wanted": "you are",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "willbe",
+    "wanted": "will be",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "canyou",
+    "wanted": "can you",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "seeyou",
+    "wanted": "see you",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thankyou",
+    "wanted": "thank you",
+    "category": "fused",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "inbthe",
+    "wanted": "in the",
+    "category": "space-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ofnthe",
+    "wanted": "of the",
+    "category": "space-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "whatbis",
+    "wanted": "what is",
+    "category": "space-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thatnis",
+    "wanted": "that is",
+    "category": "space-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "canbyou",
+    "wanted": "can you",
+    "category": "space-slip",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thisxaople",
+    "wanted": "thisxaople",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ill",
+    "wanted": "ill",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "its",
+    "wanted": "its",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "lets",
+    "wanted": "lets",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "were",
+    "wanted": "were",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "well",
+    "wanted": "well",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wed",
+    "wanted": "wed",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "hell",
+    "wanted": "hell",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "shell",
+    "wanted": "shell",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "id",
+    "wanted": "id",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "lol",
+    "wanted": "lol",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "lmao",
+    "wanted": "lmao",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "idk",
+    "wanted": "idk",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "gonna",
+    "wanted": "gonna",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wanna",
+    "wanted": "wanna",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "bruh",
+    "wanted": "bruh",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yeah",
+    "wanted": "yeah",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "okay",
+    "wanted": "okay",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tho",
+    "wanted": "tho",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "hmm",
+    "wanted": "hmm",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yall",
+    "wanted": "yall",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ngl",
+    "wanted": "ngl",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "lowkey",
+    "wanted": "lowkey",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "vibe",
+    "wanted": "vibe",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "sus",
+    "wanted": "sus",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "bet",
+    "wanted": "bet",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "omg",
+    "wanted": "omg",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "thx",
+    "wanted": "thx",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "pls",
+    "wanted": "pls",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wifi",
+    "wanted": "wifi",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "app",
+    "wanted": "app",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "tv",
+    "wanted": "tv",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yo",
+    "wanted": "yo",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ok",
+    "wanted": "ok",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ur",
+    "wanted": "ur",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ya",
+    "wanted": "ya",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ty",
+    "wanted": "ty",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "rn",
+    "wanted": "rn",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "fr",
+    "wanted": "fr",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "hoe",
+    "wanted": "hoe",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "abs",
+    "wanted": "abs",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "form",
+    "wanted": "form",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "from",
+    "wanted": "from",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "cloud",
+    "wanted": "cloud",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "quite",
+    "wanted": "quite",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "quiet",
+    "wanted": "quiet",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "then",
+    "wanted": "then",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "than",
+    "wanted": "than",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "the",
+    "wanted": "the",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "iPhone",
+    "wanted": "iPhone",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "ASAP",
+    "wanted": "ASAP",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "Zayd",
+    "wanted": "Zayd",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "gona",
+    "wanted": "gonna",
+    "category": "frequency",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "wana",
+    "wanted": "wanna",
+    "category": "frequency",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yesh",
+    "wanted": "yeah",
+    "category": "frequency",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "yeag",
+    "wanted": "yeah",
+    "category": "frequency",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "okat",
+    "wanted": "okay",
+    "category": "frequency",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "oaky",
+    "wanted": "okay",
+    "category": "frequency",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "hahs",
+    "wanted": "haha",
+    "category": "frequency",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "lol",
+    "wanted": "lol",
+    "category": "keep",
+    "autoCap": false,
+    "set": "existing"
+  },
+  {
+    "typed": "occassionally",
+    "wanted": "occasionally",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "neccessarily",
+    "wanted": "necessarily",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "maintainance",
+    "wanted": "maintenance",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "enviroment",
+    "wanted": "environment",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "pharamcy",
+    "wanted": "pharmacy",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "restaraunt",
+    "wanted": "restaurant",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "subcription",
+    "wanted": "subscription",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "transciption",
+    "wanted": "transcription",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "calender",
+    "wanted": "calendar",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "compatiblity",
+    "wanted": "compatibility",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "authentcation",
+    "wanted": "authentication",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "syncronize",
+    "wanted": "synchronize",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "availablity",
+    "wanted": "availability",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "embarassing",
+    "wanted": "embarrassing",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "relevent",
+    "wanted": "relevant",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "privelege",
+    "wanted": "privilege",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "donuut",
+    "wanted": "donut",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "glitchyy",
+    "wanted": "glitchy",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "backemd",
+    "wanted": "backend",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  },
+  {
+    "typed": "medss",
+    "wanted": "meds",
+    "category": "exploratory",
+    "autoCap": false,
+    "set": "new"
+  }
+]

@@ -1,0 +1,230 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index e138224..cf48a30 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -203,7 +203,7 @@ features = ["native-activity"]
+ [target.'cfg(target_os = "android")'.dev-dependencies.paranoid-android]
+ version = "0.2.2"
+ 
+-[target.'cfg(target_vendor = "apple")'.dependencies.system-configuration]
++[target.'cfg(target_os = "macos")'.dependencies.system-configuration]
+ version = "0.8"
+ 
+ [target."cfg(windows)".dependencies.ipconfig]
+diff --git a/src/system_config/apple.rs b/src/system_config/apple.rs
+index 83fa6f7..9b840c4 100644
+--- a/src/system_config/apple.rs
++++ b/src/system_config/apple.rs
+@@ -1,8 +1,10 @@
+ //! System DNS configuration from the Apple SystemConfiguration framework.
+ //!
+-//! Used on all Apple platforms (macOS, iOS, tvOS, watchOS). They do not keep
+-//! `/etc/resolv.conf` in sync with the live resolver configuration (and on iOS
+-//! the sandbox hides it entirely), so reading that file (as the generic Unix
++//! Used on macOS only. The dynamic store functions are `API_UNAVAILABLE(ios,
++//! tvos, watchos)`; those platforms use the libresolv reader in `apple_resolv`.
++//! macOS does not keep
++//! `/etc/resolv.conf` in sync with the live resolver configuration, so reading
++//! that file (as the generic Unix
+ //! reader does) can miss the nameservers the system is actually using. Instead
+ //! we read the primary resolver from the dynamic store key
+ //! `State:/Network/Global/DNS`, the way the old hickory-resolver path did on
+diff --git a/src/system_config/apple_resolv.rs b/src/system_config/apple_resolv.rs
+new file mode 100644
+index 0000000..30645c4
+--- /dev/null
++++ b/src/system_config/apple_resolv.rs
+@@ -0,0 +1,153 @@
++//! System DNS configuration on iOS, tvOS, watchOS and visionOS, from libresolv.
++//!
++//! The SystemConfiguration dynamic store the macOS reader uses is
++//! `API_UNAVAILABLE(ios, tvos, watchos)`: `SCDynamicStoreCreateWithOptions` and
++//! `SCDynamicStoreCopyValue` are not public API there, and App Store review
++//! rejects apps that import them. `res_ninit` and `res_getservers` from
++//! `<resolv.h>` are public on those platforms and report the nameservers the
++//! system is using. This is the approach netdev took for the same reason
++//! (shellrow/netdev#195).
++//!
++//! Search domains are not read: they live inside `struct __res_state`, which is
++//! kept opaque here.
++
++use std::{
++    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
++    os::raw::c_int,
++};
++
++use super::{Config, DnsProtocol, Hosts, Nameserver};
++
++/// `struct __res_state` from `<resolv.h>`, kept opaque: 552 bytes, 8-aligned on
++/// 64-bit Apple platforms.
++#[repr(C, align(8))]
++struct ResState([u8; 552]);
++
++/// `union res_sockaddr_union` from `<resolv.h>`: 128 bytes, 8-aligned.
++#[repr(C, align(8))]
++#[derive(Clone, Copy)]
++struct ResSockaddrUnion([u8; 128]);
++
++/// `MAXNS` from `<resolv.h>`.
++const MAXNS: usize = 3;
++/// `AF_INET` and `AF_INET6` from `<sys/socket.h>` on Apple platforms.
++const AF_INET: u8 = 2;
++const AF_INET6: u8 = 30;
++
++#[link(name = "resolv")]
++unsafe extern "C" {
++    fn res_9_ninit(state: *mut ResState) -> c_int;
++    fn res_9_getservers(state: *mut ResState, set: *mut ResSockaddrUnion, cnt: c_int) -> c_int;
++    fn res_9_ndestroy(state: *mut ResState);
++}
++
++/// Reads the system nameservers through libresolv.
++///
++/// Also reads the hosts file.
++pub(super) fn read_system_dns() -> Result<Config, std::io::Error> {
++    let mut state = ResState([0; 552]);
++    let mut servers = [ResSockaddrUnion([0; 128]); MAXNS];
++    // SAFETY: `state` is zeroed and as large and aligned as `struct __res_state`,
++    // as `res_ninit` requires, and destroyed only after a successful init.
++    // `servers` holds `MAXNS` unions, the count passed.
++    let count = unsafe {
++        if res_9_ninit(&mut state) != 0 {
++            return Err(std::io::Error::other("res_ninit failed"));
++        }
++        let count = res_9_getservers(&mut state, servers.as_mut_ptr(), MAXNS as c_int);
++        res_9_ndestroy(&mut state);
++        count
++    };
++    let nameservers = servers
++        .iter()
++        .take(usize::try_from(count).unwrap_or(0).min(MAXNS))
++        .filter_map(|server| nameserver(&server.0))
++        .collect();
++
++    Ok(Config {
++        nameservers,
++        search_domains: Vec::new(),
++        ndots: None,
++        hosts: Hosts::from_system(),
++    })
++}
++
++/// Reads one `res_sockaddr_union` as a nameserver.
++///
++/// The layouts are BSD `sockaddr_in` (`sin_len`, `sin_family`, `sin_port` at 2,
++/// `sin_addr` at 4) and `sockaddr_in6` (`sin6_len`, `sin6_family`, `sin6_port` at
++/// 2, `sin6_addr` at 8, `sin6_scope_id` at 24). A zero port means the default.
++/// An IPv6 address with a scope id (a link-local nameserver such as
++/// `fe80::1%en0`) is skipped: it needs interface binding the resolver does not
++/// do, and the macOS reader skips those too.
++fn nameserver(addr: &[u8; 128]) -> Option<Nameserver> {
++    let port = match u16::from_be_bytes([addr[2], addr[3]]) {
++        0 => DnsProtocol::Udp.port(),
++        port => port,
++    };
++    let ip = match addr[1] {
++        AF_INET => IpAddr::V4(Ipv4Addr::new(addr[4], addr[5], addr[6], addr[7])),
++        AF_INET6 => {
++            let scope = u32::from_ne_bytes([addr[24], addr[25], addr[26], addr[27]]);
++            if scope != 0 {
++                return None;
++            }
++            let mut octets = [0u8; 16];
++            octets.copy_from_slice(&addr[8..24]);
++            IpAddr::V6(Ipv6Addr::from(octets))
++        }
++        _ => return None,
++    };
++    if ip.is_unspecified() {
++        return None;
++    }
++    Some(Nameserver::new(SocketAddr::new(ip, port), DnsProtocol::Udp))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn reads_sockaddr_in() {
++        let mut addr = [0u8; 128];
++        addr[0] = 16;
++        addr[1] = AF_INET;
++        addr[4..8].copy_from_slice(&[192, 168, 1, 1]);
++        let server = nameserver(&addr).unwrap();
++        assert_eq!(server.addr(), "192.168.1.1:53".parse().unwrap());
++        addr[2..4].copy_from_slice(&5353u16.to_be_bytes());
++        assert_eq!(nameserver(&addr).unwrap().addr(), "192.168.1.1:5353".parse().unwrap());
++    }
++
++    #[test]
++    fn reads_sockaddr_in6_and_skips_scoped() {
++        let mut addr = [0u8; 128];
++        addr[0] = 28;
++        addr[1] = AF_INET6;
++        let ip: Ipv6Addr = "2606:4700:4700::1111".parse().unwrap();
++        addr[8..24].copy_from_slice(&ip.octets());
++        assert_eq!(nameserver(&addr).unwrap().addr(), "[2606:4700:4700::1111]:53".parse().unwrap());
++        addr[24..28].copy_from_slice(&12u32.to_ne_bytes());
++        assert!(nameserver(&addr).is_none());
++    }
++
++    /// Needs a device or a simulator with a network. Build the test binary with
++    /// `cargo test --lib --no-run --target aarch64-apple-ios-sim`, then run it with
++    /// `xcrun simctl spawn <simulator> <binary> live_system_dns --ignored --nocapture`.
++    #[test]
++    #[ignore = "reads the live system configuration"]
++    fn live_system_dns() {
++        let config = read_system_dns().unwrap();
++        println!("nameservers from libresolv: {:?}", config.nameservers);
++        assert!(!config.nameservers.is_empty());
++    }
++
++    #[test]
++    fn skips_empty_and_unknown() {
++        assert!(nameserver(&[0u8; 128]).is_none());
++        let mut addr = [0u8; 128];
++        addr[1] = AF_INET;
++        assert!(nameserver(&addr).is_none(), "0.0.0.0 is not a nameserver");
++    }
++}
+diff --git a/src/system_config.rs b/src/system_config.rs
+index 2a3a5a4..d775813 100644
+--- a/src/system_config.rs
++++ b/src/system_config.rs
+@@ -1,8 +1,9 @@
+ //! Reading the host system's DNS configuration.
+ //!
+ //! The source is platform-specific: `/etc/resolv.conf` on Unix, the
+-//! SystemConfiguration framework on Apple platforms, the network adapters on
+-//! Windows, and a Java Native Interface (JNI) call on Android. The per-platform
++//! SystemConfiguration framework on macOS, libresolv on the other Apple
++//! platforms, the network adapters on Windows, and a Java Native Interface
++//! (JNI) call on Android. The per-platform
+ //! readers live in the submodules; this module dispatches to them via
+ //! [`read_system`]. The [`Config`] they produce lives in [`crate::config`].
+ 
+@@ -12,8 +13,10 @@ use super::{DnsProtocol, Nameserver, config::Config};
+ 
+ #[cfg(any(target_os = "android", doc))]
+ mod android;
+-#[cfg(target_vendor = "apple")]
++#[cfg(target_os = "macos")]
+ mod apple;
++#[cfg(all(target_vendor = "apple", not(target_os = "macos")))]
++mod apple_resolv;
+ mod hosts;
+ #[cfg(all(unix, not(any(target_os = "android", target_vendor = "apple"))))]
+ mod unix;
+@@ -24,8 +27,10 @@ mod windows;
+ pub use android::install_android_jni_context;
+ #[cfg(target_os = "android")]
+ use android::read_system_dns;
+-#[cfg(target_vendor = "apple")]
++#[cfg(target_os = "macos")]
+ use apple::read_system_dns;
++#[cfg(all(target_vendor = "apple", not(target_os = "macos")))]
++use apple_resolv::read_system_dns;
+ pub(crate) use hosts::Hosts;
+ #[cfg(all(unix, not(any(target_os = "android", target_vendor = "apple"))))]
+ use unix::read_system_dns;

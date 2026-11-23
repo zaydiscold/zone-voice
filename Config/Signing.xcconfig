@@ -1,0 +1,14 @@
+// by zayd/cold @ zayd.wtf
+//
+// Who signs Zone, and the identifiers that follow from it. The defaults are the maintainer's.
+//
+// To build Zone on your own iPhone with your own Apple ID (a free account works), copy
+// Local.xcconfig.example to Local.xcconfig in this folder and put your values there. It is
+// gitignored, so nothing here has to change.
+
+DEVELOPMENT_TEAM = 9H224CYHBX
+ZONE_BUNDLE_PREFIX = wtf.zayd
+// An App Group belongs to one team, so it follows the prefix. The app and the keyboard must share it.
+ZONE_APP_GROUP = group.$(ZONE_BUNDLE_PREFIX).zone
+
+#include? "Local.xcconfig"
