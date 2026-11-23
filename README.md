@@ -1,6 +1,8 @@
 # Zone
 
-made this because I broke my hand and Apple's voice transcription is terrible
+I built this because I broke my good hand and god damn it Apple stuff sucks; the keyboard, the dictation, the swipe. So we have all of that made to be wonderful and more
+
+<p align="center"><img src="media/xray.jpg" width="360" alt="X-ray of my broken right hand, with the plate holding it together"></p>
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 ![iOS 17+](https://img.shields.io/badge/iOS-17%2B-lightgrey)
