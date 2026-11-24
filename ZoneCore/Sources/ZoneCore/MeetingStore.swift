@@ -47,6 +47,25 @@ public struct Meeting: Codable, Identifiable, Equatable, Sendable {
     /// Where the recording lost the microphone (a call, Siri, an alarm) and for how long, in
     /// meeting time. Nil on meetings recorded before gaps were kept.
     public var gaps: [MeetingGap]?
+    /// Speakers a merge brought in whose voices have not been compared with the people already
+    /// here yet, one list per merged recording, oldest first (`MeetingVoiceMatch`). Nil when
+    /// nothing waits. It stays on disk until the comparison ran, so closing Zone in the middle
+    /// only delays it.
+    public var speakerGroupsToMatch: [[String]]?
+    /// Candidate pairs left for review. Resolve them against current person IDs so Undo
+    /// can bring the notice back, and finishing the joins dismisses it.
+    public var voiceReviewCandidates: [String: [String]]?
+    /// Named people (and "me") with a voice print that Transcribe again kept, when the pass
+    /// after it labeled nobody: diarization failed or heard no voices, the speaker model was
+    /// missing, or labels were off. They are not listed, because nobody in the transcript is
+    /// them, but the next Transcribe again gives them back to the speaker pass to find by voice
+    /// (`resetTranscript`). Nil when nothing is held, and on recordings from before this.
+    public var heldSpeakers: [MeetingSpeaker]?
+
+    public var visibleMessage: String? {
+        guard message == MeetingVoiceMatch.unmatchedMessage, let pairs = voiceReviewCandidates else { return message }
+        return MeetingVoiceMatch.openPairs(pairs, in: self).isEmpty ? nil : message
+    }
 
     public var duration: Double { parts.reduce(0) { $0 + $1.seconds } }
 
@@ -79,14 +98,56 @@ public struct Meeting: Codable, Identifiable, Equatable, Sendable {
         return "Meeting, \(day) at \(formatter.string(from: date))"
     }
 
-    /// Display name for a speaker id: the person's name, "Me", or "Speaker N".
+    /// Display name for a speaker id: the person's name, "Me", or "Speaker N". A voice joined to
+    /// someone (`MeetingSpeaker.sameAs`) reads as that person, and people are numbered in the
+    /// order they were first heard, with no number spent on a joined voice.
     public func speakerName(_ id: String?) -> String? {
         guard let id else { return nil }
-        guard let speaker = speakers.first(where: { $0.id == id }) else { return id }
+        guard let key = person(id), let speaker = speakers.first(where: { $0.id == key }) else { return id }
         if let name = speaker.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { return name }
         if speaker.isMe { return "Me" }
-        let number = speakers.firstIndex(where: { $0.id == id }).map { $0 + 1 } ?? 0
+        let number = people.firstIndex(where: { $0.id == key }).map { $0 + 1 } ?? 0
         return "Speaker \(number)"
+    }
+}
+
+extension Meeting {
+    /// The people a fresh speaker pass can find again by voice: named or "me", each with a
+    /// voice print (their own, or one of a voice joined to them), as people joined to nobody.
+    /// `extra` (held people) are added after them, skipped when their print is already here
+    /// and renumbered when their id is taken.
+    func speakerAnchors(adding extra: [MeetingSpeaker] = []) -> [MeetingSpeaker] {
+        var kept: [MeetingSpeaker] = people.compactMap { person in
+            guard person.isMe || !(person.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let voice = person.voice ?? voices(of: person.id).compactMap(\.voice).first else { return nil }
+            var anchor = person
+            anchor.voice = voice
+            anchor.sameAs = nil
+            return anchor
+        }
+        var taken = Set(kept.map(\.id))
+        var next = ((kept + extra).compactMap { Int($0.id.dropFirst()) }.max() ?? 0) + 1
+        for var speaker in extra where speaker.voice != nil && !kept.contains(where: { $0.voice == speaker.voice }) {
+            speaker.sameAs = nil
+            if taken.contains(speaker.id) {
+                speaker.id = "S\(next)"
+                next += 1
+            }
+            taken.insert(speaker.id)
+            kept.append(speaker)
+        }
+        return kept
+    }
+
+    /// A pass from the start that labeled nobody: the transcript lists no one, and the people
+    /// Transcribe again kept wait in `heldSpeakers` for the next Transcribe again instead of
+    /// being lost. Returns whether anyone is held.
+    @discardableResult
+    public mutating func holdSpeakersForNextPass() -> Bool {
+        let held = speakerAnchors(adding: heldSpeakers ?? [])
+        heldSpeakers = held.isEmpty ? nil : held
+        speakers = []
+        return !held.isEmpty
     }
 }
 
@@ -117,10 +178,27 @@ public struct MeetingSpeaker: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var name: String?
     public var isMe: Bool
-    public init(id: String, name: String? = nil, isMe: Bool = false) {
+    /// The speaker model's voice print for this person (256 numbers), kept so a resumed or
+    /// merged stretch can find the same person again. Nil on meetings labeled before 1.0.5 and
+    /// on speakers the model gave no print.
+    public var voice: [Float]?
+    /// True when Zone gave this speaker their name (or "me") by recognizing their voice from
+    /// an earlier meeting (`MeetingKnownVoices`), until someone saves the name in this meeting.
+    /// A recognized name is never learned from, so a wrong guess cannot teach itself.
+    public var recognized: Bool?
+    /// The speaker this voice is the same person as (`Meeting.person`). Its lines keep this id
+    /// and show under that person, so the two can be separated again. Nil for a person.
+    public var sameAs: String?
+    /// The editor confirmed two people share this name. Older recordings grouped equal labels.
+    public var sharesName: Bool?
+    public init(id: String, name: String? = nil, isMe: Bool = false, voice: [Float]? = nil, recognized: Bool? = nil,
+                sameAs: String? = nil) {
         self.id = id
         self.name = name
         self.isMe = isMe
+        self.voice = voice
+        self.recognized = recognized
+        self.sameAs = sameAs
     }
 }
 
@@ -137,7 +215,7 @@ public struct MeetingTurn: Codable, Equatable, Sendable {
 }
 
 public enum MeetingStoreError: LocalizedError, Equatable {
-    case notFound, stillRecording, busy, sameMeeting, noAudio, transcriptChanged
+    case notFound, stillRecording, busy, sameMeeting, noAudio, transcriptChanged, differentSpeakerNames
     public var errorDescription: String? {
         switch self {
         case .notFound: return "That meeting is no longer on this iPhone."
@@ -145,6 +223,7 @@ public enum MeetingStoreError: LocalizedError, Equatable {
         case .busy: return "Wait for the transcript to finish first."
         case .sameMeeting: return "Pick a different meeting to merge."
         case .noAudio: return "This meeting has no audio."
+        case .differentSpeakerNames: return "These voices have different names. Check their names before combining them."
         case .transcriptChanged: return "The transcript changed while you were editing. Open the editor again to keep the latest version."
         }
     }
@@ -363,21 +442,53 @@ public final class MeetingStore: @unchecked Sendable {
         try update(id) { $0.title = trimmed }
     }
 
-    public func renameSpeaker(_ id: UUID, speaker: String, to name: String) throws {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Names the person a voice belongs to. An empty name clears it.
+    @discardableResult
+    public func renameSpeaker(_ id: UUID, speaker: String, to name: String, sharesName: Bool = false) throws -> Meeting {
         try update(id) { meeting in
-            guard let index = meeting.speakers.firstIndex(where: { $0.id == speaker }) else { return }
-            meeting.speakers[index].name = trimmed.isEmpty ? nil : trimmed
+            MeetingSpeakerEdit.rename(speaker, to: name, in: &meeting)
+            if let i = meeting.speakers.firstIndex(where: { $0.id == meeting.person(speaker) }) {
+                meeting.speakers[i].sharesName = sharesName ? true : nil
+            }
         }
     }
 
-    /// Marks one speaker as the phone's owner; only one speaker can be "me". Pass nil to clear.
-    public func setMe(_ id: UUID, speaker: String?) throws {
+    /// Marks the person a voice belongs to as the phone's owner. When someone else in the
+    /// meeting already is, the two are joined as one person: "me" is never taken away here
+    /// (`moveMe` does that, on purpose). Pass nil to clear.
+    @discardableResult
+    public func setMe(_ id: UUID, speaker: String?) throws -> Meeting {
         try update(id) { meeting in
-            for index in meeting.speakers.indices {
-                meeting.speakers[index].isMe = meeting.speakers[index].id == speaker
+            MeetingSpeakerEdit.setMe(speaker, in: &meeting)
+            if let speaker, let me = meeting.me(), meeting.person(speaker) != me.id {
+                throw MeetingStoreError.differentSpeakerNames
             }
         }
+    }
+
+    /// Makes this person the only "me", taking it from whoever had it.
+    @discardableResult
+    public func moveMe(_ id: UUID, to speaker: String?) throws -> Meeting {
+        try update(id) { MeetingSpeakerEdit.moveMe(to: speaker, in: &$0) }
+    }
+
+    /// `speaker` and `target` are the same person: `speaker`'s lines show under `target`.
+    @discardableResult
+    public func joinSpeakers(_ id: UUID, speaker: String, into target: String) throws -> Meeting {
+        try update(id) { MeetingSpeakerEdit.join(speaker, into: target, in: &$0) }
+    }
+
+    /// A joined voice becomes its own speaker again.
+    @discardableResult
+    public func separateSpeaker(_ id: UUID, speaker: String) throws -> Meeting {
+        try update(id) { MeetingSpeakerEdit.separate(speaker, in: &$0) }
+    }
+
+    /// Undo for the speaker changes above: puts an earlier list back when it still describes
+    /// this transcript's voices.
+    @discardableResult
+    public func restoreSpeakers(_ id: UUID, to speakers: [MeetingSpeaker]) throws -> Meeting {
+        try update(id) { MeetingSpeakerEdit.restore(speakers, in: &$0) }
     }
 
     /// Throws away the transcript so the whole meeting is transcribed again.
@@ -393,9 +504,18 @@ public final class MeetingStore: @unchecked Sendable {
             meeting.message = nil
             meeting.speakerNotice = nil
             meeting.status = .recorded
-            // A fresh diarization numbers voices from scratch and cannot know which new number
-            // is which old name, so the old speakers go with the old transcript.
-            meeting.speakers = []
+            // Every stretch is labeled again, so the old speaker model no longer describes it.
+            meeting.diarizer = nil
+            // A fresh diarization numbers voices from scratch. Only speakers someone named or
+            // marked as "me", and whose voice print was kept, stay: the new pass gives them their
+            // names back by voice (MeetingSpeakerLabels) and drops any it does not hear again.
+            // Joined voices go: the new pass hears the whole meeting at once and has no use
+            // for them. A person whose own print is missing keeps one of theirs. People an
+            // earlier unlabeled pass held back (`heldSpeakers`) come back for this pass too.
+            meeting.speakers = meeting.speakerAnchors(adding: meeting.heldSpeakers ?? [])
+            meeting.heldSpeakers = nil
+            meeting.speakerGroupsToMatch = nil
+            meeting.voiceReviewCandidates = nil
         }
     }
 
@@ -428,7 +548,7 @@ public final class MeetingStore: @unchecked Sendable {
     /// The later meeting is deleted. A transcript is kept only where it is a continuous
     /// prefix of the joined audio, so transcription resumes at the first untranscribed second.
     @discardableResult
-    public func merge(_ firstID: UUID, _ secondID: UUID, now: Date = Date()) throws -> Meeting {
+    public func merge(_ firstID: UUID, _ secondID: UUID, now: Date = Date(), queueVoiceMatch: Bool = false) throws -> Meeting {
         lock.lock(); defer { lock.unlock() }
         guard firstID != secondID else { throw MeetingStoreError.sameMeeting }
         let one = try refreshed(firstID), two = try refreshed(secondID)
@@ -464,33 +584,64 @@ public final class MeetingStore: @unchecked Sendable {
         // A crash from here until the later meeting is deleted is repaired on the next launch
         // by `recoverInterrupted` (see `repairParts`).
 
-        // Speakers: map the later meeting's ids into the earlier meeting's space.
+        // Speakers: every voice of the later recording comes in under a fresh id. One that is
+        // someone already here points at that person (`MeetingSpeaker.sameAs`) and never
+        // replaces them, so a wrong match can be separated again. "Me" and a shared name match
+        // first, then voice prints (`MeetingVoiceMatch`), unless the two were given different
+        // names: what someone typed wins over the model.
         var mapping: [String: String] = [:]
-        var speakers = earlier.speakers
-        var nextNumber = (speakers.compactMap { Int($0.id.dropFirst()) }.max() ?? 0) + 1
-        for speaker in later.speakers {
-            if speaker.isMe, let me = speakers.first(where: { $0.isMe }) {
-                mapping[speaker.id] = me.id
-            } else if let name = speaker.name?.lowercased(), !name.isEmpty,
-                      let same = speakers.first(where: { $0.name?.lowercased() == name }) {
-                mapping[speaker.id] = same.id
-            } else {
-                let newID = "S\(nextNumber)"
-                nextNumber += 1
-                mapping[speaker.id] = newID
-                var copy = speaker
-                copy.id = newID
-                if copy.isMe && speakers.contains(where: { $0.isMe }) { copy.isMe = false }
-                speakers.append(copy)
-            }
+        var nextNumber = ((earlier.speakers + (earlier.heldSpeakers ?? [])).compactMap { Int($0.id.dropFirst()) }.max() ?? 0) + 1
+        func fresh() -> String {
+            defer { nextNumber += 1 }
+            return "S\(nextNumber)"
         }
+        for speaker in later.speakers { mapping[speaker.id] = fresh() }
+        // People the later recording held back after an unlabeled pass stay held, under fresh ids.
+        let laterHeld = (later.heldSpeakers ?? []).map { speaker -> MeetingSpeaker in
+            var copy = speaker
+            copy.id = fresh()
+            copy.sameAs = nil
+            return copy
+        }
+        if !laterHeld.isEmpty { earlier.heldSpeakers = (earlier.heldSpeakers ?? []) + laterHeld }
         // A segment voice the later meeting does not list would otherwise keep its raw id and
         // could land on a different person of the earlier meeting with the same id.
-        for raw in Set(later.segments.compactMap(\.speaker)).sorted() where mapping[raw] == nil {
-            let newID = "S\(nextNumber)"
-            nextNumber += 1
-            mapping[raw] = newID
-            speakers.append(MeetingSpeaker(id: newID))
+        let unlisted = Set(later.segments.compactMap(\.speaker)).sorted().filter { mapping[$0] == nil }
+        for raw in unlisted { mapping[raw] = fresh() }
+        // The later transcript survives only behind a finished earlier one. When it is redone,
+        // its numbered voices mean nothing any more; only people someone named, with a print to
+        // find them by, are kept for the new pass (as Transcribe again keeps them).
+        let keepsLaterTranscript = earlierComplete && laterComplete
+        let incoming: [MeetingSpeaker] = keepsLaterTranscript
+            ? later.speakers.map { speaker -> MeetingSpeaker in
+                var copy = speaker
+                copy.id = mapping[speaker.id] ?? speaker.id
+                copy.sameAs = speaker.sameAs.flatMap { mapping[$0] }
+                return copy
+            } + unlisted.map { MeetingSpeaker(id: mapping[$0] ?? $0) }
+            : later.people.compactMap { person -> MeetingSpeaker? in
+                guard person.isMe || !(person.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      let voice = person.voice ?? later.voices(of: person.id).compactMap(\.voice).first else { return nil }
+                var copy = person
+                copy.id = mapping[person.id] ?? person.id
+                copy.voice = voice
+                return copy
+            }
+        let earlierPeople = earlier.people.map(\.id)
+        earlier.speakers += incoming
+        for speaker in incoming where speaker.sameAs == nil {
+            if speaker.isMe, let me = earlier.people.first(where: { $0.isMe && earlierPeople.contains($0.id) }) {
+                if MeetingVoiceMatch.compatible(speaker, me) {
+                    MeetingSpeakerEdit.join(speaker.id, into: me.id, in: &earlier)
+                } else if let index = earlier.speakers.firstIndex(where: { $0.id == speaker.id }) {
+                    // Both names survive. The earliest recording keeps the single owner label.
+                    earlier.speakers[index].isMe = false
+                }
+            } else if let name = speaker.name, speaker.sharesName != true,
+                      let same = earlier.personNamed(name, except: speaker.id), same.sharesName != true,
+                      earlierPeople.contains(same.id) {
+                MeetingSpeakerEdit.join(speaker.id, into: same.id, in: &earlier)
+            }
         }
         let shifted = later.segments.map {
             MeetingSegment(start: $0.start + offset, end: $0.end + offset,
@@ -501,7 +652,6 @@ public final class MeetingStore: @unchecked Sendable {
         earlier.recordingNotice = [earlier.recordingNotice, later.recordingNotice]
             .compactMap { $0 }.joined(separator: "\n")
         if earlier.recordingNotice?.isEmpty == true { earlier.recordingNotice = nil }
-        earlier.speakers = speakers
         let laterGaps = (later.gaps ?? []).map { MeetingGap(at: $0.at + offset, seconds: $0.seconds, reason: $0.reason) }
         if !laterGaps.isEmpty { earlier.gaps = (earlier.gaps ?? []) + laterGaps }
         // Only a transcribed prefix can be resumed: when the earlier meeting is unfinished, the
@@ -513,6 +663,35 @@ public final class MeetingStore: @unchecked Sendable {
                 earlier.transcribedThrough = offset + later.duration
             }
         }
+        // Voices: the later recording's own waiting groups stay behind this merge's group, so
+        // each is compared with everyone who was there before it.
+        let laterGroups = (later.speakerGroupsToMatch ?? []).map { $0.compactMap { mapping[$0] } }
+        let waitingAlready = Set(laterGroups.joined())
+        let group = incoming.map(\.id).filter { !waitingAlready.contains($0) }
+        let open = earlier.people.filter { group.contains($0.id) }
+        let joinedTo = Set(earlier.speakers.filter { group.contains($0.id) }.compactMap { earlier.person($0.id) })
+        let free = earlier.people.filter { earlierPeople.contains($0.id) && !joinedTo.contains($0.id) }
+        if keepsLaterTranscript, let candidates = later.voiceReviewCandidates {
+            var combined = earlier.voiceReviewCandidates ?? [:]
+            for (source, targets) in candidates {
+                guard let newSource = mapping[source] else { continue }
+                let newTargets = targets.compactMap { mapping[$0] }
+                if !newTargets.isEmpty { combined[newSource] = newTargets }
+            }
+            earlier.voiceReviewCandidates = combined.isEmpty ? nil : combined
+        }
+        if !keepsLaterTranscript {
+            // Nothing to compare: the redone stretch finds its people by voice as it is labeled.
+        } else if !open.isEmpty, !free.isEmpty {
+            earlier.speakerGroupsToMatch = (earlier.speakerGroupsToMatch ?? []) + [group] + laterGroups
+        } else if !laterGroups.isEmpty {
+            earlier.speakerGroupsToMatch = (earlier.speakerGroupsToMatch ?? []) + laterGroups
+        }
+        // With a print on every voice in play the answer is known now. Recordings labeled
+        // before prints were kept wait for the app to listen to them (`MeetingVoiceMatch.spans`).
+        if !queueVoiceMatch, earlier.speakerGroupsToMatch != nil, MeetingVoiceMatch.voicesNeedingPrints(in: earlier).isEmpty {
+            MeetingVoiceMatch.resolve(&earlier)
+        }
         earlier.turns = nil
         // The hint described one recording, not the newly combined set of voices.
         earlier.expectedSpeakerCount = nil
@@ -520,10 +699,9 @@ public final class MeetingStore: @unchecked Sendable {
         let total = earlier.duration
         earlier.status = earlier.transcribedThrough >= total - 0.05 && !earlier.segments.isEmpty ? .done : .recorded
         earlier.progress = total > 0 ? min(earlier.transcribedThrough / total, 1) : 0
-        // Each part was diarized on its own, so one voice can carry two numbers.
-        earlier.message = earlier.status == .done && !one.speakers.isEmpty && !two.speakers.isEmpty
-            ? "Speakers in each part are numbered separately. Give the same person the same name, or Transcribe again to match voices across the whole meeting (names start over)."
-            : nil
+        // Each part was labeled on its own, so a voice the prints could not match can carry two
+        // numbers. While voices still wait to be compared, the app says so itself.
+        earlier.message = earlier.status == .done && earlier.voiceReviewCandidates != nil ? MeetingVoiceMatch.unmatchedMessage : nil
         earlier.updatedAt = now
         do { try save(earlier) } catch {
             for step in undo.reversed() { try? FileManager.default.moveItem(at: step.from, to: step.to) }

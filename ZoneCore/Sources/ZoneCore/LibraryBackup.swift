@@ -6,9 +6,11 @@ public struct LibraryNote: Codable, Identifiable, Equatable, Sendable {
     public let id: UUID
     public var text: String
     public let createdAt: Date
+    public var recordingID: UUID?
     public var editedAt: Date?
 
-    public init(id: UUID = UUID(), text: String, createdAt: Date = Date(), editedAt: Date? = nil) {
+    public init(id: UUID = UUID(), text: String, createdAt: Date = Date(), editedAt: Date? = nil, recordingID: UUID? = nil) {
+        self.recordingID = recordingID
         self.id = id
         self.text = text
         self.createdAt = createdAt
@@ -24,6 +26,7 @@ public struct LibraryBackup: Codable, Sendable {
     public var notes: [LibraryNote]
     public var dictations: [TranscriptRecord]
     public var meetings: [Meeting]
+    public var vocabulary: PersonalVocabulary.Document?
     public var historyArchive: Data?
     public var historyRecoveryFiles: [String: Data]?
 
@@ -48,6 +51,7 @@ public struct LibraryBackup: Codable, Sendable {
         decoder.dateDecodingStrategy = .deferredToDate
         let backup = try decoder.decode(Self.self, from: data)
         guard backup.formatVersion == 1 else { throw LibraryBackupError.newerVersion }
+        if let vocabulary = backup.vocabulary, vocabulary.version != 1 { throw LibraryBackupError.newerVersion }
         if let archive = backup.historyArchive {
             let archiveIDs = Set(try TranscriptHistory.recordsInBackup(archive).map(\.id))
             guard Set(backup.dictations.map(\.id)).isSubset(of: archiveIDs) else { throw LibraryBackupError.invalidDocument }
@@ -86,12 +90,16 @@ public struct LibraryBackup: Codable, Sendable {
     /// Newer snapshots win on matching IDs; a later save preserves edits.
     public func accumulating(_ previous: Self) -> Self {
         var merged = self
+        if let older = previous.vocabulary {
+            if merged.vocabulary == nil { merged.vocabulary = older }
+            else { merged.vocabulary?.merge(older) }
+        }
         merged.notes += previous.notes.filter { old in !notes.contains { $0.id == old.id } }
         merged.dictations += previous.dictations.filter { old in !dictations.contains { $0.id == old.id } }
         merged.meetings += previous.meetings.filter { old in !meetings.contains { $0.id == old.id } }
         merged.historyRecoveryFiles = (previous.historyRecoveryFiles ?? [:]).merging(historyRecoveryFiles ?? [:]) { _, current in current }
-        if let data = previous.historyArchive {
-            let old = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        if previous.historyArchive != nil || historyArchive != nil {
+            let old = previous.historyArchive.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
             var current = historyArchive.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
             var records = current["records"] as? [Any] ?? []
             var ids = Set(records.compactMap { (($0 as? [String: Any])?["id"] as? String)?.uppercased() })
@@ -104,6 +112,18 @@ public struct LibraryBackup: Codable, Sendable {
                           idless.insert(data).inserted {
                     records.append(record)
                 }
+            }
+            func receipts(_ object: Any?) -> DictationReceipts? {
+                guard let object, let data = try? JSONSerialization.data(withJSONObject: object, options: .fragmentsAllowed) else { return nil }
+                return try? JSONDecoder().decode(DictationReceipts.self, from: data)
+            }
+            var stats = receipts(current["stats"]) ?? DictationReceipts()
+            if let prior = receipts(old?["stats"]) { stats.restore(prior, accumulating: true) }
+            stats.reset = nil
+            if stats != DictationReceipts(), let data = try? JSONEncoder().encode(stats) {
+                current["stats"] = try? JSONSerialization.jsonObject(with: data)
+            } else {
+                current.removeValue(forKey: "stats")
             }
             current["records"] = records
             current["retention"] = "untilDeleted"
@@ -169,7 +189,9 @@ public enum LibraryBackupFiles {
         if accumulate, fm.fileExists(atPath: manifest.path) {
             let old = try read(folder)
             previous = (old, try Data(contentsOf: manifest))
-            backup = snapshot.accumulating(old)
+        }
+        if accumulate {
+            backup = snapshot.accumulating(previous?.backup ?? LibraryBackup(notes: [], dictations: [], meetings: []))
         }
         for meeting in snapshot.meetings {
             let destination = folder.appendingPathComponent("Meetings/\(meeting.id.uuidString)", isDirectory: true)

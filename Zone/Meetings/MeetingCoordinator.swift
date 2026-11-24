@@ -1,6 +1,7 @@
 // by zayd/cold @ zayd.wtf
 
 import AVFoundation
+import ActivityKit
 import Foundation
 import Observation
 import UIKit
@@ -30,7 +31,7 @@ final class MeetingCoordinator {
     /// Seconds of audio captured in the current recording (pauses excluded).
     private(set) var recordedSeconds: Double = 0
     /// Recent levels for the wave, oldest first, twenty a second.
-    private(set) var levels: [Float] = Array(repeating: 0, count: 48)
+    private(set) var levels: [Float] = Array(repeating: 0, count: MeetingWaveSignal.count)
     private(set) var isPaused = false
     /// A call or another app took the microphone; recording resumes when it is given back.
     private(set) var isInterrupted = false
@@ -49,6 +50,15 @@ final class MeetingCoordinator {
         didSet { if let id = transcribingID { continuedProcessing.report(meeting: id, phase: phase, fraction: progress) } }
     }
     var queued: [UUID] { workQueue.pending }
+
+    /// What the queue says while it compares the voices of merged recordings. The transcript
+    /// is finished and readable meanwhile; only who-is-who can still change.
+    static let matchPhase = "Matching voices"
+    /// True while the voices of this merged meeting are being compared.
+    func isMatchingVoices(_ id: UUID) -> Bool {
+        guard transcribingID == id || queued.contains(id), let current = meeting(id) else { return false }
+        return current.status == .done && current.speakerGroupsToMatch != nil
+    }
 
     /// What the transcriber says while it waits for the speaker model download.
     static let downloadPhase = "Downloading the speaker model"
@@ -87,6 +97,14 @@ final class MeetingCoordinator {
     }
     private static let labelKey = "zone.meetings.labelSpeakers"
 
+    /// Give speakers the names typed for their voices in other meetings (`MeetingKnownVoices`).
+    /// On by default; it only ever reuses names the person typed.
+    var recognizesVoices: Bool {
+        get { access(keyPath: \.recognizesVoices); return UserDefaults.standard.object(forKey: Self.recognizeKey) as? Bool ?? true }
+        set { withMutation(keyPath: \.recognizesVoices) { UserDefaults.standard.set(newValue, forKey: Self.recognizeKey) } }
+    }
+    private static let recognizeKey = "zone.meetings.recognizeVoices"
+
     let store: MeetingStore
     /// Told the id of a meeting the person deleted, or that a merge absorbed. Zone Link uses it
     /// to delete the same meeting on a paired computer. Not called for a recording that was
@@ -97,6 +115,10 @@ final class MeetingCoordinator {
     @ObservationIgnored private let requestPermission: @MainActor () async -> Bool
     @ObservationIgnored private let startCapture: @MainActor (@escaping ([Float]) -> Void) async throws -> Void
     @ObservationIgnored private let stopCapture: @MainActor () -> Void
+    /// Voice prints for stretches of a meeting's audio, per voice; nil when the speaker model
+    /// is not on the phone. Tests pass their own.
+    typealias VoicePrinter = @MainActor (MeetingAudio, [String: [Range<Double>]]) async throws -> [String: [Float]]?
+    @ObservationIgnored private let voicePrinter: VoicePrinter
     private var writer: MeetingAudioWriter?
     private var captureProgress = MeetingCaptureProgress()
     private var closingWriters: [Task<String?, Never>] = []
@@ -115,6 +137,7 @@ final class MeetingCoordinator {
     private var finishingRecording = false
     var isStartingRecording: Bool { startingRecording }
     var isFinishingRecording: Bool { finishingRecording }
+    var blocksLibraryDeletion: Bool { startingRecording || isRecording || finishingRecording }
     private var speakerAttempt: UUID?
     private var recordingStopNotice: String?
     /// The short Lock Screen line for an automatic stop; nil when the person stopped it.
@@ -125,17 +148,19 @@ final class MeetingCoordinator {
     /// Takes the microphone back after an interruption whose end iOS never announces.
     private var resumeRetry: Task<Void, Never>?
     private var resumingCapture = false
-    private let liveActivity = MeetingLiveActivity()
+    private let liveActivity: MeetingLiveActivity
     var hasRecordingLiveActivity: Bool { isRecording && liveActivity.isActive }
     func restoreRecordingLiveActivity() -> Bool {
         guard let recording else { return false }
         if !liveActivity.isActive {
-            liveActivity.start(title: recording.title)
-            liveActivity.update(state: isInterrupted ? .interrupted : (isPaused ? .paused : .recording),
-                                recordedSeconds: exactSeconds)
+            liveActivity.start(title: recording.title,
+                               state: isInterrupted ? .interrupted : (isPaused ? .paused : .recording),
+                               recordedSeconds: exactSeconds)
         }
         return liveActivity.isActive
     }
+    func refreshIslandAppearance() { liveActivity.refreshAppearance() }
+
     private let continuedProcessing = MeetingContinuedProcessing()
 
     /// The one coordinator, for the meeting App Intents and the Focus filter.
@@ -150,13 +175,19 @@ final class MeetingCoordinator {
              return await AVAudioApplication.requestRecordPermission()
          },
          startCapture: (@MainActor (@escaping ([Float]) -> Void) async throws -> Void)? = nil,
-         stopCapture: (@MainActor () -> Void)? = nil) {
+         stopCapture: (@MainActor () -> Void)? = nil,
+         voicePrinter: VoicePrinter? = nil) {
+        self.voicePrinter = voicePrinter ?? { audio, spans in try await MeetingCoordinator.listen(to: audio, spans: spans) }
         self.dictation = dictation
+        liveActivity = MeetingLiveActivity { dictation.meetingIslandColors }
         self.store = store
         self.recover = recover
         self.requestPermission = requestPermission
         self.startCapture = startCapture ?? { try await dictation.startMeetingCapture(sink: $0) }
         self.stopCapture = stopCapture ?? { dictation.stopMeetingCapture() }
+        dictation.onMeetingLevel = { [weak self] level in
+            self?.liveActivity.appendLevel(level)
+        }
         dictation.onMeetingInterruption = { [weak self] interruption in self?.handleInterruption(interruption) }
         continuedProcessing.onExpiration = { [weak self] in
             guard let self, let id = self.transcribingID else { return }
@@ -169,6 +200,10 @@ final class MeetingCoordinator {
     /// Recover anything a previous process left mid-recording or mid-transcription, then
     /// transcribe whatever is waiting.
     private func launch() async {
+        #if DEBUG
+        let seeded = store
+        await Task.detached(priority: .userInitiated) { MeetingDebugSeed.runIfAsked(seeded) }.value
+        #endif
         await recover(store)
         await reload()
         // Recorded meetings, and once per build the failed ones: every meeting on the phone had
@@ -187,6 +222,10 @@ final class MeetingCoordinator {
             enqueue(id)
         }
         UserDefaults.standard.set(build, forKey: Self.retriedBuildKey)
+        // A merge whose voices were still being compared when Zone closed picks up here.
+        for meeting in meetings where meeting.status == .done && meeting.speakerGroupsToMatch != nil {
+            enqueue(meeting.id)
+        }
         #if DEBUG
         autorunIfAsked()
         #endif
@@ -200,6 +239,10 @@ final class MeetingCoordinator {
     /// unattended with `ZONE_SIM_CLIP` and its timings land in the log.
     private func autorunIfAsked() {
         let args = ProcessInfo.processInfo.arguments
+        if args.contains("-zoneVoiceSetupAutorun") {
+            let session = VoiceSetupSession(dictation: dictation, meetings: self)
+            Task { await session.autorun() }
+        }
         guard let index = args.firstIndex(of: "-zoneMeetingAutorun"), index + 1 < args.count,
               let seconds = Double(args[index + 1]) else { return }
         Task { [weak self] in
@@ -210,10 +253,36 @@ final class MeetingCoordinator {
             guard let self else { return }
             ZoneLog.coordinator.info("meeting autorun: model ready after \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s")
             await self.startRecording(title: "Autorun meeting")
+            #if targetEnvironment(simulator)
+            if let index = args.firstIndex(of: "-zoneMeetingRebuildAt"), index + 1 < args.count,
+               let delay = Double(args[index + 1]), delay.isFinite, delay > 0, delay < seconds {
+                Task { await self.rebuildCardAfterSimulatedInterruption(delay: delay) }
+            }
+            #endif
             try? await Task.sleep(for: .seconds(seconds))
             await self.stopRecording()
         }
     }
+    #if targetEnvironment(simulator)
+    /// Exercise the coordinator's hold and resume handlers with an expired card for screenshots.
+    private func rebuildCardAfterSimulatedInterruption(delay: Double) async {
+        let id = recording?.id
+        try? await Task.sleep(for: .seconds(delay))
+        guard let id, recording?.id == id, !isInterrupted else { return }
+        handleInterruption(.began(reason: "Simulator fixture"))
+        resumeRetry?.cancel()
+        resumeRetry = nil
+        for activity in Activity<RecordingActivityAttributes>.activities
+        where activity.content.state.meetingTitle == recording?.title {
+            await activity.end(nil, dismissalPolicy: .immediate)
+        }
+        let deadline = Date().addingTimeInterval(3)
+        while liveActivity.isActive, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        handleInterruption(.ended(shouldResume: true))
+    }
+    #endif
     #endif
 
     func reload() async {
@@ -249,7 +318,11 @@ final class MeetingCoordinator {
 
     func scenePhaseChanged(active: Bool) {
         foreground = active
-        if active, isInterrupted { Task { await resumeAfterInterruption() } }
+        if active, isInterrupted {
+            Task { await resumeAfterInterruption() }
+        } else if active, isRecording {
+            _ = restoreRecordingLiveActivity()
+        }
         // Back on screen with a transcript under way: ask iOS to let it finish if Zone leaves
         // again (a no-op when already granted or on iOS before 26).
         if active, let id = transcribingID { continuedProcessing.begin(meeting: id, title: meeting(id)?.title) }
@@ -278,6 +351,7 @@ final class MeetingCoordinator {
         lastError = nil
         if let refusal = dictation.meetingStartRefusal { lastError = refusal; return }
         let permissionGranted = await requestPermission()
+        dictation.publishMicrophoneGrant()
         guard !cancelRecordingStart, !Task.isCancelled else { return }
         guard permissionGranted else {
             lastError = "Zone needs the microphone to record. Turn it on in Settings."
@@ -639,7 +713,11 @@ final class MeetingCoordinator {
             resumeRetry = nil
             MeetingAudioPriority.apply()
             if let gap = gapTracker.ended(at: Date()) { addGap(gap, to: current.id) }
-            liveActivity.update(state: isPaused ? .paused : .recording, recordedSeconds: exactSeconds)
+            if liveActivity.isActive {
+                liveActivity.update(state: isPaused ? .paused : .recording, recordedSeconds: exactSeconds)
+            } else {
+                _ = restoreRecordingLiveActivity()
+            }
             Journal.log("meetingResumed", recording: current.id, ["appState": DictationCoordinator.appStateName()])
         } catch {
             guard recording?.id == current.id else { return }
@@ -675,34 +753,284 @@ final class MeetingCoordinator {
     // MARK: Editing
 
     func rename(_ id: UUID, to title: String) { mutate { try $0.rename(id, to: title) } }
-    func renameSpeaker(_ id: UUID, speaker: String, to name: String) { mutate { try $0.renameSpeaker(id, speaker: speaker, to: name) } }
-    func setMe(_ id: UUID, speaker: String?) { mutate { try $0.setMe(id, speaker: speaker) } }
+    // MARK: Speakers
+
+    /// The speakers as they were before the last change to who is who in a meeting, for Undo.
+    struct SpeakerUndo: Equatable {
+        let meeting: UUID
+        let speakers: [MeetingSpeaker]
+        /// What Undo takes back, as the bar says it: "Combined Speaker 3 with Me".
+        let what: String
+        var review: ReviewUndo?
+    }
+
+    struct ReviewUndo: Equatable {
+        let candidates: [String: [String]]
+        let pendingGroups: [[String]]?
+        let showedNotice: Bool
+        let confirmedSpeakers: [MeetingSpeaker]
+    }
+    private(set) var speakerUndo: SpeakerUndo?
+
+    /// Every change to who is who goes through here: the list on screen updates at once (a
+    /// store reload would lag a tap behind), and the state before it is kept for Undo.
+    private func editSpeakers(_ id: UUID, what: String, _ change: (MeetingStore) throws -> Meeting) {
+        guard let before = meeting(id) ?? (try? store.meeting(id)) else { return }
+        do {
+            let after = try change(store)
+            replaceInList(after)
+            if after.speakers != before.speakers { speakerUndo = SpeakerUndo(meeting: id, speakers: before.speakers, what: what) }
+        } catch { lastError = error.localizedDescription }
+    }
+
+    func renameSpeaker(_ id: UUID, speaker: String, to name: String, sharesName: Bool = false) {
+        let old = meeting(id)?.speakerName(speaker) ?? "Speaker"
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        editSpeakers(id, what: trimmed.isEmpty ? "Cleared \(old)'s name" : "Named \(old) \(trimmed)") {
+            try $0.renameSpeaker(id, speaker: speaker, to: name, sharesName: sharesName)
+        }
+    }
+
+    /// Marks a speaker as the phone's owner. When someone else already is, the two are joined
+    /// as one person (`MeetingStore.setMe`); `moveMe` is the other answer.
+    func setMe(_ id: UUID, speaker: String?) {
+        let old = speaker.flatMap { meeting(id)?.speakerName($0) } ?? "Me"
+        let joins = speaker != nil && meeting(id)?.me(except: speaker) != nil
+        editSpeakers(id, what: speaker == nil ? "Cleared Me" : (joins ? "Combined \(old) with Me" : "Marked \(old) as Me")) {
+            try $0.setMe(id, speaker: speaker)
+        }
+    }
+
+    /// Makes this speaker the only "me": whoever had it was someone else.
+    func moveMe(_ id: UUID, to speaker: String) {
+        let old = meeting(id)?.speakerName(speaker) ?? "Speaker"
+        editSpeakers(id, what: "Moved Me to \(old)") { try $0.moveMe(id, to: speaker) }
+    }
+
+    /// Two speakers are one person: `speaker`'s lines show under `target`.
+    func joinSpeakers(_ id: UUID, speaker: String, into target: String) {
+        let from = meeting(id)?.speakerName(speaker) ?? "Speaker", to = meeting(id)?.speakerName(target) ?? "Speaker"
+        editSpeakers(id, what: "Combined \(from) with \(to)") { try $0.joinSpeakers(id, speaker: speaker, into: target) }
+    }
+
+    /// A voice that was joined to someone is its own speaker again.
+    func separateSpeaker(_ id: UUID, speaker: String) {
+        let from = meeting(id)?.speakerName(speaker) ?? "Speaker"
+        editSpeakers(id, what: "Separated a voice from \(from)") { try $0.separateSpeaker(id, speaker: speaker) }
+    }
+
+    /// Names typed for people in other meetings, newest meeting first, without the ones already
+    /// in this meeting: offered on the Speakers screen so a name used before is one tap.
+    func speakerNames(notIn id: UUID, limit: Int = 6) -> [String] {
+        let here = Set((meeting(id)?.people ?? []).compactMap { $0.name?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
+        var names: [String] = []
+        for other in meetings.sorted(by: { $0.createdAt > $1.createdAt }) where other.id != id {
+            for person in other.people {
+                guard let name = person.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty,
+                      !here.contains(name.lowercased()), !names.contains(where: { $0.lowercased() == name.lowercased() }) else { continue }
+                names.append(name)
+                if names.count == limit { return names }
+            }
+        }
+        return names
+    }
+
+    func undoSpeakerChange() {
+        guard let undo = speakerUndo else { return }
+        speakerUndo = nil
+        do {
+            let restored = try store.update(undo.meeting) { meeting in
+                if let review = undo.review {
+                    guard meeting.speakers == review.confirmedSpeakers, meeting.voiceReviewCandidates == nil,
+                          meeting.speakerGroupsToMatch == nil else { throw MeetingStoreError.transcriptChanged }
+                    meeting.voiceReviewCandidates = review.candidates
+                    meeting.speakerGroupsToMatch = review.pendingGroups
+                    if review.showedNotice && meeting.message == nil { meeting.message = MeetingVoiceMatch.unmatchedMessage }
+                }
+                guard MeetingSpeakerEdit.restore(undo.speakers, in: &meeting) else { throw MeetingStoreError.transcriptChanged }
+            }
+            replaceInList(restored)
+        } catch { lastError = error.localizedDescription }
+    }
+
+    func forgetSpeakerUndo() { speakerUndo = nil }
+
+    // MARK: Matching voices after a merge
+
+    /// The default `voicePrinter`: the speaker model, on the Neural Engine while Zone is on
+    /// screen and on the CPU otherwise (and once more on the CPU when the Neural Engine fails,
+    /// as labeling does). Nil when the model is not on the phone.
+    private static func listen(to audio: MeetingAudio, spans: [String: [Range<Double>]]) async throws -> [String: [Float]]? {
+        guard MeetingDiarizer.modelsPresent() else { return nil }
+        var neuralEngine = UIApplication.shared.applicationState == .active
+        while true {
+            do {
+                let units = neuralEngine
+                let models = try await Watchdog.run(what: "The speaker model", limit: speakerLoadLimit) {
+                    try await MeetingDiarizer.loadModels(neuralEngine: units) { _ in }
+                }
+                return try await Watchdog.run(what: "Matching voices", limit: diarizeStall) {
+                    try await MeetingDiarizer.voicePrints(audio: audio, spans: spans, models: models)
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard neuralEngine, !(error is Watchdog.Stalled) else { throw error }
+                neuralEngine = false
+            }
+        }
+    }
+
+    /// Compares the voices a merge brought in with the people already in the meeting and joins
+    /// the ones that match (`MeetingVoiceMatch`). Voices labeled before prints were kept are
+    /// listened to first: a few of each one's longest lines, seconds of work, with no new
+    /// transcript. Interrupted (a recording starts, Zone closes), it leaves the waiting list on
+    /// disk and runs again; nothing is lost and the transcript reads as before meanwhile.
+    private func matchVoices(_ id: UUID) async {
+        let store = store
+        guard let meeting = try? store.meeting(id), meeting.status == .done, meeting.speakerGroupsToMatch != nil else { return }
+        phase = Self.matchPhase
+        progress = 0
+        beginBackgroundTime()
+        defer { phase = ""; endBackgroundTime() }
+        let started = Date()
+        var listened = 0
+        var waitingForPrints = false
+        for attempt in 1...2 {
+            do {
+                let current = try store.meeting(id)
+                let needed = MeetingVoiceMatch.voicesNeedingPrints(in: current)
+                let spans = Dictionary(uniqueKeysWithValues: needed.map {
+                    ($0, MeetingVoiceMatch.spans(forVoice: $0, in: current.segments))
+                }).filter { spans in
+                    spans.value.reduce(0) { $0 + $1.upperBound - $1.lowerBound } >= MeetingVoiceMatch.minimumPrintSeconds
+                }
+                guard !spans.isEmpty else { waitingForPrints = false; break }
+                waitingForPrints = true
+                let audio = try await Task.detached(priority: .utility) { try store.audio(id) }.value
+                try Task.checkCancellation()
+                guard let prints = try await voicePrinter(audio, spans) else { break }
+                try Task.checkCancellation()
+                let saved = try store.update(id) { meeting in
+                    for index in meeting.speakers.indices where !MeetingVoiceMatch.usablePrint(meeting.speakers[index].voice) {
+                        let key = meeting.speakers[index].id
+                        if spans[key] != nil, let print = prints[key], MeetingVoiceMatch.usablePrint(print) {
+                            meeting.speakers[index].voice = print
+                            listened += 1
+                        }
+                    }
+                }
+                waitingForPrints = MeetingVoiceMatch.voicesNeedingPrints(in: saved).contains { spans[$0] != nil }
+                if !waitingForPrints { break }
+            } catch is CancellationError {
+                return
+            } catch {
+                waitingForPrints = true
+                ZoneLog.coordinator.error("voice match attempt \(attempt) failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        guard !Task.isCancelled else { return }
+        var outcome = MeetingVoiceMatch.Outcome()
+        var before: [MeetingSpeaker] = []
+        if let updated = try? store.update(id, { meeting in
+            before = meeting.speakers
+            let groups = meeting.speakerGroupsToMatch
+            outcome = MeetingVoiceMatch.resolve(&meeting)
+            if waitingForPrints && !outcome.unmatched.isEmpty { meeting.speakerGroupsToMatch = groups }
+            meeting.message = meeting.voiceReviewCandidates == nil ? nil : MeetingVoiceMatch.unmatchedMessage
+        }) {
+            replaceInList(updated)
+            // Zone decided this, so it is one tap to take back.
+            if !outcome.joined.isEmpty {
+                let count = outcome.joined.count
+                speakerUndo = SpeakerUndo(meeting: id, speakers: before,
+                                          what: count == 1 ? "Matched 1 voice across the recordings" : "Matched \(count) voices across the recordings")
+            }
+        }
+        ZoneLog.coordinator.info("merged voices matched in \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s: \(outcome.joined.count) joined, \(outcome.unmatched.count) open, \(listened) listened to")
+    }
+
+    func finishVoiceReview(_ id: UUID, selected: Set<MeetingVoiceMatch.ReviewPair>) throws {
+        let before = try store.meeting(id)
+        let after = try store.update(id) { meeting in
+            let allowed = Set(MeetingVoiceMatch.reviewPairs(in: meeting))
+            guard selected.isSubset(of: allowed),
+                  let speakers = MeetingVoiceMatch.reviewedSpeakers(for: selected, in: meeting)
+            else { throw MeetingStoreError.transcriptChanged }
+            meeting.speakers = speakers
+            meeting.voiceReviewCandidates = nil
+            meeting.speakerGroupsToMatch = nil
+            if meeting.message == MeetingVoiceMatch.unmatchedMessage { meeting.message = nil }
+        }
+        replaceInList(after)
+        if let candidates = before.voiceReviewCandidates {
+            speakerUndo = SpeakerUndo(meeting: id, speakers: before.speakers,
+                                      what: selected.isEmpty ? "Kept voices separate" : "Combined voices",
+                                      review: ReviewUndo(candidates: candidates, pendingGroups: before.speakerGroupsToMatch,
+                                                         showedNotice: before.message == MeetingVoiceMatch.unmatchedMessage,
+                                                         confirmedSpeakers: after.speakers))
+        }
+    }
+
+    /// Earlier meetings where voice setup's print now finds the person (`MeetingKnownVoices.findMe`).
+    func findMe(profile: VoiceProfile) async -> [MeetingKnownVoices.MeMatch] {
+        guard labelsSpeakers, recognizesVoices else { return [] }
+        let store = store
+        return await Task.detached(priority: .utility) {
+            MeetingKnownVoices.findMe(in: store.all(), profile: profile)
+        }.value
+    }
+
+    /// Marks the person as "me" in those meetings, as recognized: a dot says Zone chose it, and
+    /// tapping the name confirms or corrects it, as for a new meeting. A meeting the person
+    /// changed meanwhile (someone already "me", the speaker named) is left alone.
+    func markRecognizedMe(_ matches: [MeetingKnownVoices.MeMatch]) {
+        mutate { store in
+            for match in matches {
+                _ = try store.update(match.meeting) { meeting in
+                    guard !meeting.speakers.contains(where: { $0.isMe }),
+                          let index = meeting.speakers.firstIndex(where: { $0.id == match.speaker }),
+                          (meeting.speakers[index].name ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    meeting.speakers[index].isMe = true
+                    meeting.speakers[index].recognized = true
+                }
+            }
+        }
+    }
 
     func editTranscript(_ id: UUID, original: [MeetingSegment], texts: [String]) throws {
         replaceInList(try store.editTranscript(id, original: original, texts: texts))
     }
 
-    func delete(_ id: UUID) {
+    @discardableResult
+    func delete(_ id: UUID) -> Bool {
         cancelTranscription(id)
-        mutate {
-            try $0.delete(id)
+        defer { Task { await reload() } }
+        do {
+            try store.delete(id)
             onDelete?(id)
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
         }
     }
 
-    /// Joins two meetings (earlier first) and transcribes whatever of the result is not yet.
+    /// Joins two meetings (earlier first), transcribes whatever of the result is not yet, and
+    /// compares the two recordings' voices so the same person stays one speaker. With prints
+    /// kept for every voice the queue can match immediately. Otherwise it samples their lines first.
     func merge(_ id: UUID, with other: UUID) -> UUID? {
         do {
             guard transcribingID != id, transcribingID != other else { throw MeetingStoreError.busy }
-            let merged = try store.merge(id, other)
+            let merged = try store.merge(id, other, queueVoiceMatch: true)
             // The later meeting is gone: its words now live in the merged one.
             onDelete?(merged.id == id ? other : id)
             workQueue.cancel(id)
             workQueue.cancel(other)
-            Task {
-                await reload()
-                if merged.status != .done { enqueue(merged.id) }
-            }
+            replaceInList(merged)
+            meetings.removeAll { $0.id != merged.id && ($0.id == id || $0.id == other) }
+            if merged.status != .done || merged.speakerGroupsToMatch != nil { enqueue(merged.id) }
+            Task { await reload() }
             return merged.id
         } catch {
             lastError = error.localizedDescription
@@ -743,6 +1071,11 @@ final class MeetingCoordinator {
             switch result {
             case .success:
                 self.speakerModel = MeetingDiarizer.modelsPresent() ? .ready : .absent
+                if self.speakerModel == .ready {
+                    for meeting in self.meetings where meeting.status == .done && meeting.speakerGroupsToMatch != nil {
+                        self.enqueue(meeting.id)
+                    }
+                }
                 ZoneLog.coordinator.info("speaker model downloaded")
             case .failure(let error):
                 if error is CancellationError || (error as? URLError)?.code == .cancelled {
@@ -830,6 +1163,11 @@ final class MeetingCoordinator {
         guard !Task.isCancelled, !cancelRequested.contains(id) else { return }
         let store = store
         guard var meeting = try? store.meeting(id), meeting.status != .recording, meeting.duration > 0 else { return }
+        // A finished transcript whose merged voices still wait to be compared: only that.
+        if meeting.status == .done {
+            if meeting.speakerGroupsToMatch != nil { await matchVoices(id) }
+            return
+        }
         phase = "Getting ready"
         progress = meeting.progress
         beginBackgroundTime()
@@ -848,6 +1186,11 @@ final class MeetingCoordinator {
             let audio = try await Task.detached(priority: .utility) { try store.audio(id) }.value
             try Task.checkCancellation()
             let from = meeting.transcribedThrough, to = audio.duration
+            // Loudness per 100 ms: the second look's speech gate and the chunk planner's cuts.
+            let scan = Task.detached(priority: .utility) {
+                try audio.levels(frameSamples: 1_600)
+            }
+            let levels = try await withTaskCancellationHandler { try await scan.value } onCancel: { scan.cancel() }
 
             // 1. Who spoke when, once per untranscribed stretch.
             var turns = meeting.turns ?? []
@@ -858,8 +1201,8 @@ final class MeetingCoordinator {
                 } else if labelsSpeakers, to - from >= 2, MeetingDiarizer.modelsPresent() {
                     do {
                         let started = Date()
-                        turns = try await findSpeakers(audio: audio, from: from, to: to,
-                                                       existing: from > 0 ? meeting.speakers : [], id: id,
+                        turns = try await findSpeakers(audio: audio, from: from, to: to, levels: levels,
+                                                       existing: meeting.speakers, id: id,
                                                        expectedSpeakerCount: from == 0 ? meeting.speakerCountHint : nil)
                         ZoneLog.coordinator.info("meeting diarized \(Int(to - from)) s of audio in \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s, \(Set(turns.compactMap(\.speaker)).count) speakers")
                     } catch Stop.cancelled {
@@ -881,7 +1224,18 @@ final class MeetingCoordinator {
                     note = "Transcript saved without speaker labels. When the speaker model finishes downloading, use Transcribe again to add labels."
                 }
                 let saved = turns
-                meeting = try store.update(id) { $0.turns = saved; $0.speakerNotice = note }
+                let labeledNobody = from == 0 && !saved.contains { $0.speaker != nil }
+                meeting = try store.update(id) {
+                    $0.turns = saved
+                    // Transcribe again keeps named voices for the speaker pass to find again
+                    // (resetTranscript). A pass from the start that labeled nobody (it failed,
+                    // heard no voices, had no model, or labels are off) lists none of them, and
+                    // holds them for the next Transcribe again instead of losing their prints.
+                    if labeledNobody, $0.holdSpeakersForNextPass(), note == nil {
+                        note = "Speakers were not labeled, so the people you named are not shown. Transcribe again with speaker labels on to find them."
+                    }
+                    $0.speakerNotice = note
+                }
             }
 
             // 2. Chunks cut at pauses, silence skipped.
@@ -891,20 +1245,15 @@ final class MeetingCoordinator {
             // Start from what is already transcribed, not from the diarizer's last figure: that
             // left a meeting reading "Transcribing, 100%" before its first chunk was done.
             progress = to > 0 ? min(from / to, 1) : 0
-            let scan = Task.detached(priority: .utility) {
-                try audio.levels(frameSamples: 1_600)
-            }
-            let levels = try await withTaskCancellationHandler { try await scan.value } onCancel: { scan.cancel() }
             let chunks = MeetingChunkPlanner.splitting(
                 MeetingChunkPlanner.plan(turns: turns, levels: levels, from: from, to: to),
                 at: (meeting.gaps ?? []).map(\.at))
             try Task.checkCancellation()
+            let correct = await dictation.meetingTextCorrection()
             for chunk in chunks {
                 try Task.checkCancellation()
                 if cancelRequested.contains(id) { throw Stop.cancelled }
-                // Only the pronoun fix, not a dictation style: someone saying "new line" in a
-                // meeting is talking, not giving a command.
-                let text = TextStyle.capitalizingPronounI(try await transcribeChunk(audio: audio, chunk: chunk, id: id))
+                let text = correct(try await transcribeChunk(audio: audio, chunk: chunk, id: id))
                 let fraction = max(progress, to > 0 ? min(chunk.end / to, 1) : 1)
                 meeting = try store.update(id) { meeting in
                     if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -955,9 +1304,13 @@ final class MeetingCoordinator {
             _ = try? store.update(id) { $0.status = .failed; $0.message = message }
         }
         await reload()
+        // Voices a merge left waiting behind an unfinished transcript are compared now.
+        if let finished = try? store.meeting(id), finished.status == .done, finished.speakerGroupsToMatch != nil {
+            await matchVoices(id)
+        }
     }
 
-    private func findSpeakers(audio: MeetingAudio, from: Double, to: Double, existing: [MeetingSpeaker], id: UUID,
+    private func findSpeakers(audio: MeetingAudio, from: Double, to: Double, levels: [Float], existing: [MeetingSpeaker], id: UUID,
                               expectedSpeakerCount: Int?) async throws -> [MeetingTurn] {
         if !MeetingDiarizer.modelsPresent() { try await waitForSpeakerModel(id: id) }
         phase = "Loading the speaker model"
@@ -965,7 +1318,7 @@ final class MeetingCoordinator {
         // paid entitlement, so a failure there is retried once on the CPU.
         defer { speakerAttempt = nil }
         var useNeuralEngine = UIApplication.shared.applicationState == .active
-        var raw: [MeetingTurn] = []
+        var raw = MeetingDiarizer.Speakers(turns: [], voices: [:])
         for attempt in 0..<2 {
             let attemptID = UUID()
             speakerAttempt = attemptID
@@ -979,8 +1332,8 @@ final class MeetingCoordinator {
                 progress = 0
                 let pulse = Watchdog.Pulse()
                 raw = try await Watchdog.run(what: "Finding speakers", limit: Self.diarizeStall, pulse: pulse) {
-                    try await MeetingDiarizer.turns(audio: audio, from: from, to: to, models: models,
-                                                   expectedSpeakerCount: expectedSpeakerCount) { fraction in
+                    try await MeetingDiarizer.speakers(audio: audio, from: from, to: to, levels: levels, models: models,
+                                                      expectedSpeakerCount: expectedSpeakerCount) { fraction in
                         pulse.beat()
                         Task { @MainActor [weak self] in
                             guard let self, self.transcribingID == id, self.speakerAttempt == attemptID, self.phase == "Finding speakers" else { return }
@@ -998,8 +1351,32 @@ final class MeetingCoordinator {
                 useNeuralEngine = false
             }
         }
-        let normalized = MeetingSpeakerLabels.normalize(raw, existing: existing)
-        let speakers = normalized.speakers
+        if let failure = raw.secondLookFailure {
+            ZoneLog.coordinator.error("speaker second look failed, first pass kept: \(failure, privacy: .public)")
+        } else {
+            ZoneLog.coordinator.info("speaker second look: \(raw.secondLookWindows) windows, \(raw.turns.count) turns")
+        }
+        // A resumed stretch finds the people already named by their voice prints.
+        let normalized = MeetingSpeakerLabels.normalize(raw.turns, existing: existing, voices: raw.voices)
+        // From the start (a fresh or repeated transcript) only voices this pass heard are listed;
+        // later stretches keep everyone the earlier transcript names.
+        let heard = Set(normalized.turns.compactMap(\.speaker))
+        // A pass from the start that heard nobody leaves the kept people to the caller, which
+        // holds them for the next Transcribe again rather than writing an empty list over them.
+        if from == 0, heard.isEmpty { return [] }
+        var speakers = from > 0 ? normalized.speakers : normalized.speakers.filter { heard.contains($0.id) }
+        // People named in other meetings get their names back when their voice is heard again.
+        if recognizesVoices, speakers.contains(where: { $0.voice != nil && $0.name == nil && !$0.isMe }) {
+            let store = store
+            let people = await Task.detached(priority: .utility) {
+                MeetingKnownVoices.people(in: store.all(), excluding: id,
+                                          profile: VoiceProfileStore.default.load(model: MeetingDiarizer.modelName))
+            }.value
+            let before = speakers
+            speakers = MeetingKnownVoices.recognize(speakers, turns: normalized.turns, people: people)
+            let recognized = zip(before, speakers).filter { $0.recognized != $1.recognized }.count
+            ZoneLog.coordinator.info("meeting speakers recognized by voice: \(recognized) of \(speakers.count), \(people.count) known")
+        }
         _ = try store.update(id) { $0.speakers = speakers }
         return normalized.turns
     }
@@ -1023,11 +1400,11 @@ final class MeetingCoordinator {
                 case .failed:
                     if askedToPrepare || !dictation.modelIsDownloaded(dictation.selectedModel) { throw Stop.missingModel }
                     askedToPrepare = true
-                    dictation.prepareModel()
+                    dictation.prepareModel(allowDownload: false)
                 case .loading where !dictation.isPreparingModel:
                     // "Loading" with nothing loading (the model was unloaded): this wait used to
                     // spin forever. Ask for it once more.
-                    dictation.prepareModel()
+                    dictation.prepareModel(allowDownload: false)
                 default: break
                 }
                 let since = waitingForModelSince ?? Date()

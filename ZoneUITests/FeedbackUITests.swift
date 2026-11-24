@@ -6,8 +6,9 @@ import XCTest
 /// button and the Settings row open the same screen, and Email only works with words in it.
 final class FeedbackUITests: XCTestCase {
     private var settled: [String] {
-        let version = Bundle(for: Self.self).infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.5"
-        return ["-zone.settings.onboardingDone", "YES", "-zone.tour.seen", "YES", "-zoneWhatsNewAfter", version]
+        let version = Bundle(for: Self.self).infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.6"
+        return ["-zone.settings.onboardingDone", "YES", "-zone.tour.seen", "YES", "-zoneWhatsNewAfter", version,
+                "-zone.home.mode", "transcribe"]
     }
 
     override func setUp() {
@@ -88,14 +89,15 @@ final class FeedbackUITests: XCTestCase {
         let app = launch([])
         app.buttons["home.settings"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10), "Settings")
+        let about = app.buttons["settings.about"]
+        for _ in 0..<10 where !about.isHittable { app.swipeUp() }
+        about.tap()
+        XCTAssertTrue(app.buttons["settings.rate"].isHittable)
+        app.buttons["nav.back"].tap()
+        app.buttons["settings.help"].tap()
         let feedback = app.buttons["settings.feedback"]
-        for _ in 0..<10 where !(feedback.exists && feedback.isHittable) { app.swipeUp() }
-        XCTAssertTrue(feedback.isHittable, "the Send feedback row")
-        let rate = app.buttons["settings.rate"]
-        for _ in 0..<6 where !(rate.exists && rate.isHittable) { app.swipeUp() }
-        XCTAssertTrue(rate.isHittable, "the Rate Zone row")
+        XCTAssertTrue(feedback.isHittable)
         keepScreenshot("settings-feedback-rows")
-        for _ in 0..<6 where !feedback.isHittable { app.swipeDown() }
         feedback.tap()
         XCTAssertTrue(app.navigationBars["Send feedback"].waitForExistence(timeout: 10), "the feedback screen")
         XCTAssertTrue(app.switches["feedback.details"].exists, "the details switch")

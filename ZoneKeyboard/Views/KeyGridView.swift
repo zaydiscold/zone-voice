@@ -31,6 +31,7 @@ final class KeyGridView: UIView {
         var key: Key
         let cap: CALayer
         let label: CALayer
+        var cornerMark: CAShapeLayer?
         var spec: KeyGlyphSpec?
     }
 
@@ -52,6 +53,16 @@ final class KeyGridView: UIView {
         var cursorGesture: SpacebarCursorGesture?
         var cursorToken: KeyboardModel.CursorToken?
         var cursorHold: DispatchWorkItem?
+        /// The hold that opens the one-handed picker on 123 or emoji, while it is pending.
+        var handHold: DispatchWorkItem?
+        /// The picker is open for this press: its release chooses a layout and types nothing.
+        var picksHand = false
+        /// Where the finger was when the picker opened, until it slides away from there. The
+        /// finger then sits over whichever item is above 123 (the left one, at the keyboard's left
+        /// edge), so following it at once would move the keys on a hold and lift.
+        var pickerAnchorX: CGFloat?
+        /// The finger's latest horizontal position, wherever it has moved.
+        var latestX: CGFloat
         /// Hold space to talk (Beta) owns this press: it never types, moves the cursor or rolls
         /// over, and its release stops the dictation.
         var talking = false
@@ -63,7 +74,6 @@ final class KeyGridView: UIView {
         var swipeTravel: Float = 0
         var isSwipe = false
         var swipeStarted: TimeInterval = 0
-        var trailTime: Float = -1
 
         init(order: Int, position: KeyGridGeometry.Position, key: Key, point: CGPoint, aimed: CGPoint) {
             self.order = order
@@ -71,6 +81,7 @@ final class KeyGridView: UIView {
             self.key = key
             self.point = point
             self.aimed = aimed
+            self.latestX = point.x
         }
     }
 
@@ -86,7 +97,6 @@ final class KeyGridView: UIView {
     private var talkActive = false
     /// Cursor control or a talking hold: other fingers type nothing until it ends.
     private var spaceOwnsGrid: Bool { cursorActive || talkActive }
-    /// The phase the space bar's label was last drawn for.
     private var shownTalkPhase = SpaceTalk.Phase.none
     private var balloonPool: [KeyBalloonLayer] = []
     private let keysLayer = CALayer()
@@ -98,12 +108,26 @@ final class KeyGridView: UIView {
     /// control is the permission to read the clipboard; a key Zone draws makes iOS ask
     /// "Allow Paste" on every tap. Rebuilt when the theme flips: its colors are fixed at creation.
     private var pasteControl: UIPasteControl?
-    private lazy var pasteTarget = PasteTarget(session: { [weak self] in self?.model.currentSession }) { [weak self] text in
+    private lazy var pasteTarget = PasteTarget(
+        session: { [weak self] in self?.model.currentSession },
+        saving: PasteSaving(tap: { [weak self] in self?.model.pasteSaving?.tap() },
+                            image: { [weak self] in self?.model.pasteSaving?.image?($0, $1, $2) },
+                            keep: { [weak self] in self?.model.pasteSaving?.keep($0, $1, $2) })) { [weak self] text in
         self?.model.insertPasted(text)
         self?.mic.userTypedKey()
     }
     private var accessibilityKeys: [KeyAccessibilityElement] = []
     private let prediction = KeyGridPrediction()
+    private var handPicker: HandPickerLayer?
+    /// Points outside the grid, left and right, whose touches still belong to the edge keys. In
+    /// one-handed mode the side toward the panel gets a margin, so a thumb that overshoots "q" or
+    /// "p" types it instead of pressing the panel's buttons (`KeyboardViewController.layoutColumn`).
+    var edgeSlop: (left: CGFloat, right: CGFloat) = (0, 0)
+    /// How long 123 or emoji is held before the one-handed picker opens. Apple's globe menu opens at
+    /// about half a second; a little less, as the hold is on a key people also tap quickly.
+    static let handHoldDuration: TimeInterval = 0.42
+    /// How far the finger slides sideways before the picker follows it.
+    static let pickerSlide: CGFloat = 10
 
     private var isDark = false
     private var keyFill = UIColor.white
@@ -172,11 +196,14 @@ final class KeyGridView: UIView {
             _ = model.preferences.swipeTypingEnabled
             _ = model.preferences.showsPasteKey
             _ = model.preferences.showsEmojiKey
+            _ = model.preferences.oneHandedEnabled
+            _ = model.hand
             _ = model.preferences.spaceHold
             _ = model.showsEmoji
             _ = model.hasFullAccess
             _ = model.explicitDark
             _ = mic.mode
+            _ = mic.panelSection
             _ = mic.showsHistory
             _ = mic.spaceTalkPhase
         } onChange: { [weak self] in
@@ -192,7 +219,7 @@ final class KeyGridView: UIView {
     }
 
     /// The type face shows the keys unless the history or emoji panel has their place.
-    private var shouldShow: Bool { mic.mode == .type && !mic.showsHistory && !model.showsEmoji }
+    private var shouldShow: Bool { mic.mode == .type && mic.panelSection == nil && !mic.showsHistory && !model.showsEmoji }
 
     private func syncVisibility(animated: Bool) {
         let visible = shouldShow
@@ -214,7 +241,23 @@ final class KeyGridView: UIView {
         // Hidden on the dictate face, where the view is squeezed by the shorter keyboard; the keys
         // keep their last layout until the type face returns.
         guard shownVisible == true, bounds.width > 0, bounds.height > 0 else { return }
-        if geometry?.size != bounds.size { sync() }
+        if geometry?.size != bounds.size || geometry?.metrics != metrics { sync() }
+    }
+
+    /// The whole keyboard's width. In one-handed mode the grid is narrower than the keyboard, but
+    /// rows keep the full keyboard's height (narrowing costs accuracy more than shortening), and
+    /// the cursor's line estimate is about the host's text, not the keys.
+    var previewBoardWidth: CGFloat?
+    var fullWidth: CGFloat { previewBoardWidth ?? max(superview?.bounds.width ?? 0, bounds.width) }
+
+    var duo: DuoKeyboard = .ordinary
+    var windowInset: CGFloat = 0
+    var splitKeys = false
+    private var shownSplit = false
+    private var metrics: KeyGridMetrics {
+        var value = duo.metrics(width: fullWidth, windowInset: windowInset)
+        if splitKeys { value.keySpacing = 10.7 }
+        return value
     }
 
     override func willMove(toWindow newWindow: UIWindow?) {
@@ -250,19 +293,34 @@ final class KeyGridView: UIView {
             pasteControl?.removeFromSuperview()
             pasteControl = nil
         }
-        let rows = KeyGridLayout.drawnRows(model.rows)
-        let gridRows = KeyGridLayout.gridRows(rows, layer: model.layer)
-        if gridRows != shownGridRows || geometry?.size != bounds.size {
-            layOut(rows: rows, gridRows: gridRows)
+        let ordinary = KeyGridLayout.drawnRows(model.rows)
+        let split = splitKeys ? KeyGridLayout.split(ordinary) : nil
+        let rows = split?.rows ?? ordinary
+        var gridRows = KeyGridLayout.gridRows(rows, layer: model.layer)
+        if split != nil { gridRows[1].duplicatesCenter = !ordinary[1].count.isMultiple(of: 2) }
+        if shownSplit != splitKeys || gridRows != shownGridRows || geometry?.size != bounds.size || geometry?.metrics != metrics {
+            shownSplit = splitKeys
+            layOut(rows: rows, gridRows: gridRows, cuts: split?.cuts)
         } else {
+            var nativeKeysChanged = false
             for (r, row) in rows.enumerated() {
                 for (i, key) in row.enumerated() {
+                    let usesNativeControl = usesNativeFace(key)
+                    if usesNativeControl != slots[r][i].cap.isHidden {
+                        nativeKeysChanged = true
+                        slots[r][i].cap.isHidden = usesNativeControl
+                    }
                     slots[r][i].key = key
                     applyGlyph(row: r, index: i, force: themeChanged)
                     if themeChanged { applyFill(row: r, index: i) }
                 }
             }
-            refreshAccessibilityLabels()
+            if nativeKeysChanged { cancelAllPresses() }
+            if themeChanged || nativeKeysChanged {
+                syncNativeKeys()
+            } else {
+                refreshAccessibilityLabels()
+            }
         }
     }
 
@@ -271,17 +329,18 @@ final class KeyGridView: UIView {
     private func reportSpaceBarLetters(rows: [[Key]], geometry: KeyGridGeometry) {
         guard model.layer == .letters,
               let r = rows.lastIndex(where: { $0.contains(.space) }),
-              let i = rows[r].firstIndex(of: .space) else { return }
-        let letters = geometry.keys(above: KeyGridGeometry.Position(row: r, index: i)).compactMap { position -> Character? in
+              !rows[r].isEmpty else { return }
+        let spaces = rows[r].indices.filter { rows[r][$0] == .space }
+        let letters = spaces.flatMap { geometry.keys(above: .init(row: r, index: $0)) }.compactMap { position -> Character? in
             guard case .character(let text) = rows[position.row][position.index], text.count == 1 else { return nil }
             return text.lowercased().first
         }
         model.setSpaceBarLetters(Set(letters))
     }
 
-    private func layOut(rows: [[Key]], gridRows: [KeyGridRow]) {
+    private func layOut(rows: [[Key]], gridRows: [KeyGridRow], cuts: [Int]?) {
         cancelAllPresses()
-        let geometry = KeyGridGeometry(size: bounds.size, rows: gridRows)
+        let geometry = KeyGridGeometry(size: bounds.size, rows: gridRows, metrics: metrics, splitAt: cuts)
         self.geometry = geometry
         shownGridRows = gridRows
         reportSpaceBarLetters(rows: rows, geometry: geometry)
@@ -289,19 +348,32 @@ final class KeyGridView: UIView {
         // Reuse layers across layer switches: 30 to 40 keys, no allocation after the first.
         spareSlots += slots.flatMap { $0 }
         slots = []
-        var globeFrame: CGRect?
-        var pasteFrame: CGRect?
         for (r, row) in rows.enumerated() {
             var drawn: [Slot] = []
             for (i, key) in row.enumerated() {
                 var slot = spareSlots.popLast() ?? makeSlot(key: key)
+                if key == .space, slot.cornerMark == nil {
+                    // The system space cap has a condensed mark, 16 by 29 pixels at 3x.
+                    let mark = CAShapeLayer()
+                    let path = UIBezierPath()
+                    for (i, point) in [(0,0), (16,0), (16,3), (3,26), (16,26), (16,29),
+                                       (0,29), (0,26), (13,3), (0,3)].enumerated() {
+                        let p = CGPoint(x: CGFloat(point.0) / 3, y: CGFloat(point.1) / 3)
+                        if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
+                    }
+                    path.close()
+                    mark.path = path.cgPath
+                    mark.actions = KeyBalloonLayer.noActions
+                    mark.opacity = 0.20
+                    slot.cap.addSublayer(mark)
+                    slot.cornerMark = mark
+                }
+                slot.cornerMark?.isHidden = key != .space
                 slot.key = key
                 slot.spec = nil
                 let cap = geometry.caps[r][i]
                 slot.cap.frame = cap
-                slot.cap.isHidden = key == .globe || key == .paste
-                if key == .globe { globeFrame = cap }
-                if key == .paste { pasteFrame = cap }
+                slot.cap.isHidden = usesNativeFace(key)
                 drawn.append(slot)
             }
             slots.append(drawn)
@@ -313,18 +385,45 @@ final class KeyGridView: UIView {
                 applyGlyph(row: r, index: i, force: true)
             }
         }
-        if let globeFrame {
-            globeButton.frame = globeFrame
+        syncNativeKeys()
+    }
+
+    /// The native controls follow both layout and appearance. A restyle can replace Paste
+    /// without changing a single cap frame, and Globe and Emoji can trade equal-width slots.
+    private func usesNativeFace(_ key: Key) -> Bool {
+        key == .globe || (key == .paste && model.hasFullAccess)
+    }
+
+    private func syncNativeKeys() {
+        if let globe = slots.last?.first(where: { $0.key == .globe }) {
+            globeButton.frame = globe.cap.frame
             globeButton.isHidden = false
         } else {
             globeButton.isHidden = true
         }
-        if let pasteFrame {
-            let control = pasteControl ?? makePasteControl()
-            control.frame = pasteFrame
-            control.isHidden = false
+        if model.hasFullAccess, let paste = slots.last?.first(where: { $0.key == .paste }) {
+            var frame = paste.cap.frame
+            // At the 27.5 pt landscape cap height UIKit shows a blank blue tile.
+            // Give its native Paste glyph the row pitch, inside the keyboard edges.
+            if duo == .coverLandscape {
+                frame.size.height = metrics.rowPitch
+                frame.origin.y = bounds.maxY - frame.height
+            }
+            if let pasteControl {
+                pasteControl.frame = frame
+            } else {
+                let control = KeyboardPasteControl(theme: KeyboardTheme(isDark: isDark), target: pasteTarget, surface: "grid")
+                control.gridOwnsPoint = { [weak self, weak control] point in
+                    guard let self, let control else { return false }
+                    return self.hitTest(control.convert(point, to: self), with: nil) === control
+                }
+                control.frame = frame
+                addSubview(control)
+                pasteControl = control
+            }
         } else {
-            pasteControl?.isHidden = true
+            pasteControl?.removeFromSuperview()
+            pasteControl = nil
         }
         rebuildAccessibility()
     }
@@ -338,7 +437,7 @@ final class KeyGridView: UIView {
         label.actions = KeyBalloonLayer.noActions
         cap.addSublayer(label)
         keysLayer.addSublayer(cap)
-        return Slot(key: key, cap: cap, label: label, spec: nil)
+        return Slot(key: key, cap: cap, label: label, cornerMark: nil, spec: nil)
     }
 
     private func applyFill(row: Int, index: Int) {
@@ -347,14 +446,10 @@ final class KeyGridView: UIView {
 
     private func glyphSpec(for key: Key, capWidth: CGFloat) -> KeyGlyphSpec? {
         let fit = max(capWidth - 8, 1)
-        if cursorActive { return key == .space ? .text("Slide to move cursor", size: 12, maxWidth: fit) : nil }
-        if talkActive {
-            return key == .space ? SpaceTalk.spaceLabel(shownTalkPhase).map { .text($0, size: 12, maxWidth: fit) } : nil
-        }
+        if spaceOwnsGrid { return nil }
         switch key {
         case .character(let text): return .text(text, size: 22, lift: 1, maxWidth: fit)
-        // Labeled "space", as the system keyboard does.
-        case .space: return .text("space", size: 16, maxWidth: fit)
+        case .space: return nil
         case .delete: return .symbol("delete.left")
         case .shift:
             switch model.shift {
@@ -367,8 +462,8 @@ final class KeyGridView: UIView {
             let label = model.returnLabel
             return label == "return" ? .symbol("return.left") : .text(label, size: 18, lift: 1, maxWidth: fit)
         case .switchLayer(_, let label): return .text(label, size: 18, lift: 1, maxWidth: fit)
-        case .paste: return .symbol("doc.on.clipboard")
         case .emoji: return .symbol("face.smiling")
+        case .paste: return model.hasFullAccess ? nil : .symbol("document.on.clipboard")
         case .globe, .mic: return nil
         }
     }
@@ -376,6 +471,16 @@ final class KeyGridView: UIView {
     private func applyGlyph(row: Int, index: Int, force: Bool) {
         let slot = slots[row][index]
         let cap = slot.cap.bounds
+        if slot.key == .space, let corner = slot.cornerMark {
+            corner.contentsScale = scale
+            corner.fillColor = (isDark ? UIColor.white : .black).cgColor
+            // Round in window space. Fractional key widths otherwise spread a 16 px mark across 17 pixels.
+            let edge = convert(CGPoint(x: slot.cap.frame.maxX, y: slot.cap.frame.maxY), to: nil)
+            let alignedX = cap.maxX + Self.pixelRound(edge.x, scale) - edge.x
+            let alignedY = cap.maxY + Self.pixelRound(edge.y, scale) - edge.y
+            corner.frame = CGRect(x: alignedX - 32.0 / 3, y: alignedY - 47.0 / 3,
+                                  width: 16.0 / 3, height: 29.0 / 3)
+        }
         let spec = glyphSpec(for: slot.key, capWidth: cap.width)
         // Slots are reused across rebuilds, so every key sets this, not only return.
         let opacity: Float = slot.key == .newline && !model.returnEnabled ? 0.35 : 1
@@ -403,31 +508,17 @@ final class KeyGridView: UIView {
     static let topOvershoot: CGFloat = 6
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        point.x >= bounds.minX && point.x < bounds.maxX
+        point.x >= bounds.minX - edgeSlop.left && point.x < bounds.maxX + edgeSlop.right
             && point.y >= bounds.minY - Self.topOvershoot && point.y < bounds.maxY
-    }
-
-    private func makePasteControl() -> UIPasteControl {
-        let configuration = UIPasteControl.Configuration()
-        configuration.displayMode = .iconOnly
-        configuration.cornerStyle = .fixed
-        configuration.cornerRadius = KeyboardTheme.cornerRadius
-        configuration.baseBackgroundColor = keyFill
-        configuration.baseForegroundColor = UIColor(KeyboardTheme(isDark: isDark).text)
-        let control = UIPasteControl(configuration: configuration)
-        control.target = pasteTarget
-        control.accessibilityLabel = "Paste"
-        addSubview(control)
-        pasteControl = control
-        return control
+            && (!splitKeys || geometry?.key(at: point) != nil)
     }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard isUserInteractionEnabled, !isHidden, alpha > 0.01, self.point(inside: point, with: event) else { return nil }
+        guard mic.panelSection == nil, isUserInteractionEnabled, !isHidden, alpha > 0.01, self.point(inside: point, with: event) else { return nil }
         if !spaceOwnsGrid, !globeButton.isHidden, let position = geometry?.key(at: point), key(at: position) == .globe {
             return globeButton
         }
-        if !spaceOwnsGrid, let pasteControl, !pasteControl.isHidden, let position = geometry?.key(at: point), key(at: position) == .paste {
+        if !spaceOwnsGrid, let pasteControl, let position = geometry?.key(at: point), key(at: position) == .paste {
             return pasteControl
         }
         return self
@@ -451,12 +542,16 @@ final class KeyGridView: UIView {
             if let ended = finishedTouches[id], touch.timestamp <= ended { continue }
             if spaceOwnsGrid { rememberFinished(id, at: touch.timestamp); continue }
             guard presses[id] == nil else { continue }
+            // A second finger in the gap must not roll over a still-held key.
+            if splitKeys, geometry?.key(at: touch.location(in: self)) == nil { continue }
             KeyTrace.touch(timestamp: touch.timestamp, down: true)
             // Roll over: whatever is still held lands first, in the order it went down. This may
             // switch the layer or the shift, so the new touch is judged on the updated keys.
             let held = presses.values.filter { !$0.committed }.sorted { $0.order < $1.order }
             if !held.isEmpty {
                 for press in held {
+                    // A second finger closes an open picker without choosing: it was not a choice.
+                    if press.picksHand { finish(press, tap: false); continue }
                     if press.isSwipe { submitSwipe(press) } else { commit(press) }
                 }
                 sync()
@@ -465,13 +560,13 @@ final class KeyGridView: UIView {
             let point = touch.location(in: self)
             let aimed = adapted(point, geometry: geometry)
             guard let position = geometry.key(at: aimed, likelihood: likelihood()), let key = key(at: position),
-                  key != .globe, key != .mic else { continue }
+                  !usesNativeFace(key), key != .mic else { continue }
             #if DEBUG
             logTouch(point, position: position, geometry: geometry)
             #endif
             let press = Press(order: nextPressOrder, position: position, key: key, point: point, aimed: aimed)
             if model.canBeginSwipe, case .character(let text) = key, text.first?.isLetter == true,
-               let layout = makeSwipeLayout(geometry) {
+               let layout = makeSwipeLayout(geometry, start: point) {
                 let pitch = geometry.unitWidth + geometry.metrics.keySpacing
                 press.swipeLayout = layout
                 press.swipeToken = model.swipeInputToken
@@ -485,6 +580,7 @@ final class KeyGridView: UIView {
             KeyTrace.measure("feedback") { model.keyDown(key) }
             if key == .delete { prediction.typed(.delete) }
             if key == .space { armCursor(press) }
+            if opensHandPicker(key, row: position.row) { armHandPicker(press) }
         }
     }
 
@@ -508,7 +604,7 @@ final class KeyGridView: UIView {
     /// Other layers, and a store with nothing learned, keep the raw point.
     private func adapted(_ point: CGPoint, geometry: KeyGridGeometry) -> CGPoint {
         let table = TouchAdaptationStore.offsets
-        guard model.layer == .letters, table.count == 26 else { return point }
+        guard duo == .ordinary, model.layer == .letters, table.count == 26 else { return point }
         let pitch = geometry.unitWidth + geometry.metrics.keySpacing, rowPitch = geometry.metrics.rowPitch
         return geometry.adjusted(point) { [unowned self] position in
             guard case .character(let text) = self.key(at: position), text.utf8.count == 1,
@@ -526,7 +622,7 @@ final class KeyGridView: UIView {
         for touch in touches {
             guard let press = presses[ObjectIdentifier(touch)], !press.committed else { continue }
             captureSwipe(press, touch: touch, event: event)
-            if !press.isSwipe { track(press, to: touch.location(in: self), time: touch.timestamp) }
+            if !press.committed && !press.isSwipe { track(press, to: touch.location(in: self), time: touch.timestamp) }
         }
     }
 
@@ -544,7 +640,7 @@ final class KeyGridView: UIView {
             KeyTrace.touch(timestamp: touch.timestamp, down: false)
             guard !press.committed else { continue }
             captureSwipe(press, touch: touch, event: event)
-            if !press.isSwipe { track(press, to: touch.location(in: self), time: touch.timestamp) }
+            if !press.committed && !press.isSwipe { track(press, to: touch.location(in: self), time: touch.timestamp) }
             if press.isSwipe { submitSwipe(press) } else { commit(press) }
         }
         // The press changed the model (shift off after a letter, a new layer); draw it in this
@@ -557,24 +653,26 @@ final class KeyGridView: UIView {
     }
 
     fileprivate func captureCancelled(_ touches: Set<UITouch>, event: UIEvent?) {
-        swipeTrail.clear()
+        guard !touches.isEmpty else { return }
         for touch in touches {
             rememberFinished(ObjectIdentifier(touch), at: touch.timestamp)
             guard let press = presses.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
+            if press.isSwipe { swipeTrail.clear() }
             finish(press, tap: false)
         }
     }
 
     private func submitSwipe(_ press: Press) {
         guard !press.committed, let layout = press.swipeLayout else { return }
+        swipeTrail.endStroke()
         let points = press.swipePoints
         finish(press, tap: false)
-        model.handleSwipe(points, layout: layout, token: press.swipeToken)
+        model.handleSwipe(points, layout: layout, token: press.swipeToken, split: splitKeys)
         prediction.reset()
         mic.userTypedKey()
     }
 
-    private func makeSwipeLayout(_ geometry: KeyGridGeometry) -> SwipeLayout? {
+    private func makeSwipeLayout(_ geometry: KeyGridGeometry, start: CGPoint) -> SwipeLayout? {
         let pitch = geometry.unitWidth + geometry.metrics.keySpacing
         guard pitch > 0 else { return nil }
         var centers: [Character: SwipePoint] = [:]
@@ -583,6 +681,7 @@ final class KeyGridView: UIView {
                 guard case .character(let text) = slot.key, text.count == 1,
                       let letter = text.lowercased().first, letter.isASCII, letter.isLetter else { continue }
                 let cap = geometry.caps[r][i]
+                if centers[letter] != nil, !geometry.sameHalf(start, CGPoint(x: cap.midX, y: cap.midY)) { continue }
                 centers[letter] = SwipePoint(x: Float(cap.midX / pitch), y: Float(cap.midY / pitch))
             }
         }
@@ -591,7 +690,21 @@ final class KeyGridView: UIView {
     }
 
     private func captureSwipe(_ press: Press, touch: UITouch, event: UIEvent?) {
+        if splitKeys, case .character = press.key, let geometry {
+            // A touch leaving its cluster cannot become a tap on a duplicate, or
+            // submit a long interpolated stroke across the unused glass.
+            for sample in event?.coalescedTouches(for: touch) ?? [touch] {
+                let p = sample.location(in: self)
+                if !geometry.sameHalf(press.point, p) || geometry.key(at: p) == nil {
+                    finish(press, tap: false)
+                    swipeTrail.clear()
+                    return
+                }
+            }
+        }
         guard press.swipeLayout != nil, model.canSwipe else { return }
+        let color = KeyboardTheme(isDark: isDark).accentToneUIColor
+        let style = model.preferences.swipeTrailStyle
         for sample in event?.coalescedTouches(for: touch) ?? [touch] {
             let p = sample.location(in: self)
             let point = SwipePoint(x: Float(p.x / press.swipePitch), y: Float(p.y / press.swipePitch),
@@ -607,6 +720,9 @@ final class KeyGridView: UIView {
                 press.swipePoints = press.swipePoints.enumerated().compactMap { $0.offset.isMultiple(of: 2) ? $0.element : nil }
             }
             press.swipePoints.append(point)
+            if press.isSwipe {
+                swipeTrail.append(p, color: color, style: style, now: sample.timestamp)
+            }
         }
         if !press.isSwipe, SwipeGate().isSwipe(travel: press.swipeTravel,
             duration: touch.timestamp - press.swipeStarted,
@@ -614,13 +730,11 @@ final class KeyGridView: UIView {
             press.isSwipe = true
             swipeTrail.clear()
             clearPressed(press)
-        }
-        if press.isSwipe {
-            let color = KeyboardTheme(isDark: isDark).accentGraphicUIColor
-            for p in press.swipePoints where p.t > press.trailTime {
+            // Show the lead-in once the movement qualifies. Later samples go straight to the trail.
+            for p in press.swipePoints {
                 swipeTrail.append(CGPoint(x: CGFloat(p.x) * press.swipePitch,
-                                          y: CGFloat(p.y) * press.swipePitch), color: color)
-                press.trailTime = p.t
+                                          y: CGFloat(p.y) * press.swipePitch), color: color,
+                                  style: style, now: press.swipeStarted + Double(p.t))
             }
         }
     }
@@ -629,6 +743,15 @@ final class KeyGridView: UIView {
     /// keyboard's balloon follows the finger); any other key just stops counting once the touch
     /// leaves its release tolerance, and comes back if the touch does.
     private func track(_ press: Press, to point: CGPoint, time: TimeInterval? = nil) {
+        press.latestX = point.x
+        if press.picksHand, let handPicker {
+            if let anchor = press.pickerAnchorX {
+                guard abs(point.x - anchor) >= Self.pickerSlide else { return }
+                press.pickerAnchorX = nil
+            }
+            if handPicker.select(handPicker.choice(atX: point.x)) { model.feedback.impact(.light) }
+            return
+        }
         // A talking hold ignores where the finger wanders; only lifting it matters.
         if press.talking { return }
         if var gesture = press.cursorGesture {
@@ -638,7 +761,7 @@ final class KeyGridView: UIView {
             // A sideways slide on space starts cursor control without waiting for the hold.
             if gesture.isActive, !wasActive, press.cursorToken == nil { activateCursor(press) }
             if let token = press.cursorToken {
-                model.moveCursorLines(motion.lines, wrapWidth: CursorLines.estimatedWrapWidth(points: bounds.width), token: token)
+                model.moveCursorLines(motion.lines, wrapWidth: CursorLines.estimatedWrapWidth(points: fullWidth), token: token)
                 model.moveCursor(motion.steps, token: token)
                 return
             }
@@ -669,6 +792,11 @@ final class KeyGridView: UIView {
 
     /// Types the press's key if the touch is still on it, then releases it.
     private func commit(_ press: Press) {
+        if press.picksHand, let choice = handPicker?.selection {
+            finish(press, tap: false)
+            model.chooseHand(choice)
+            return
+        }
         finish(press, tap: press.near)
     }
 
@@ -677,6 +805,13 @@ final class KeyGridView: UIView {
         press.committed = true
         press.cursorHold?.cancel()
         press.cursorHold = nil
+        press.handHold?.cancel()
+        press.handHold = nil
+        if press.picksHand {
+            handPicker?.hide()
+            clearPressed(press)
+            return
+        }
         if press.talking {
             clearPressed(press)
             setTalkLook(false)
@@ -690,7 +825,7 @@ final class KeyGridView: UIView {
             prediction.reset()
             return
         }
-        // Individual trail segments keep fading after lift without retaining decode samples.
+        // The trail keeps fading after lift without retaining decode samples.
         clearPressed(press)
         // A held delete stops repeating exactly once, whether released, rolled over or cancelled.
         if press.key == .delete {
@@ -716,12 +851,11 @@ final class KeyGridView: UIView {
         case .shift, .switchLayer, .emoji:
             model.handleTap(key)
         case .paste:
-            model.handleTap(key)
-            mic.userTypedKey()
+            model.explainPasteAccess()
         case .globe, .mic:
             break
         case .character, .space, .newline:
-            model.handleTap(key, touch: touch, raw: raw)
+            model.handleTap(key, touch: touch, raw: raw, trainOffsets: duo == .ordinary)
             mic.userTypedKey()
         }
     }
@@ -809,20 +943,15 @@ final class KeyGridView: UIView {
         applySpaceOwnedLook()
     }
 
-    /// The space bar's label follows the dictation (starting, then listening) while a hold owns it.
     /// A dictation that ended with the finger still down (Stop or Cancel in the strip, an error)
     /// hands the keys back at once; the held press still types nothing when it lifts.
     private func followTalkPhase() {
         guard talkActive, mic.spaceTalkPhase != shownTalkPhase else { return }
         guard mic.spaceTalkPhase != .none else { setTalkLook(false); return }
         shownTalkPhase = mic.spaceTalkPhase
-        for (r, row) in slots.enumerated() {
-            for (i, slot) in row.enumerated() where slot.key == .space { applyGlyph(row: r, index: i, force: true) }
-        }
         refreshAccessibilityLabels()
     }
 
-    /// Cursor control and a talking hold both blank every label but space's and dim the globe.
     private func applySpaceOwnedLook() {
         for (r, row) in slots.enumerated() {
             for i in row.indices { applyGlyph(row: r, index: i, force: true) }
@@ -830,6 +959,57 @@ final class KeyGridView: UIView {
         globeButton.alpha = spaceOwnsGrid ? 0.35 : 1
         refreshAccessibilityLabels()
     }
+
+    // MARK: One-handed picker
+
+    /// The keys that open the picker, as Apple's globe and emoji keys do: the layer switch on the
+    /// bottom row, and the emoji key. Only once Settings turns the mode on, and only on a keyboard
+    /// the mode fits (an iPhone in portrait).
+    private func opensHandPicker(_ key: Key, row: Int) -> Bool {
+        guard duo.allowsOneHand, model.preferences.oneHandedEnabled, OneHandedLayout.isAvailable(width: fullWidth) else { return false }
+        switch key {
+        case .switchLayer: return row == slots.count - 1
+        case .emoji: return true
+        default: return false
+        }
+    }
+
+    private func armHandPicker(_ press: Press) {
+        let work = DispatchWorkItem { [weak self, weak press] in
+            guard let self, let press, press.near, !press.committed,
+                  self.presses.values.contains(where: { $0 === press }) else { return }
+            self.openHandPicker(press)
+        }
+        press.handHold = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.handHoldDuration, execute: work)
+    }
+
+    private func openHandPicker(_ press: Press) {
+        guard let cap = geometry?.cap(press.position) else { return }
+        press.handHold = nil
+        press.picksHand = true
+        press.pickerAnchorX = press.latestX
+        let picker = handPicker ?? {
+            let made = HandPickerLayer()
+            made.isHidden = true
+            layer.addSublayer(made)
+            handPicker = made
+            return made
+        }()
+        // Above the balloons and the trail.
+        layer.insertSublayer(picker, at: UInt32(layer.sublayers?.count ?? 0))
+        picker.show(over: cap, in: bounds, current: model.hand, fill: keyFill, isDark: isDark, scale: scale)
+        model.feedback.impact(.medium)
+        UIAccessibility.post(notification: .announcement, argument: "Choose where the keys sit")
+    }
+
+    #if DEBUG
+    /// For tests: the picker's frame and choice while it is open.
+    var handPickerState: (frame: CGRect, selection: KeyboardHand)? {
+        guard let handPicker, !handPicker.isHidden else { return nil }
+        return (handPicker.frame, handPicker.selection)
+    }
+    #endif
 
     // MARK: Pressed look
 
@@ -933,7 +1113,7 @@ final class KeyGridView: UIView {
                 UIAccessibilityCustomAction(name: move.name) { [weak self] _ in
                     guard let self, let token = self.model.beginCursorControl() else { return false }
                     self.prediction.reset()
-                    self.model.moveCursorLines(move.lines, wrapWidth: CursorLines.estimatedWrapWidth(points: self.bounds.width), token: token)
+                    self.model.moveCursorLines(move.lines, wrapWidth: CursorLines.estimatedWrapWidth(points: self.fullWidth), token: token)
                     self.model.moveCursor(move.steps, resisting: false, token: token)
                     self.model.endCursorControl(token)
                     self.mic.userTypedKey()
@@ -941,6 +1121,14 @@ final class KeyGridView: UIView {
                 }
             } : nil
             element.accessibilityTraits = key == .shift && model.shift.isActive ? [.button, .selected] : .button
+            if opensHandPicker(key, row: element.position.row) {
+                element.accessibilityCustomActions = HandPickerLayer.choices.filter { $0 != model.hand }.map { hand in
+                    UIAccessibilityCustomAction(name: hand.label) { [weak self] _ in
+                        self?.model.chooseHand(hand)
+                        return true
+                    }
+                }
+            }
         }
     }
 
@@ -1025,75 +1213,296 @@ private final class SwipeTouchCapture: UIGestureRecognizer, UIGestureRecognizerD
 }
 
 
-/// A comet: a round head at the finger that narrows to nothing behind it. Each segment is
-/// drawn opaque with round caps and only shrinks as it ages, so overlapping caps never stack
-/// into darker dots; the softness comes from the layer's group opacity. Core Animation ages
-/// the segments even when the finger pauses; no display link or retained touches.
-/// Short and see-through on purpose, closer to the system keyboard's trail: it shows where the
-/// finger has just been without covering the keys being read.
+/// A short history of real touches. Spacing the control points gives dense samples at a
+/// tight corner room to bend, while the last point always follows the finger.
+struct SwipeTrailGeometry {
+    struct Sample {
+        var point: CGPoint
+        var time: CFTimeInterval
+
+        func mixed(with other: Self, fraction: CGFloat) -> Self {
+            Sample(point: CGPoint(x: point.x + (other.point.x - point.x) * fraction,
+                                  y: point.y + (other.point.y - point.y) * fraction),
+                   time: time + (other.time - time) * fraction)
+        }
+    }
+
+    static let capacity = 96
+    private(set) var samples: [Sample] = []
+
+    mutating func append(_ point: CGPoint, at time: CFTimeInterval, lifetime: CFTimeInterval) {
+        guard point.x.isFinite, point.y.isFinite, time.isFinite else { return }
+        if let last = samples.last {
+            guard time >= last.time else { return }
+            if time - last.time >= lifetime { samples.removeAll(keepingCapacity: true) }
+            else if point == last.point { return }
+        }
+        if samples.count >= 2 {
+            let anchor = samples[samples.count - 2].point
+            let tip = samples[samples.count - 1].point
+            let dx = tip.x - anchor.x, dy = tip.y - anchor.y
+            if hypot(dx, dy) < 10, dx * (point.x - tip.x) + dy * (point.y - tip.y) > 0 {
+                samples.removeLast()
+            }
+        }
+        if samples.count == Self.capacity { samples.removeFirst() }
+        samples.append(Sample(point: point, time: time))
+    }
+
+    /// Sweep discs along the rounded centerline. The common tangents meet each disc at
+    /// the same angle on both edges, even when one sample is much older than its neighbor.
+    func outline(at now: CFTimeInterval, lifetime: CFTimeInterval, width: CGFloat) -> CGPath? {
+        guard samples.count > 1, let tip = samples.last, now - tip.time < lifetime,
+              let live = samples.firstIndex(where: { now - $0.time < lifetime }) else { return nil }
+        let start = max(0, live - 1)
+        let path = CGMutablePath()
+        var pen = samples[start]
+        func radius(_ sample: Sample) -> CGFloat {
+            width / 2 * max(0, min(1, 1 - (now - sample.time) / lifetime))
+        }
+        func draw(to end: Sample) {
+            var begin = pen
+            pen = end
+            let cutoff = now - lifetime
+            guard end.time > cutoff else { return }
+            if begin.time < cutoff {
+                begin = begin.mixed(with: end, fraction: (cutoff - begin.time) / (end.time - begin.time))
+            }
+            let a = radius(begin), b = radius(end)
+            let dx = end.point.x - begin.point.x, dy = end.point.y - begin.point.y
+            let distance = hypot(dx, dy)
+            if distance <= b - a {
+                path.move(to: CGPoint(x: end.point.x + b, y: end.point.y))
+                path.addArc(center: end.point, radius: b, startAngle: 0, endAngle: .pi * 2, clockwise: false)
+            } else {
+                let angle = atan2(dy, dx), spread = acos((a - b) / distance)
+                let lower = angle - spread, upper = angle + spread
+                path.move(to: CGPoint(x: begin.point.x + a * cos(lower), y: begin.point.y + a * sin(lower)))
+                path.addArc(center: end.point, radius: b, startAngle: lower, endAngle: upper, clockwise: false)
+                if a > 0 {
+                    path.addArc(center: begin.point, radius: a, startAngle: upper, endAngle: lower, clockwise: false)
+                }
+            }
+            path.closeSubpath()
+        }
+        for index in (start + 1)..<samples.count {
+            let control = samples[index - 1]
+            let end = control.mixed(with: samples[index], fraction: 0.5)
+            let begin = pen
+            // The first half segment is straight. At a reversal, round the cap at
+            // the actual fingertip instead of cutting back inside the corner.
+            if index == start + 1 {
+                draw(to: end)
+                continue
+            }
+            let incoming = CGVector(dx: control.point.x - begin.point.x, dy: control.point.y - begin.point.y)
+            let outgoing = CGVector(dx: end.point.x - control.point.x, dy: end.point.y - control.point.y)
+            if incoming.dx * outgoing.dx + incoming.dy * outgoing.dy
+                < -0.5 * hypot(incoming.dx, incoming.dy) * hypot(outgoing.dx, outgoing.dy) {
+                draw(to: control)
+                draw(to: end)
+                continue
+            }
+            // Bound the gap between a chord and the true curve to 0.04 pt. A fixed
+            // number of chords showed flat sides on sparse, fast reversals.
+            let bend = hypot(begin.point.x - 2 * control.point.x + end.point.x,
+                             begin.point.y - 2 * control.point.y + end.point.y)
+            let steps = Int(min(64, max(1, ceil(sqrt(bend / 0.16)))))
+            for step in 1...steps {
+                let t = CGFloat(step) / CGFloat(steps)
+                draw(to: begin.mixed(with: control, fraction: t)
+                    .mixed(with: control.mixed(with: end, fraction: t), fraction: t))
+            }
+        }
+        draw(to: tip)
+        return path
+    }
+}
+
+/// Draws Rainbow Road: colored centerline pieces, clipped to the trail's outline. It sizes
+/// itself to the outline's bounds each frame so only the few points under the trail redraw.
+final class RainbowRibbonLayer: CALayer {
+    struct Stroke {
+        var from: CGPoint
+        var to: CGPoint
+        var color: CGColor
+    }
+
+    private var outline: CGPath?
+    private var strokes: [Stroke] = []
+
+    override init() {
+        super.init()
+        contentsScale = UITraitCollection.current.displayScale
+        needsDisplayOnBoundsChange = true
+    }
+
+    override init(layer: Any) { super.init(layer: layer) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func update(path: CGPath?, strokes: [Stroke]) {
+        outline = path
+        self.strokes = strokes
+        guard let path, !path.isEmpty else {
+            contents = nil
+            frame = .zero
+            return
+        }
+        let box = path.boundingBoxOfPath.insetBy(dx: -1, dy: -1).integral
+        if frame != box { frame = box }
+        setNeedsDisplay()
+    }
+
+    override func draw(in context: CGContext) {
+        guard let outline else { return }
+        context.translateBy(x: -frame.minX, y: -frame.minY)
+        context.addPath(outline)
+        context.clip()
+        // Square caps: each piece runs on under the next, so antialiased ends leave no hairline,
+        // and the straight overlap of two near-identical hues shows no band (round caps did).
+        context.setLineCap(.square)
+        // Wider than the head, so the clip and not the stroke decides the edge.
+        let width = SwipeTrailLayer.headWidth * 1.5
+        context.setLineWidth(width)
+        for stroke in strokes {
+            context.setStrokeColor(stroke.color)
+            context.move(to: stroke.from)
+            context.addLine(to: stroke.to)
+            context.strokePath()
+        }
+        // The round head reaches past the last piece; fill it in the fingertip's color.
+        if let head = strokes.last {
+            context.setFillColor(head.color)
+            context.fillEllipse(in: CGRect(origin: head.to, size: .zero).insetBy(dx: -width, dy: -width))
+        }
+    }
+}
+
 @MainActor
 final class SwipeTrailLayer: CALayer {
     static let lifetime: CFTimeInterval = 0.24
-    /// The whole trail's opacity, applied once to the group.
     static let groupOpacity: Float = 0.62
-    static let maximumSegments = 96
-    /// Head width at the finger; the tail tapers from here to zero.
     static let headWidth: CGFloat = 8
-    private var previous: CGPoint?
-    private var midpoint: CGPoint?
-    private var segments: [(layer: CAShapeLayer, born: CFTimeInterval)] = []
+    /// Rainbow Road: finger travel, in points, for one full turn of the hue wheel.
+    static let rainbowWavelength: CGFloat = 260
+    private let ribbon = CAShapeLayer()
+    private let rainbow = RainbowRibbonLayer()
+    private var geometry = SwipeTrailGeometry()
+    private var trailStyle = SwipeTrailStyle.accent
+    /// Total finger travel, kept across gestures so each swipe picks the rainbow up where the
+    /// last one left it instead of always starting on the same color.
+    private(set) var travel: CGFloat = 0
+    private var lastPoint: CGPoint?
+    private var clock: CADisplayLink?
+    private var releasedAt: CFTimeInterval?
+    private var visibleLifetime = lifetime
 
     override init() {
         super.init()
         actions = KeyBalloonLayer.noActions
+        ribbon.actions = KeyBalloonLayer.noActions
         opacity = Self.groupOpacity
-        allowsGroupOpacity = true
+        addSublayer(ribbon)
+        rainbow.actions = KeyBalloonLayer.noActions
+        rainbow.isHidden = true
+        addSublayer(rainbow)
     }
+
+    /// The Rainbow Road color after `travel` points of finger movement.
+    static func rainbowColor(travel: CGFloat) -> UIColor {
+        let turn = travel / rainbowWavelength
+        return UIColor(hue: turn - turn.rounded(.down), saturation: 0.8, brightness: 1, alpha: 1)
+    }
+
     override init(layer: Any) { super.init(layer: layer) }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func clear() {
-        for segment in segments { segment.layer.removeFromSuperlayer() }
-        segments.removeAll(keepingCapacity: true)
-        previous = nil
-        midpoint = nil
+        clock?.invalidate()
+        clock = nil
+        releasedAt = nil
+        geometry = SwipeTrailGeometry()
+        lastPoint = nil
+        ribbon.path = nil
+        rainbow.update(path: nil, strokes: [])
     }
 
-    func append(_ point: CGPoint, color: UIColor, now: CFTimeInterval = CACurrentMediaTime()) {
-        guard point.x.isFinite, point.y.isFinite else { return }
-        defer { previous = point }
-        guard let previous else { midpoint = point; return }
-        guard point != previous else { return }
-        while let first = segments.first,
-              now - first.born >= Self.lifetime || segments.count >= Self.maximumSegments {
-            first.layer.removeFromSuperlayer()
-            segments.removeFirst()
+    func append(_ point: CGPoint, color: UIColor, style: SwipeTrailStyle = .accent,
+                now: CFTimeInterval = CACurrentMediaTime()) {
+        visibleLifetime = UIAccessibility.isReduceMotionEnabled ? 0.12 : Self.lifetime
+        if point.x.isFinite, point.y.isFinite {
+            if let lastPoint { travel += hypot(point.x - lastPoint.x, point.y - lastPoint.y) }
+            lastPoint = point
+            // Wrap whole turns so the value never grows large enough to lose precision.
+            if travel > 1_000_000 { travel.formTruncatingRemainder(dividingBy: Self.rainbowWavelength) }
         }
-        let next = CGPoint(x: (previous.x + point.x) / 2, y: (previous.y + point.y) / 2)
-        let path = CGMutablePath()
-        path.move(to: midpoint ?? previous)
-        path.addQuadCurve(to: next, control: previous)
-        midpoint = next
-        let segment = CAShapeLayer()
-        segment.actions = KeyBalloonLayer.noActions
-        segment.path = path
-        segment.fillColor = nil
-        segment.strokeColor = color.withAlphaComponent(1).cgColor
-        segment.lineCap = .round
-        segment.lineJoin = .round
-        // The model value is where the taper ends, so a finished segment draws nothing.
-        segment.lineWidth = 0
-        addSublayer(segment)
-        let reduced = UIAccessibility.isReduceMotionEnabled
-        let taper = CABasicAnimation(keyPath: "lineWidth")
-        taper.fromValue = Self.headWidth
-        taper.toValue = 0
-        // Reduce Motion keeps a short dot under the finger instead of a sweeping tail.
-        taper.duration = reduced ? 0.12 : Self.lifetime
-        // Even narrowing: since points arrive at a steady rate, width falls in proportion to
-        // distance behind the finger, which reads as a cone rather than a uniform line.
-        taper.timingFunction = CAMediaTimingFunction(name: .linear)
-        segment.add(taper, forKey: "taper")
-        segments.append((segment, now))
+        geometry.append(point, at: now, lifetime: visibleLifetime)
+        trailStyle = style
+        ribbon.fillColor = color.cgColor
+        ribbon.isHidden = style == .rainbowRoad
+        rainbow.isHidden = style != .rainbowRoad
+        guard let tip = geometry.samples.last else { return }
+        draw(at: tip.time)
+    }
+
+    private func draw(at time: CFTimeInterval) {
+        if let path = geometry.outline(at: time, lifetime: visibleLifetime, width: Self.headWidth) {
+            ribbon.path = path
+        } else if let tip = geometry.samples.last, ribbon.path != nil {
+            // A sampling gap has no connecting stroke, just the disc under the fingertip.
+            let radius = Self.headWidth / 2 * max(0, 1 - (time - tip.time) / visibleLifetime)
+            let bounds = CGRect(origin: tip.point, size: .zero).insetBy(dx: -radius, dy: -radius)
+            ribbon.path = CGPath(ellipseIn: bounds, transform: nil)
+        }
+        if trailStyle == .rainbowRoad { rainbow.update(path: ribbon.path, strokes: rainbowStrokes()) }
+    }
+
+    /// The centerline in short pieces, each colored by the travel at its midpoint, counted back
+    /// from the fingertip. The ribbon's outline clips them, so the taper and round head stay
+    /// exactly the accent trail's and the color follows the path around every bend.
+    private func rainbowStrokes() -> [RainbowRibbonLayer.Stroke] {
+        let samples = geometry.samples
+        guard let tip = samples.last else { return [] }
+        if samples.count == 1 {
+            return [.init(from: tip.point, to: tip.point, color: Self.rainbowColor(travel: travel).cgColor)]
+        }
+        var strokes: [RainbowRibbonLayer.Stroke] = []
+        strokes.reserveCapacity(samples.count)
+        var along = travel
+        for index in stride(from: samples.count - 1, to: 0, by: -1) {
+            let end = samples[index].point, begin = samples[index - 1].point
+            let length = hypot(end.x - begin.x, end.y - begin.y)
+            // Pieces of at most 2 pt turn the hue under 1% each, so no band shows between them.
+            let pieces = max(1, Int((length / 2).rounded(.up)))
+            for piece in 0..<pieces {
+                let t0 = CGFloat(piece) / CGFloat(pieces), t1 = CGFloat(piece + 1) / CGFloat(pieces)
+                let from = CGPoint(x: end.x + (begin.x - end.x) * t0, y: end.y + (begin.y - end.y) * t0)
+                let to = CGPoint(x: end.x + (begin.x - end.x) * t1, y: end.y + (begin.y - end.y) * t1)
+                strokes.append(.init(from: from, to: to,
+                                     color: Self.rainbowColor(travel: along - length * (t0 + t1) / 2).cgColor))
+            }
+            along -= length
+        }
+        // Drawn tail first, so the fingertip's color is always on top where pieces overlap.
+        return strokes.reversed()
+    }
+
+    func endStroke() {
+        guard ribbon.path != nil, clock == nil else { return }
+        releasedAt = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(refresh))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        clock = link
+    }
+
+    @objc private func refresh() {
+        guard let releasedAt, let tip = geometry.samples.last else { return }
+        let now = tip.time + (CACurrentMediaTime() - releasedAt)
+        if now - tip.time < visibleLifetime {
+            draw(at: now)
+        } else {
+            clear()
+        }
     }
 }

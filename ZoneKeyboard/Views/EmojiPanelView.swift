@@ -4,7 +4,7 @@ import Observation
 import UIKit
 import ZoneCore
 
-/// Emoji in place of the keys, opened by the emoji key left of space (Settings > Keyboard >
+/// Emoji in place of the keys, opened by the emoji key left of space (Settings > Zone keyboard >
 /// Emoji key). A keyboard extension cannot switch to Apple's emoji keyboard (it can only go to
 /// the next keyboard or show the keyboard list), so Zone draws its own, laid out like Apple's:
 /// the category name at the top, columns that scroll sideways, and a bottom row of ABC, the
@@ -162,6 +162,7 @@ final class EmojiPanelView: UIView, UICollectionViewDataSource, UICollectionView
             _ = model.explicitDark
             _ = model.needsGlobe
             _ = mic.mode
+            _ = mic.panelSection
             _ = mic.showsHistory
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
@@ -174,7 +175,7 @@ final class EmojiPanelView: UIView, UICollectionViewDataSource, UICollectionView
         }
     }
 
-    private var shouldShow: Bool { model.showsEmoji && mic.mode == .type && !mic.showsHistory }
+    private var shouldShow: Bool { model.showsEmoji && mic.mode == .type && mic.panelSection == nil && !mic.showsHistory }
 
     private func syncVisibility(animated: Bool) {
         let visible = shouldShow

@@ -23,6 +23,15 @@ import UIKit
         let keyboards: [String: UIKeyboardType] = ["--kbd-url": .URL, "--kbd-email": .emailAddress,
                                                    "--kbd-search": .webSearch, "--kbd-twitter": .twitter]
         for (flag, type) in keyboards where args.contains(flag) { field.keyboardType = type }
+        if args.contains("--keyboard-accessory") {
+            let accessory = UILabel(frame: CGRect(x: 0, y: 0, width: 320, height: 44))
+            accessory.autoresizingMask = .flexibleWidth
+            accessory.text = "Host accessory"
+            accessory.textAlignment = .center
+            accessory.backgroundColor = .systemYellow
+            accessory.accessibilityIdentifier = "oracle.accessory"
+            field.inputAccessoryView = accessory
+        }
         field.layer.borderWidth = 1
         clear.setTitle("Clear", for: .normal)
         clear.accessibilityIdentifier = "clear"

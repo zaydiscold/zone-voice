@@ -68,7 +68,8 @@ public final class WordPairs: SwipeContextModel, @unchecked Sendable {
 
     /// The main bundle's table for `WordList.shared`, opened once per process: swipe typing and
     /// tap autocorrect read the same one.
-    public static let shared: WordPairs? = WordList.shared.flatMap { load(from: .main, words: $0) }
+    private static let cache = RetryingResource { WordList.shared.flatMap { load(from: .main, words: $0) } }
+    public static var shared: WordPairs? { cache.value() }
 
     /// 64-bit FNV-1a over every entry's bytes in index order.
     public static func digest(of words: WordList) -> UInt64 {

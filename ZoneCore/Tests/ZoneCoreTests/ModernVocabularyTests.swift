@@ -39,11 +39,17 @@ final class ModernVocabularyTests: XCTestCase {
         XCTAssertEqual(casual("I asked clad about it"), "I asked claude about it")
         XCTAssertEqual(casual("I use OpenAI and deep seek and Chat GPT on test flight"), "I use openai and deepseek and chatgpt on testflight")
         XCTAssertEqual(casual("Read the chat GPT stuff. open AI made it"), "Read the chatgpt stuff. OpenAI made it")
-        XCTAssertEqual(casual("claude's answer and two llms"), "Claude's answer and two LLMs")
+        XCTAssertEqual(casual("claude's answer and two llms"), "Claude's answer and 2 LLMs")
         XCTAssertEqual(casual("the solidworks api on my iphone"), "The solidworks API on my iPhone")
         XCTAssertEqual(casual("I looked on Google and Reddit"), "I looked on google and reddit")
         XCTAssertEqual(TextStyle.veryCasual.apply("I asked Clawed Code and open AI"), "i asked claude code and openai")
         XCTAssertEqual(casual("ask Reddit", personalWords: ["Reddit"]), "Ask Reddit")
+    }
+
+    func testSpokenFormsSharingAnInitialKeepCaseSpacingAndProtectedWords() {
+        let text = "open\tai and chat g p t use APIs, not openipro or https://example.com/openi"
+        XCTAssertEqual(ModernVocabulary.correcting(text, personalWords: ["APIs"]),
+                       "OpenAI and ChatGPT use APIs, not openipro or https://example.com/openi")
     }
 
     func testOrdinaryEnglishIsLeftAlone() {

@@ -14,7 +14,7 @@ struct AboutView: View {
                 Text("I broke my dominant hand kickboxing and Apple's built-in dictation was awful, so I built Zone.")
                 Text("Zayd")
                     .font(.system(size: 34, weight: .regular, design: .serif).italic())
-                    .foregroundStyle(Zone.accentText(scheme))
+                    .foregroundStyle(Zone.ink(scheme))
                     .padding(.top, 6)
                     .accessibilityLabel("Signed, Zayd")
             }

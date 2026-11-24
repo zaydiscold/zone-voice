@@ -1226,6 +1226,7 @@ final class DotScopeHostView: UIView {
     }
 
     var reduceMotion = false
+    var frozenPreview = false
     var useDemoVoice = false
     var loudnessProvider: (() -> Float)?
 
@@ -1475,7 +1476,7 @@ final class DotScopeHostView: UIView {
     private func updateAnimatingState() {
         let visible = isEffectivelyVisible
         let wantsFrames: Bool
-        if !visible {
+        if !visible || frozenPreview {
             wantsFrames = false
         } else {
             wantsFrames = switch phase {
@@ -1496,7 +1497,13 @@ final class DotScopeHostView: UIView {
         }
     }
 
+    #if DEBUG
+    private(set) var probeFrames = 0
+    #endif
     func stepAndRender(timestamp: CFTimeInterval, targetTimestamp: CFTimeInterval) {
+        #if DEBUG
+        probeFrames &+= 1
+        #endif
         let dt: Float
         if let prevTarget = lastTargetTimestamp {
             dt = Float(min(0.05, max(1.0 / 240.0, targetTimestamp - prevTarget)))
@@ -1635,6 +1642,7 @@ struct DotScopeView: UIViewRepresentable {
     var tuning: DotScopeTuning = .hud
     var drawPlate: Bool = true
     var demoVoice: Bool = ProcessInfo.processInfo.arguments.contains("--snap-state")
+    var frozenPreview = false
     var loudnessProvider: (() -> Float)? = nil
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1644,6 +1652,7 @@ struct DotScopeView: UIViewRepresentable {
         let view = DotScopeHostView(tuning: tuning)
         view.reduceMotion = reduceMotion
         view.isDark = colorScheme == .dark
+        view.frozenPreview = frozenPreview
         view.useDemoVoice = demoVoice
         view.loudnessProvider = loudnessProvider
         view.drawPlate = drawPlate
@@ -1654,6 +1663,7 @@ struct DotScopeView: UIViewRepresentable {
     func updateUIView(_ uiView: DotScopeHostView, context: Context) {
         uiView.reduceMotion = reduceMotion
         uiView.isDark = colorScheme == .dark
+        uiView.frozenPreview = frozenPreview
         uiView.useDemoVoice = demoVoice
         uiView.loudnessProvider = loudnessProvider
         uiView.updateTuning(tuning)

@@ -16,12 +16,12 @@ public enum MeterStyle: String, Codable, CaseIterable, Sendable {
         case .wave: "Wave"
         case .mirrored: "Mirrored"
         case .bars: "Bars"
-        case .scope: "Scope"
+        case .scope: "Hex"
         case .ink: "Ink"
         case .glyphs: "Glyphs"
         case .branch: "Branch"
         case .inkblot: "Inkblot"
-        case .lanes: "Lanes"
+        case .lanes: "Transcription Hero"
         case .stars: "Stars"
         }
     }
@@ -31,6 +31,20 @@ public enum MeterStyle: String, Codable, CaseIterable, Sendable {
         switch self {
         case .ink, .glyphs, .branch, .inkblot, .lanes, .stars: true
         case .wave, .mirrored, .bars, .scope: false
+        }
+    }
+}
+
+/// How the swipe trail is colored. `accent` follows the keyboard's tone; `rainbowRoad` turns
+/// the hue with finger travel and carries it from one swipe to the next.
+public enum SwipeTrailStyle: String, Codable, CaseIterable, Sendable {
+    case accent
+    case rainbowRoad
+
+    public var label: String {
+        switch self {
+        case .accent: "Accent"
+        case .rainbowRoad: "Rainbow Road"
         }
     }
 }
@@ -48,6 +62,7 @@ public struct KeyboardPreferences: Codable, Equatable, Sendable {
     /// A Paste key beside a narrower Return in the compact dictation face.
     public var showsPasteKey: Bool
     /// An emoji key left of space that opens the keyboard's own emoji panel.
+    public var emojiPredictions: Bool
     public var showsEmojiKey: Bool
     /// Hide the standalone Zone home mark. App navigation remains in the keyboard key's menu.
     public var hideHomeButton: Bool
@@ -68,6 +83,7 @@ public struct KeyboardPreferences: Codable, Equatable, Sendable {
     /// A said "smiley face" is written ":)" in the texting styles (`SpokenEmoticons`).
     public var spokenEmoticons: Bool
     /// Experimental: first through ninth written 1st to 9th where they rank something (`SpokenOrdinals`).
+    public var numbers: NumberPreferences
     public var smallOrdinals: Bool
     /// Beta, off by default: California Mode removes the filler "like" from dictation.
     public var californiaMode: CaliforniaMode
@@ -76,23 +92,71 @@ public struct KeyboardPreferences: Codable, Equatable, Sendable {
     public var checksDoubtfulWords: Bool
     /// Off by default: curly quotes, long dashes and the ellipsis as they are typed (`SmartPunctuation`).
     public var smartPunctuation: Bool
+    /// The swipe trail's coloring. Accent unless the person picks Rainbow Road.
+    public var swipeTrailStyle: SwipeTrailStyle
+    /// Off by default: the keys can be narrowed toward one thumb (`OneHandedLayout`), chosen on
+    /// the keyboard by holding 123. Settings picks the thumb it starts on and how wide the keys are.
+    public var oneHandedEnabled: Bool
+    public var oneHandedSide: OneHandedSide
+    /// The keys' share of the keyboard's width in one-handed mode (`OneHandedLayout.widthRange`).
+    public var oneHandedWidth: Double
     /// What holding space does: move the cursor (the default) or, in Beta, talk (`SpaceTalk`).
     public var spaceHold: SpaceHold
+    /// What the space bar shows: a line by default (`SpaceBarLabel`).
+    public var spaceBar: SpaceBarLabel
+    /// Off by default. The keyboard offers a new copy in Recent and saves text delivered by a native Paste tap.
+    public var clipboardHistoryEnabled: Bool
+    /// When turned on, copies that look like a password, a code, a card number or an access key
+    /// are not kept (`ClipboardPolicy.skipAfterReading`).
+    public var clipboardAutomatic: Bool
+    public var clipboardSkipsSecrets: Bool
+    /// On by default: with the microphone not kept ready, a mic tap records in the keyboard
+    /// instead of opening Zone (`KeyboardCapture`). A switch, so it can be turned off if iOS ends it.
+    public var dictatesInKeyboard: Bool
+    /// Off by default. On, a recording the keyboard made is never handed to the iPhone's own
+    /// speech model. Where Zone's model cannot hear it in the keyboard, the shared recording is available in Zone.
+    public var neverAppleSpeech: Bool
+    public static let defaultSoundSet = "wood"
+    public static let cueVolume: Float = 0.55
+    public var soundSet: String
+    /// Nil when Finish when quiet is off. Older saved preferences decode with it off.
+    public var finishWhenQuietWait: TimeInterval? {
+        get { finishWhenQuiet ? quietWait : nil }
+        set {
+            finishWhenQuiet = newValue != nil
+            if let newValue { quietWait = SilenceFinish.nearestChoice(newValue) }
+        }
+    }
+
+    /// Quick choices and their app revisions are published in the same snapshot.
+    public var soundsEnabled = true
+    public var finishWhenQuiet = false
+    public var quietWait = SilenceFinish.defaultWait
+    public var quickSettingGeneration: QuickSettingRequest.Stamp?
+    public var quickSettingStamps: [String: QuickSettingRequest.Stamp] = [:]
 
     public init(autocorrectEnabled: Bool = true, hapticsEnabled: Bool = true, showSuggestions: Bool = true,
-                meterStyle: MeterStyle = .wave, showsPasteKey: Bool = false, showsEmojiKey: Bool = false,
+                meterStyle: MeterStyle = .wave, showsPasteKey: Bool = false, showsEmojiKey: Bool = false, emojiPredictions: Bool = true,
                 dictationFollowsShift: Bool = true, handleRecognition: Bool = true, swipeTypingEnabled: Bool = false,
                 swipeLearningEnabled: Bool = true, swipeLearningReset: String = "", autoCapitalizationEnabled: Bool = true,
                 hideHomeButton: Bool = false, spokenCorrections: Bool = false,
                 capsLockDropsPunctuation: Bool = false, spokenEmoticons: Bool = true,
-                smallOrdinals: Bool = false, californiaMode: CaliforniaMode = .off, checksDoubtfulWords: Bool = false,
-                smartPunctuation: Bool = false, spaceHold: SpaceHold = .moveCursor) {
+                smallOrdinals: Bool = false, numbers: NumberPreferences = .init(), californiaMode: CaliforniaMode = .off, checksDoubtfulWords: Bool = false,
+                smartPunctuation: Bool = false, spaceHold: SpaceHold = .moveCursor,
+                spaceBar: SpaceBarLabel = .default, oneHandedEnabled: Bool = false,
+                oneHandedSide: OneHandedSide = .right, oneHandedWidth: Double = OneHandedLayout.defaultWidth,
+                clipboardHistoryEnabled: Bool = false, clipboardSkipsSecrets: Bool = false, clipboardAutomatic: Bool = false,
+                dictatesInKeyboard: Bool = true, finishWhenQuietWait: TimeInterval? = nil,
+                neverAppleSpeech: Bool = false,
+                soundsEnabled: Bool = true, soundSet: String = KeyboardPreferences.defaultSoundSet,
+                swipeTrailStyle: SwipeTrailStyle = .accent) {
         self.autocorrectEnabled = autocorrectEnabled
         self.autoCapitalizationEnabled = autoCapitalizationEnabled
         self.hapticsEnabled = hapticsEnabled
         self.showSuggestions = showSuggestions
         self.meterStyle = meterStyle
         self.showsPasteKey = showsPasteKey
+        self.emojiPredictions = emojiPredictions
         self.showsEmojiKey = showsEmojiKey
         self.hideHomeButton = hideHomeButton
         self.dictationFollowsShift = dictationFollowsShift
@@ -103,17 +167,33 @@ public struct KeyboardPreferences: Codable, Equatable, Sendable {
         self.spokenCorrections = spokenCorrections
         self.capsLockDropsPunctuation = capsLockDropsPunctuation
         self.spokenEmoticons = spokenEmoticons
+        self.numbers = numbers
         self.smallOrdinals = smallOrdinals
         self.californiaMode = californiaMode
         self.checksDoubtfulWords = checksDoubtfulWords
         self.smartPunctuation = smartPunctuation
+        self.swipeTrailStyle = swipeTrailStyle
+        self.oneHandedEnabled = oneHandedEnabled
+        self.oneHandedSide = oneHandedSide
+        self.oneHandedWidth = OneHandedLayout.clamped(oneHandedWidth)
         self.spaceHold = spaceHold
+        self.spaceBar = spaceBar
+        self.clipboardHistoryEnabled = clipboardHistoryEnabled
+        self.clipboardAutomatic = clipboardAutomatic
+        self.clipboardSkipsSecrets = clipboardSkipsSecrets
+        self.dictatesInKeyboard = dictatesInKeyboard
+        self.neverAppleSpeech = neverAppleSpeech
+        self.soundsEnabled = soundsEnabled
+        self.soundSet = soundSet
+        self.finishWhenQuietWait = finishWhenQuietWait.map(SilenceFinish.nearestChoice)
     }
     private enum CodingKeys: String, CodingKey {
-        case autoCapitalizationEnabled, autocorrectEnabled, hapticsEnabled, showSuggestions, meterStyle, showsPasteKey, showsEmojiKey,
+        case autoCapitalizationEnabled, autocorrectEnabled, hapticsEnabled, showSuggestions, meterStyle, showsPasteKey, showsEmojiKey, emojiPredictions,
              dictationFollowsShift, handleRecognition, swipeTypingEnabled, swipeLearningEnabled, swipeLearningReset, hideHomeButton,
-             spokenCorrections, capsLockDropsPunctuation, spokenEmoticons, smallOrdinals, californiaMode, checksDoubtfulWords,
-             smartPunctuation, spaceHold
+             spokenCorrections, capsLockDropsPunctuation, spokenEmoticons, smallOrdinals, numbers, californiaMode, checksDoubtfulWords,
+             smartPunctuation, spaceHold, spaceBar, oneHandedEnabled, oneHandedSide, oneHandedWidth,
+             clipboardHistoryEnabled, clipboardSkipsSecrets, clipboardAutomatic, dictatesInKeyboard, neverAppleSpeech, soundsEnabled, finishWhenQuiet, quietWait, quickSettingStamps, quickSettingGeneration, soundSet,
+             swipeTrailStyle
     }
 
     public init(from decoder: Decoder) throws {
@@ -127,6 +207,7 @@ public struct KeyboardPreferences: Codable, Equatable, Sendable {
         showSuggestions = (try? values.decodeIfPresent(Bool.self, forKey: .showSuggestions)) ?? true
         meterStyle = (try? values.decodeIfPresent(MeterStyle.self, forKey: .meterStyle)) ?? .wave
         showsPasteKey = (try? values.decodeIfPresent(Bool.self, forKey: .showsPasteKey)) ?? false
+        emojiPredictions = (try? values.decodeIfPresent(Bool.self, forKey: .emojiPredictions)) ?? true
         showsEmojiKey = (try? values.decodeIfPresent(Bool.self, forKey: .showsEmojiKey)) ?? false
         hideHomeButton = (try? values.decodeIfPresent(Bool.self, forKey: .hideHomeButton)) ?? false
         dictationFollowsShift = (try? values.decodeIfPresent(Bool.self, forKey: .dictationFollowsShift)) ?? true
@@ -137,11 +218,30 @@ public struct KeyboardPreferences: Codable, Equatable, Sendable {
         spokenCorrections = (try? values.decodeIfPresent(Bool.self, forKey: .spokenCorrections)) ?? false
         capsLockDropsPunctuation = (try? values.decodeIfPresent(Bool.self, forKey: .capsLockDropsPunctuation)) ?? false
         spokenEmoticons = (try? values.decodeIfPresent(Bool.self, forKey: .spokenEmoticons)) ?? true
+        numbers = (try? values.decode(NumberPreferences.self, forKey: .numbers)) ?? .init()
         smallOrdinals = (try? values.decodeIfPresent(Bool.self, forKey: .smallOrdinals)) ?? false
         californiaMode = (try? values.decodeIfPresent(CaliforniaMode.self, forKey: .californiaMode)) ?? .off
         checksDoubtfulWords = (try? values.decodeIfPresent(Bool.self, forKey: .checksDoubtfulWords)) ?? false
         smartPunctuation = (try? values.decodeIfPresent(Bool.self, forKey: .smartPunctuation)) ?? false
+        swipeTrailStyle = (try? values.decodeIfPresent(SwipeTrailStyle.self, forKey: .swipeTrailStyle)) ?? .accent
+        oneHandedEnabled = (try? values.decodeIfPresent(Bool.self, forKey: .oneHandedEnabled)) ?? false
+        oneHandedSide = (try? values.decodeIfPresent(OneHandedSide.self, forKey: .oneHandedSide)) ?? .right
+        oneHandedWidth = OneHandedLayout.clamped((try? values.decodeIfPresent(Double.self, forKey: .oneHandedWidth)) ?? OneHandedLayout.defaultWidth)
         spaceHold = (try? values.decodeIfPresent(SpaceHold.self, forKey: .spaceHold)) ?? .moveCursor
+        spaceBar = (try? values.decodeIfPresent(SpaceBarLabel.self, forKey: .spaceBar)) ?? .default
+        clipboardHistoryEnabled = (try? values.decodeIfPresent(Bool.self, forKey: .clipboardHistoryEnabled)) ?? false
+        clipboardAutomatic = (try? values.decodeIfPresent(Bool.self, forKey: .clipboardAutomatic)) ?? false
+        clipboardSkipsSecrets = (try? values.decodeIfPresent(Bool.self, forKey: .clipboardSkipsSecrets)) ?? false
+        soundsEnabled = (try? values.decode(Bool.self, forKey: .soundsEnabled)) ?? true
+        soundSet = (try? values.decode(String.self, forKey: .soundSet)) ?? Self.defaultSoundSet
+        enum Legacy: String, CodingKey { case finishWhenQuietWait }
+        let oldWait = try? decoder.container(keyedBy: Legacy.self).decode(Double.self, forKey: .finishWhenQuietWait)
+        finishWhenQuiet = (try? values.decode(Bool.self, forKey: .finishWhenQuiet)) ?? (oldWait != nil)
+        quietWait = SilenceFinish.nearestChoice((try? values.decode(Double.self, forKey: .quietWait)) ?? oldWait ?? SilenceFinish.defaultWait)
+        quickSettingGeneration = try? values.decode(QuickSettingRequest.Stamp.self, forKey: .quickSettingGeneration)
+        quickSettingStamps = (try? values.decode([String: QuickSettingRequest.Stamp].self, forKey: .quickSettingStamps)) ?? [:]
+        dictatesInKeyboard = (try? values.decodeIfPresent(Bool.self, forKey: .dictatesInKeyboard)) ?? true
+        neverAppleSpeech = (try? values.decodeIfPresent(Bool.self, forKey: .neverAppleSpeech)) ?? false
     }
 }
 
@@ -159,13 +259,29 @@ public struct LastKeyboardPreferences {
 
     /// The app's record when there is one (remembered for next time), else the last one read,
     /// else the defaults.
-    public func resolve(stored: KeyboardPreferences?) -> KeyboardPreferences {
+    public func resolve(stored snapshot: @autoclosure () -> KeyboardPreferences?, inbox: QuickSettingInbox? = nil) -> KeyboardPreferences {
+        let pending = (try? inbox?.read()) ?? []
+        return resolve(stored: snapshot(), pending: pending)
+    }
+
+    public func resolve(stored: KeyboardPreferences?, pending: [QuickSettingRequest]) -> KeyboardPreferences {
         let last = defaults.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(KeyboardPreferences.self, from: $0) }
-        guard let stored else { return last ?? KeyboardPreferences() }
-        if stored != last, let data = try? JSONEncoder().encode(stored) {
+        var effective = stored ?? last ?? KeyboardPreferences()
+        // A host can briefly lose Full Access or read an older snapshot on reappearance.
+        // Preserve a quick choice already shown until an equally new app revision arrives.
+        if let last, stored != nil, last.quickSettingGeneration == effective.quickSettingGeneration {
+            for (name, stamp) in last.quickSettingStamps {
+                guard let key = QuickSetting.Key(rawValue: name),
+                      effective.quickSettingStamps[name].map({ $0 < stamp }) ?? true else { continue }
+                QuickSetting(key, from: last).apply(to: &effective)
+                effective.quickSettingStamps[name] = stamp
+            }
+        }
+        effective = effective.overlaying(pending)
+        if effective != last, let data = try? JSONEncoder().encode(effective) {
             defaults.set(data, forKey: Self.key)
         }
-        return stored
+        return effective
     }
 }
 

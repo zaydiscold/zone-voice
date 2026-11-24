@@ -16,11 +16,10 @@ final class DictationStatsTests: XCTestCase {
         XCTAssertEqual(DictationStats.typingWordsPerMinute, 36.2)
     }
 
-    func testWordsPerMinuteUsesSpeakingTime() {
-        XCTAssertEqual(DictationStats.wordsPerMinute(words: 250, speakingSeconds: 120), 125)
-        // Under 10 s of speech says nothing.
-        XCTAssertEqual(DictationStats.wordsPerMinute(words: 20, speakingSeconds: 9.9), 0)
-        XCTAssertEqual(DictationStats.wordsPerMinute(words: 0, speakingSeconds: 60), 0)
+    func testWordsPerMinuteUsesRecordingTime() {
+        XCTAssertEqual(DictationStats.wordsPerMinute(words: 250, recordingSeconds: 120), 125)
+        XCTAssertEqual(DictationStats.wordsPerMinute(words: 20, recordingSeconds: 9.9), 0)
+        XCTAssertEqual(DictationStats.wordsPerMinute(words: 0, recordingSeconds: 60), 0)
     }
 
     func testTimeLabelThresholds() {
@@ -53,8 +52,8 @@ final class DictationStatsTests: XCTestCase {
         let record = LongestDictation(seconds: 537, words: 1_381, date: day)
         let later = day.addingTimeInterval(3_600)
         XCTAssertEqual(DictationStats.longest(record, after: 538, words: 20, at: later),
-                       LongestDictation(seconds: 538, words: 20, date: later))
-        XCTAssertEqual(DictationStats.longest(record, after: 537, words: 2_000, at: later), record, "a tie keeps the first")
+                       record)
+        XCTAssertEqual(DictationStats.longest(record, after: 12, words: 2_000, at: later), LongestDictation(seconds: 12, words: 2_000, date: later))
         XCTAssertEqual(DictationStats.longest(record, after: 12, words: 30, at: later), record)
     }
 
@@ -82,7 +81,7 @@ final class DictationStatsTests: XCTestCase {
             record(2_000, "   ", .finished, minutesAgo: 3),          // no words
             record(.nan, "broken length", .finished, minutesAgo: 4),
             record(300, "one two three", .inserted, minutesAgo: 5),
-            record(537, "the long one here", .cutOff, minutesAgo: 6),
+            record(537, "another five word recording here", .cutOff, minutesAgo: 6),
             record(537, "a tie that came first", .note, minutesAgo: 7),
             record(-5, "negative", .finished, minutesAgo: 8),
         ]
@@ -91,6 +90,17 @@ final class DictationStatsTests: XCTestCase {
         XCTAssertEqual(DictationStats.longest(in: records.reversed()), tieFirst, "in any order")
         XCTAssertNil(DictationStats.longest(in: []))
         XCTAssertNil(DictationStats.longest(in: Array(records.prefix(4))))
+    }
+
+    func testDayLabelAddsTheYearOnlyForAnotherYear() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        let locale = Locale(identifier: "en_US")
+        let set = calendar.date(from: DateComponents(year: 2026, month: 11, day: 3, hour: 17, minute: 43))!
+        let sameYear = calendar.date(from: DateComponents(year: 2026, month: 12, day: 31))!
+        let nextYear = calendar.date(from: DateComponents(year: 2027, month: 1, day: 1))!
+        XCTAssertEqual(DictationStats.dayLabel(set, now: sameYear, calendar: calendar, locale: locale), "Nov 3")
+        XCTAssertEqual(DictationStats.dayLabel(set, now: nextYear, calendar: calendar, locale: locale), "Nov 3, 2026")
     }
 
     func testDurationLabel() {

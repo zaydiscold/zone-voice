@@ -7,11 +7,10 @@ public enum DictationStats {
     /// Phone typing averages 36.2 words a minute (Palin et al., MobileHCI 2019, 37,370 people).
     public static let typingWordsPerMinute = 36.2
 
-    /// Speaking speed: words over the seconds spent speaking (`SpeakingTime`), not over the whole
-    /// recording. Zero under 10 seconds of speech, too little to say anything.
-    public static func wordsPerMinute(words: Int, speakingSeconds: Double) -> Int {
-        guard speakingSeconds >= 10, words > 0 else { return 0 }
-        return Int((Double(words) / speakingSeconds * 60).rounded())
+    /// Words per recorded minute, including pauses. A pool shorter than ten seconds is too noisy.
+    public static func wordsPerMinute(words: Int, recordingSeconds: Double) -> Int {
+        guard recordingSeconds.isFinite, recordingSeconds >= 10, words > 0 else { return 0 }
+        return Int((Double(words) / recordingSeconds * 60).rounded())
     }
 
     /// Time saved: what typing those words would have taken, less the whole recording, pauses
@@ -45,7 +44,7 @@ public enum DictationStats {
     public static func longest(_ current: LongestDictation?, after seconds: Double, words: Int,
                                at date: Date) -> LongestDictation? {
         guard words > 0, seconds.isFinite, seconds > 0 else { return current }
-        if let current, seconds <= current.seconds { return current }
+        if let current, words < current.words || (words == current.words && date >= current.date) { return current }
         return LongestDictation(seconds: seconds, words: words, date: date)
     }
 
@@ -55,15 +54,19 @@ public enum DictationStats {
     public static func longest(in records: [TranscriptRecord]) -> LongestDictation? {
         var best: LongestDictation?
         for record in records where record.status != .recording && record.status != .paused {
-            let seconds = record.audioSeconds
-            guard seconds.isFinite, seconds > 0 else { continue }
-            if let best, seconds < best.seconds || (seconds == best.seconds && record.createdAt >= best.date) { continue }
-            // Length first: counting words splits the text, so only a record that would win pays for it.
-            let words = record.wordCount
-            guard words > 0 else { continue }
-            best = LongestDictation(seconds: seconds, words: words, date: record.createdAt)
+            best = longest(best, after: record.audioSeconds, words: record.wordCount, at: record.createdAt)
         }
         return best
+    }
+
+    /// The day a record was set: "Nov 3" in the current year, "Nov 3, 2025" in any other, so an
+    /// old record never reads as this year's.
+    public static func dayLabel(_ date: Date, now: Date = Date(), calendar: Calendar = .current,
+                                locale: Locale = .current) -> String {
+        var style = Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone)
+            .month(.abbreviated).day()
+        if calendar.component(.year, from: date) != calendar.component(.year, from: now) { style = style.year() }
+        return date.formatted(style)
     }
 
     /// "8:57" under an hour, "1:02:07" from an hour up, like a clock or a voice memo. Whole
@@ -77,12 +80,14 @@ public enum DictationStats {
     }
 }
 
-/// The longest single dictation: a personal record Home shows once it is a minute or more.
-public struct LongestDictation: Equatable, Sendable {
+/// The longest single dictation: ranked by word count.
+public struct LongestDictation: Codable, Equatable, Sendable {
     /// The whole recording, pauses included, as `TranscriptRecord.audioSeconds` counts it.
     public let seconds: Double
     public let words: Int
     public let date: Date
+
+    public var isDisplayable: Bool { words >= 50 || seconds >= 60 }
 
     public init(seconds: Double, words: Int, date: Date) {
         self.seconds = seconds

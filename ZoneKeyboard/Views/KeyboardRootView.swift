@@ -11,14 +11,14 @@ struct KeyboardRootView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let model: KeyboardModel
     let mic: MicController
-    weak var controller: UIInputViewController?
+    let clipboard: ClipboardController
 
     @Environment(\.openURL) private var openURL
 
-    /// 36 pt controls with 4 pt above and below. iOS draws about 17 pt of keyboard glass above
+    /// The 40 pt strip centers the 36 pt key faces, leaving 2 pt on each side vertically. iOS draws about 17 pt of keyboard glass above
     /// the extension's window that no keyboard can use (measured on device 2026-11-01: the
     /// window starts at y 0 with zero insets), so the strip spends nothing more on top space.
-    static let stripHeight: CGFloat = 40
+    static let stripHeight = StripKey.typingStripHeight
     /// The key grid's side inset; the strip aligns its edge controls to the same line so the
     /// strip and the rows read as one block.
     static let sideInset: CGFloat = 6.5
@@ -31,14 +31,16 @@ struct KeyboardRootView: View {
         let _ = model.appearanceVersion
         let theme = KeyboardTheme(isDark: isDark)
         Group {
-            if mic.mode == .dictate {
-                StatusBarView(model: model, mic: mic, theme: theme) { openZone() }
+            if mic.displayMode == .dictate {
+                StatusBarView(model: model, mic: mic, theme: theme, historyTitle: clipboard.historyTitle)
                     .transition(.opacity)
             } else {
                 VStack(spacing: 0) {
-                    StatusBarView(model: model, mic: mic, theme: theme) { openZone() }
-                    if mic.showsHistory {
-                        HistoryPanelView(mic: mic, theme: theme)
+                    StatusBarView(model: model, mic: mic, theme: theme, historyTitle: clipboard.historyTitle)
+                    if let section = mic.panelSection {
+                        ZonePanelView(mic: mic, model: model, theme: theme, section: section)
+                    } else if mic.showsHistory {
+                        HistoryPanelView(mic: mic, model: model, clipboard: clipboard, theme: theme)
                             .transition(.opacity)
                     } else {
                         keyGridSpace
@@ -48,6 +50,16 @@ struct KeyboardRootView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .overlay(alignment: .bottom) {
+            if let message = clipboard.pasteNotice {
+                Button { clipboard.pasteNotice = nil } label: {
+                    Label(message, systemImage: "xmark.circle").font(.footnote).padding(6)
+                }.foregroundStyle(theme.text)
+                .background(theme.key, in: RoundedRectangle(cornerRadius: 8)).task(id: message) {
+                    do { try await Task.sleep(for: .seconds(6)); clipboard.pasteNotice = nil } catch {}
+                }
+            }
+        }
         .ignoresSafeArea()
         .environment(\.colorScheme, isDark ? .dark : .light)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: mic.showsSurface)
@@ -59,10 +71,6 @@ struct KeyboardRootView: View {
             let action = openURL
             model.openURLFallback = { url in action(url) }
         }
-    }
-
-    private func openZone() {
-        (controller as? KeyboardViewController)?.openZone()
     }
 
     /// The key rows' place. The keys themselves are `KeyGridView`, a UIKit view the controller

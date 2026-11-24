@@ -122,22 +122,44 @@ public struct EmojiHistory: Codable, Equatable, Sendable {
     /// Base emoji to the tone last chosen for it. A base chosen plain removes its entry.
     public private(set) var tones: [String: String]
 
+    private var useCounts: [String: Int]
     public static let recentLimit = 30
+    private static let frequencyLimit = 128
 
     public init(recents: [String] = [], tones: [String: String] = [:]) {
         self.recents = recents
         self.tones = tones
+        useCounts = [:]
     }
 
     /// `text` was typed. `base` is its base emoji when it has skin tones, so the next plain tap
     /// on that emoji types the same tone.
     public mutating func use(_ text: String, base: String?) {
+        let key = Self.base(text).replacingOccurrences(of: "\u{FE0F}", with: "")
+        if useCounts[key] == nil, useCounts.count >= Self.frequencyLimit,
+           let leastUsed = useCounts.min(by: { ($0.value, $0.key) < ($1.value, $1.key) }) {
+            useCounts.removeValue(forKey: leastUsed.key)
+        }
+        useCounts[key] = min(998, max(0, useCounts[key] ?? 0)) + 1
         recents.removeAll { $0 == text }
         recents.insert(text, at: 0)
         if recents.count > Self.recentLimit { recents.removeLast(recents.count - Self.recentLimit) }
         if let base {
             if base == text { tones[base] = nil } else { tones[base] = text }
         }
+    }
+
+    static func base(_ text: String) -> String {
+        if !text.unicodeScalars.contains(where: { (0x1F3FB...0x1F3FF).contains($0.value) }) { return text }
+        return String(String.UnicodeScalarView(text.unicodeScalars.filter { !(0x1F3FB...0x1F3FF).contains($0.value) }))
+    }
+
+    func searchWeight(_ text: String, recentBases: [String]) -> Int {
+        let key = Self.base(text).replacingOccurrences(of: "\u{FE0F}", with: "")
+        let recent = recentBases.firstIndex { $0.replacingOccurrences(of: "\u{FE0F}", with: "") == key }
+        // Recency nudges ties between equally relevant emoji. Repeated picks still win.
+        let count = min(999, max(0, useCounts[key] ?? 0))
+        return count * 6 + (recent.map { max(0, Self.recentLimit - $0) } ?? 0)
     }
 
     /// What a tap on `emoji` types: its remembered tone, if one is still offered.
@@ -155,8 +177,9 @@ public struct EmojiHistory: Codable, Equatable, Sendable {
         // Field by field, like `KeyboardPreferences`: one bad value never loses the rest.
         let values = try decoder.container(keyedBy: CodingKeys.self)
         recents = (try? values.decodeIfPresent([String].self, forKey: .recents)) ?? []
+        useCounts = (try? values.decodeIfPresent([String: Int].self, forKey: .useCounts)) ?? [:]
         tones = (try? values.decodeIfPresent([String: String].self, forKey: .tones)) ?? [:]
     }
 
-    private enum CodingKeys: String, CodingKey { case recents, tones }
+    private enum CodingKeys: String, CodingKey { case recents, tones, useCounts }
 }

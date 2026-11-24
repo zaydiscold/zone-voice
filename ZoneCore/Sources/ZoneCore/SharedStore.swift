@@ -8,9 +8,24 @@ import notify
 /// Durable state shared by the app and the keyboard. Each property is one record; writers
 /// replace whole records so readers never see a half-updated shape.
 public protocol SharedStore: AnyObject {
+    var microphoneOwnership: MicrophoneOwnership { get }
+    func admitRequest(_ request: DictationRequest, initialStatus: DictationStatus) -> Bool
+    func resetHandoff(at date: Date)
+    func publishFinal(_ result: DictationResult, for request: DictationRequest) -> Bool
+    func transferRequestToKeyboard(_ request: DictationRequest) -> Bool
+    func withdraw(_ requestID: UUID)
+    func clearPayloads(for requestID: UUID)
+    func purgeStalePayloads(now: Date, maxAge: TimeInterval)
+    func claimInsertion(_ offered: DictationResult, explicitlyRequested: Bool, now: Date) -> Bool
+    func acknowledgeInsertion(_ id: UUID)
+    func dismissResult(_ offered: DictationResult) -> Bool
+    func updateLedger(for id: UUID, _ change: (inout InsertionLedger) -> Void)
+    var quickSettingInbox: QuickSettingInbox? { get }
+    func confirmKeyboardPreferences(_ expected: KeyboardPreferences) -> Bool
     var request: DictationRequest? { get set }
     var status: DictationStatus? { get set }
     var result: DictationResult? { get set }
+    func synchronizeResult(_ expected: DictationResult) -> Bool
     var control: DictationControl? { get set }
     var session: SessionState? { get set }
     var ledger: InsertionLedger { get set }
@@ -31,6 +46,20 @@ public protocol SharedStore: AnyObject {
     var dictationsInserted: Int { get set }
     /// The keyboard's last face, type or dictate, chosen with the toggle key on the keyboard.
     var keyboardMode: KeyboardMode { get set }
+    /// The keyboard is recording by itself (`KeyboardRecordingClaim`); nil otherwise.
+    var keyboardRecordingClaim: KeyboardRecordingClaim? { get set }
+    /// The app found Apple's speech asset installed, so a keyboard recording can be recognized
+    /// (`KeyboardCapture.route`). Written by the app at launch, read by the keyboard.
+    var keyboardSpeechReady: Bool { get set }
+    /// The app's own reading of Zone's microphone permission, for a keyboard process whose
+    /// reading went stale (`KeyboardCapture.microphoneAllowed`). Written by the app.
+    var appMicrophoneGranted: Bool { get set }
+    var appMicrophoneReading: MicrophoneReading? { get }
+}
+
+public extension SharedStore {
+    func confirmKeyboardPreferences(_ expected: KeyboardPreferences) -> Bool { keyboardPreferences == expected }
+    var quickSettingInbox: QuickSettingInbox? { nil }
 }
 
 /// Keys inside the App Group `UserDefaults` suite.
@@ -51,6 +80,9 @@ enum SharedStoreKey {
     static let dictationsInserted = "zone.dictationsInserted"
     static let defaultTextStyle = "zone.defaultTextStyle"
     static let keyboardMode = "zone.keyboardMode"
+    static let keyboardRecordingClaim = "zone.keyboardRecordingClaim"
+    static let keyboardSpeechReady = "zone.keyboardSpeechReady"
+    static let appMicrophoneGranted = "zone.appMicrophoneGranted"
 }
 
 /// App Group backed store. Values are JSON blobs so a schema bump cannot leave a reader
@@ -68,8 +100,35 @@ public final class UserDefaultsSharedStore: SharedStore {
     /// reader without the pulse still sees the app as alive within this.
     public static let sessionRecordRefresh: TimeInterval = 60
 
+    public let microphoneOwnership: MicrophoneOwnership
+    private let usesQuickSettingInbox: Bool
+    public var quickSettingInbox: QuickSettingInbox? {
+        guard usesQuickSettingInbox else { return nil }
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: ZoneContract.appGroup).map {
+            let support = $0.appendingPathComponent("Library/Application Support")
+            return QuickSettingInbox(directory: support.appendingPathComponent("KeyboardSettingRequests"),
+                                     legacyFile: support.appendingPathComponent("keyboard-quick-settings.json"))
+        }
+    }
+    private let installID: String?
     private let defaults: UserDefaults
     private let pulse: SessionPulse
+    private let mailboxURL: URL?
+    private var mailbox: DictationMailbox {
+        DictationMailbox(file: mailboxURL, legacy: {
+            let request: DictationRequest? = self.read(SharedStoreKey.request)
+            let status: DictationStatus? = self.read(SharedStoreKey.status)
+            let result: DictationResult? = self.read(SharedStoreKey.result)
+            let owner = request?.id ?? result?.requestID ?? status?.requestID
+            return DictationMailbox.Record(owner: owner, admittedAt: request?.tappedAt ?? result?.createdAt,
+                                           request: request, status: status.flatMap { $0.requestID == owner ? $0 : nil },
+                                           result: result.flatMap { $0.requestID == owner ? $0 : nil },
+                                           ledger: self.read(SharedStoreKey.ledger) ?? InsertionLedger())
+        }, removeLegacy: {
+            for key in [SharedStoreKey.request, SharedStoreKey.status, SharedStoreKey.result, SharedStoreKey.ledger]
+            where self.defaults.object(forKey: key) != nil { self.defaults.removeObject(forKey: key) }
+        })
+    }
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
@@ -83,24 +142,177 @@ public final class UserDefaultsSharedStore: SharedStore {
 
     /// - Parameter suiteName: the App Group identifier, or any suite name in tests. The session
     ///   pulse is named after it, so a test suite never sees the app's heartbeat.
-    public init(suiteName: String = ZoneContract.appGroup) {
+    public convenience init(suiteName: String = ZoneContract.appGroup) {
+        let install = suiteName == ZoneContract.appGroup
+            ? FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: suiteName)?.lastPathComponent
+            : suiteName
+        self.init(suiteName: suiteName, installID: install)
+    }
+
+    init(suiteName: String, installID: String?, publishesSettings: Bool? = nil) {
+        self.usesQuickSettingInbox = publishesSettings ?? (suiteName == ZoneContract.appGroup)
+        if suiteName == ZoneContract.appGroup {
+            microphoneOwnership = MicrophoneOwnership(group: FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: suiteName))
+        } else {
+            microphoneOwnership = MicrophoneOwnership(file: FileManager.default.temporaryDirectory.appendingPathComponent(suiteName + ".microphone.lock"))
+        }
+        let mailboxRoot = suiteName == ZoneContract.appGroup
+            ? FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: suiteName)?
+                .appendingPathComponent("Library/Application Support")
+            : FileManager.default.temporaryDirectory.appendingPathComponent(suiteName, isDirectory: true)
+        mailboxURL = mailboxRoot?.appendingPathComponent("DictationMailbox/current.json")
+        self.installID = installID
         // `UserDefaults(suiteName:)` only returns nil for the standard bundle identifier.
         self.defaults = UserDefaults(suiteName: suiteName) ?? .standard
         self.pulse = SessionPulse(name: suiteName + ".session-pulse")
+        // Every keyboard constructs its store before starting the worker. A new container
+        // has no verified model until the app checks its files and publishes the record again.
+        if let installID, defaults.string(forKey: "zone.modelInstall") != installID {
+            if defaults.string(forKey: "zone.modelInstall") != nil {
+                defaults.removeObject(forKey: "verifiedMiniModel")
+            }
+            defaults.set(installID, forKey: "zone.modelInstall")
+        }
     }
 
     public var request: DictationRequest? {
-        get { read(SharedStoreKey.request) }
-        set { write(newValue, SharedStoreKey.request) }
+        get { mailbox.snapshot.request }
+        set { mailbox.update { $0.admit(newValue) } }
     }
     public var status: DictationStatus? {
-        get { read(SharedStoreKey.status) }
-        set { write(newValue, SharedStoreKey.status) }
+        get { mailbox.snapshot.status }
+        set {
+            mailbox.update { record in
+                if let next = newValue {
+                    guard record.withdrawnID != next.requestID, record.owner == nil || record.owner == next.requestID,
+                          record.appGenerationAtTransfer.map({ next.generation > $0 }) ?? true,
+                          record.request.map({ $0.generation <= next.generation }) ?? true else { return false }
+                }
+                record.status = newValue
+                return true
+            }
+        }
     }
     public var result: DictationResult? {
-        get { read(SharedStoreKey.result) }
-        set { write(newValue, SharedStoreKey.result) }
+        get { mailbox.snapshot.result }
+        set {
+            mailbox.update { record in
+                if let next = newValue {
+                    guard record.withdrawnID != next.requestID, record.owner == nil || record.owner == next.requestID,
+                          record.appGenerationAtTransfer.map({ next.generation > $0 }) ?? true,
+                          record.request.map({ $0.generation <= next.generation }) ?? true else { return false }
+                }
+                record.result = newValue
+                return true
+            }
+        }
     }
+
+    public func admitRequest(_ request: DictationRequest, initialStatus: DictationStatus) -> Bool {
+        mailbox.update { record in
+            guard initialStatus.requestID == request.id, initialStatus.generation == request.generation,
+                  record.admit(request) else { return false }
+            record.status = initialStatus
+            return true
+        }
+    }
+
+    public func resetHandoff(at date: Date) {
+        mailbox.update { record in
+            record = DictationMailbox.Record(admittedAt: date)
+            return true
+        }
+        control = nil
+    }
+
+    public func publishFinal(_ result: DictationResult, for request: DictationRequest) -> Bool {
+        mailbox.update { $0.publish(result, for: request) }
+    }
+
+    public func transferRequestToKeyboard(_ request: DictationRequest) -> Bool {
+        mailbox.update { record in
+            guard record.owner == request.id, record.request?.generation == request.generation,
+                  record.withdrawnID != request.id else { return false }
+            record.appGenerationAtTransfer = request.generation
+            record.ledger.droppedGeneration = max(record.ledger.droppedGeneration, request.generation)
+            record.request = nil
+            record.status = nil
+            record.result = nil
+            return true
+        }
+    }
+
+    public func withdraw(_ id: UUID) {
+        mailbox.update { record in
+            guard record.owner == id else { return false }
+            record.withdrawnID = id
+            record.request = nil
+            record.status = nil
+            record.clearPayloads(for: id)
+            return true
+        }
+    }
+
+    public func clearPayloads(for id: UUID) {
+        mailbox.update { record in
+            guard record.result?.requestID == id || (record.request?.id == id && record.request?.contextBefore != nil) else { return false }
+            record.clearPayloads(for: id)
+            return true
+        }
+    }
+
+    public func purgeStalePayloads(now: Date, maxAge: TimeInterval) {
+        func expired(_ time: Date) -> Bool { now.timeIntervalSince(time) > maxAge }
+        func needsPurge(_ record: DictationMailbox.Record) -> Bool {
+            if let result = record.result, expired(result.createdAt) || record.ledger.consumedResultID == result.requestID { return true }
+            if let request = record.request, request.contextBefore != nil {
+                return expired(request.createdAt) || record.ledger.consumedResultID == request.id
+            }
+            return false
+        }
+        guard needsPurge(mailbox.snapshot) else { return }
+        mailbox.update { record in
+            guard needsPurge(record) else { return false }
+            if let result = record.result, expired(result.createdAt) || record.ledger.consumedResultID == result.requestID {
+                record.result = nil
+            }
+            if let request = record.request, expired(request.createdAt) || record.ledger.consumedResultID == request.id {
+                record.request = request.withoutContext()
+            }
+            return true
+        }
+    }
+
+    public func claimInsertion(_ offered: DictationResult, explicitlyRequested: Bool, now: Date) -> Bool {
+        mailbox.update { $0.claim(offered, explicit: explicitlyRequested, now: now) }
+    }
+
+    public func updateLedger(for id: UUID, _ change: (inout InsertionLedger) -> Void) {
+        mailbox.update { record in
+            guard record.owner == nil || record.owner == id else { return false }
+            change(&record.ledger)
+            return true
+        }
+    }
+
+    public func acknowledgeInsertion(_ id: UUID) {
+        mailbox.update { record in
+            guard record.owner == id, record.ledger.claimedResultID == id else { return false }
+            record.ledger.consume(id)
+            record.clearPayloads(for: id)
+            return true
+        }
+    }
+
+    public func dismissResult(_ offered: DictationResult) -> Bool {
+        mailbox.update { record in
+            guard record.owner == offered.requestID, record.result == offered else { return false }
+            record.ledger.consume(offered.requestID)
+            record.clearPayloads(for: offered.requestID)
+            return true
+        }
+    }
+
     public var control: DictationControl? {
         get { read(SharedStoreKey.control) }
         set { write(newValue, SharedStoreKey.control) }
@@ -126,8 +338,8 @@ public final class UserDefaultsSharedStore: SharedStore {
         }
     }
     public var ledger: InsertionLedger {
-        get { read(SharedStoreKey.ledger) ?? InsertionLedger() }
-        set { write(newValue, SharedStoreKey.ledger) }
+        get { mailbox.snapshot.ledger }
+        set { mailbox.update { $0.ledger = newValue; return true } }
     }
     public var keyboardPresence: KeyboardPresence? {
         get { read(SharedStoreKey.keyboardPresence) }
@@ -149,9 +361,19 @@ public final class UserDefaultsSharedStore: SharedStore {
         get { defaults.string(forKey: SharedStoreKey.defaultTextStyle).flatMap(TextStyle.init(rawValue:)) ?? .casual }
         set { defaults.set(newValue.rawValue, forKey: SharedStoreKey.defaultTextStyle) }
     }
+    public func confirmKeyboardPreferences(_ expected: KeyboardPreferences) -> Bool {
+        storedKeyboardPreferences == expected
+    }
+
     public var keyboardPreferences: KeyboardPreferences {
         get { read(SharedStoreKey.keyboardPreferences) ?? KeyboardPreferences() }
-        set { write(newValue, SharedStoreKey.keyboardPreferences) }
+        set {
+            guard storedKeyboardPreferences != newValue else { return }
+            write(newValue, SharedStoreKey.keyboardPreferences)
+            if usesQuickSettingInbox {
+                DarwinNotifier.post(.quickSettingsPublished)
+            }
+        }
     }
     /// The app's record itself, nil when the App Group gave nothing back. The keyboard tells that
     /// apart from a record of defaults (`LastKeyboardPreferences`).
@@ -167,6 +389,36 @@ public final class UserDefaultsSharedStore: SharedStore {
     public var keyboardMode: KeyboardMode {
         get { defaults.string(forKey: SharedStoreKey.keyboardMode).flatMap(KeyboardMode.init(rawValue:)) ?? .type }
         set { defaults.set(newValue.rawValue, forKey: SharedStoreKey.keyboardMode) }
+    }
+
+    public var keyboardRecordingClaim: KeyboardRecordingClaim? {
+        get { read(SharedStoreKey.keyboardRecordingClaim) }
+        set {
+            write(newValue, SharedStoreKey.keyboardRecordingClaim)
+        }
+    }
+
+    public var keyboardSpeechReady: Bool {
+        get { installID != nil && defaults.string(forKey: SharedStoreKey.keyboardSpeechReady) == installID }
+        set { defaults.set(newValue ? installID : nil, forKey: SharedStoreKey.keyboardSpeechReady) }
+    }
+
+    public var appMicrophoneReading: MicrophoneReading? {
+        guard let installID, let reading: MicrophoneReading = read(SharedStoreKey.appMicrophoneGranted),
+              reading.install == installID else { return nil }
+        return reading
+    }
+
+    public var appMicrophoneGranted: Bool {
+        get { appMicrophoneReading?.granted == true }
+        set {
+            guard let installID, appMicrophoneReading?.granted != newValue else { return }
+            write(MicrophoneReading(granted: newValue, at: Date(), install: installID), SharedStoreKey.appMicrophoneGranted)
+        }
+    }
+
+    public func synchronizeResult(_ expected: DictationResult) -> Bool {
+        mailbox.snapshot.result == expected
     }
 
     private func read<T: Decodable>(_ key: String) -> T? {
@@ -245,7 +497,8 @@ extension SessionState {
     /// Same session apart from the heartbeat. The record stores dates to the second
     /// (ISO 8601), so `armedUntil` is compared to within one.
     func matchesApartFromHeartbeat(_ other: SessionState) -> Bool {
-        guard isArmed == other.isArmed, modelReady == other.modelReady else { return false }
+        guard microphoneBusyMessage == other.microphoneBusyMessage, holdsMicrophoneLease == other.holdsMicrophoneLease,
+              recording == other.recording, isArmed == other.isArmed, modelReady == other.modelReady else { return false }
         switch (armedUntil, other.armedUntil) {
         case (nil, nil): return true
         case let (a?, b?): return abs(a.timeIntervalSince(b)) < 1
@@ -265,11 +518,21 @@ public final class InMemorySharedStore: SharedStore {
     public var keyboardPresence: KeyboardPresence?
     public var level: Float = 0
     public var textStyle: TextStyle = .casual
+    public var quickSettingInbox: QuickSettingInbox?
     public var keyboardPreferences = KeyboardPreferences()
     public var dictationsInserted = 0
     public var textStylePickedAt: Date?
     public var defaultTextStyle: TextStyle = .casual
     public var keyboardMode: KeyboardMode = .type
+    public let microphoneOwnership = MicrophoneOwnership(file: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    public var keyboardRecordingClaim: KeyboardRecordingClaim?
+    public var keyboardSpeechReady = false
+    public var appMicrophoneGranted = false { didSet { appMicrophoneReading = .init(granted: appMicrophoneGranted, at: Date(), install: "test") } }
+    public private(set) var appMicrophoneReading: MicrophoneReading?
 
     public init() {}
+}
+
+public extension SharedStore {
+    func synchronizeResult(_ expected: DictationResult) -> Bool { result == expected }
 }

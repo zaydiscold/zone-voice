@@ -33,6 +33,7 @@ final class CarPlayStandbyTests: XCTestCase {
         inCar = true
         coordinator.carPlayRoute = { [unowned self] in self.inCar }
         coordinator.carReleaseDelay = .milliseconds(50)
+        coordinator.carKeyboardReleaseDelay = .milliseconds(50)
     }
 
     override func tearDownWithError() throws {
@@ -68,6 +69,20 @@ final class CarPlayStandbyTests: XCTestCase {
         _ = try await ZoneIslandIntent(.dictate).perform()
         XCTAssertTrue(isRecording, "Dictate on standby must record: \(coordinator.activity)")
         _ = try await ZoneIslandIntent(.stop).perform()
+        XCTAssertEqual(coordinator.lastResult?.text, text)
+    }
+
+    /// A dictation the keyboard asked for, as its link into Zone starts one.
+    private func dictateFromKeyboard(_ text: String) async throws {
+        engine.text = text
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        let request = DictationRequest(id: UUID(), generation: 1, createdAt: Date(), inputSession: nil, contextBefore: nil)
+        store.request = request
+        store.status = DictationStatus(requestID: request.id, generation: 1, phase: .requested, updatedAt: Date(), message: nil)
+        coordinator.handle(url: ZoneContract.dictateURL(requestID: request.id))
+        try await waitUntil(isRecording)
+        XCTAssertTrue(isRecording, "The keyboard's request must record: \(coordinator.activity)")
+        await coordinator.stopDictation()
         XCTAssertEqual(coordinator.lastResult?.text, text)
     }
 
@@ -118,6 +133,40 @@ final class CarPlayStandbyTests: XCTestCase {
         XCTAssertEqual(engine.starts, 2)
         try await waitUntil(!coordinator.isArmed)
         XCTAssertFalse(coordinator.isArmed)
+    }
+
+    /// On 2026-11-22 three keyboard taps of five came 2.1 to 2.4 s after the last words, just
+    /// after the microphone had gone, and each bounced to Zone. After the keyboard's dictation
+    /// the microphone waits longer than after Zone's own, and the car still gets its audio back.
+    func testAfterAKeyboardDictationTheMicrophoneWaitsForTheNextSentence() async throws {
+        coordinator.carKeyboardReleaseDelay = .milliseconds(1200)
+        try await standby()
+        try await dictateFromKeyboard("First sentence.")
+        try await settle()
+        XCTAssertTrue(coordinator.isArmed, "Several times the short wait later, the keyboard's next tap must still find the microphone")
+        try await dictateFromKeyboard("Second sentence.")
+        XCTAssertEqual(engine.starts, 2)
+        try await waitUntil(!coordinator.isArmed)
+        XCTAssertFalse(coordinator.isArmed, "The car gets its audio back after the last sentence")
+    }
+
+    func testAfterZonesOwnDictationTheShortWaitStillApplies() async throws {
+        coordinator.carKeyboardReleaseDelay = .seconds(30)
+        try await standby()
+        try await dictate("Turn left at the light.")
+        try await waitUntil(!coordinator.isArmed)
+        XCTAssertFalse(coordinator.isArmed, "Only the keyboard's dictation waits for a next sentence")
+    }
+
+    /// The keyboard reads "ready" from the shared session. A session that ended must say so
+    /// at once, or a tap in the gap waits for a recording that cannot start.
+    func testAnEndedSessionReadsNotReadyToTheKeyboard() async throws {
+        try await standby()
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        XCTAssertEqual(store.session?.isAlive(now: Date()), true)
+        try await dictate("Turn left at the light.")
+        try await waitUntil(!coordinator.isArmed)
+        XCTAssertEqual(store.session?.isAlive(now: Date()), false)
     }
 
     func testNothingIsReleasedWhileARecordingRuns() async throws {

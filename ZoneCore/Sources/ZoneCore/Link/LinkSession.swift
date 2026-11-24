@@ -52,10 +52,18 @@ public enum LinkSessionError: Error, Equatable {
 public protocol LinkSessionDelegate: Sendable {
     /// The computer said `welcome`. Returns everything it should be sent now.
     func welcomed(by computer: LinkComputer, itemsOnComputer: Int?, resendAll: Bool) async -> [LinkItem]
+    /// The last look before a frame with these items goes out: returns the ones still to send.
+    /// A clip the person took off the phone since `welcomed` planned it is left out. Items the
+    /// delegate returns are sent as they are; it never adds any.
+    func stillToSend(_ items: [LinkItem]) async -> [LinkItem]
     /// A frame with these items is about to go out.
     func willSend(_ items: [LinkItem]) async
     /// The computer acknowledged the frame with these items: they are delivered.
     func acknowledged(_ items: [LinkItem]) async
+}
+
+extension LinkSessionDelegate {
+    public func stillToSend(_ items: [LinkItem]) async -> [LinkItem] { items }
 }
 
 public struct LinkSessionOutcome: Equatable, Sendable {
@@ -96,19 +104,30 @@ public enum LinkSession {
         let plan = LinkBatcher.plan(pending)
         var outcome = LinkSessionOutcome(computer: computer, resendAll: resendAll, frames: 0, delivered: 0,
                                          deletions: 0, tooLarge: plan.tooLarge.count)
+        // Frames are numbered as they go, so one left out entirely leaves no gap.
+        var seq = plan.batches.first?.seq ?? 1
         for batch in plan.batches {
             try Task.checkCancellation()
-            await delegate.willSend(batch.items)
-            try await stream.write(try LinkFrame.frame(batch.payload))
+            // A clip withdrawn since the plan (Delete everything, a removed row) is not sent.
+            // Once a frame is written it cannot be taken back.
+            let wanted = await delegate.stillToSend(batch.items)
+            let ids = Set(wanted.map(\.id))
+            let items = ids.count == batch.items.count ? batch.items : batch.items.filter { ids.contains($0.id) }
+            guard !items.isEmpty else { continue }
+            let payload = items == batch.items && seq == batch.seq ? batch.payload
+                : try LinkBatcher.payload(seq: seq, encodedItems: items.map { try $0.encoded() })
+            await delegate.willSend(items)
+            try await stream.write(try LinkFrame.frame(payload))
             // An item counts as delivered only once the computer says its frame is on disk.
-            guard case .ack(let seq, _) = try await receive(from: stream, timeout: frameTimeout, onStall: onStall),
-                  seq == batch.seq else {
-                throw LinkSessionError.unexpected("expected ack \(batch.seq)")
+            guard case .ack(let acked, _) = try await receive(from: stream, timeout: frameTimeout, onStall: onStall),
+                  acked == seq else {
+                throw LinkSessionError.unexpected("expected ack \(seq)")
             }
-            await delegate.acknowledged(batch.items)
+            await delegate.acknowledged(items)
             outcome.frames += 1
-            outcome.delivered += batch.items.count
-            outcome.deletions += batch.items.filter(\.deleted).count
+            outcome.delivered += items.count
+            outcome.deletions += items.filter(\.deleted).count
+            seq += 1
         }
 
         try await send(.bye, over: stream)
@@ -226,6 +245,15 @@ public final class LinkComputerSync: LinkSessionDelegate, @unchecked Sendable {
         }
         let items = await library()
         return store.pending(for: endpointID, library: items, deletions: deletions.all())
+    }
+
+    /// Clips are checked against the outbox as it is now: one withdrawn since `welcomed`, or
+    /// no longer waiting for this computer, stays off the wire. Library items are not
+    /// rechecked here; a record deleted meanwhile goes to the deletion log as before.
+    public func stillToSend(_ items: [LinkItem]) async -> [LinkItem] {
+        guard items.contains(where: { $0.kind == .clip }) else { return items }
+        let waiting = store.clips.waitingIDs(for: endpointID)
+        return items.filter { $0.kind != .clip || waiting.contains($0.id) }
     }
 
     public func willSend(_ items: [LinkItem]) async {

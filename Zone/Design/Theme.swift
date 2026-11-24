@@ -8,25 +8,35 @@ import ZoneCore
 /// Zone's palette and surfaces: warm paper, ink, one chosen accent. Dark is the same system on
 /// ash paper and is the default.
 enum Zone {
-    /// The accent (Settings > Appearance: violet by default). Spent on the mic, the
-    /// live waveform, recording, toggles and links. Read from the App Group on each use.
-    @MainActor static var accent: Color { Color(hex: AccentStore.shared.choice.hex) }
-    @MainActor static var onAccent: Color { Color(hex: AccentStore.shared.choice.foregroundHex) }
-    /// The accent as a shape (the wave, meters, dots, progress, rings): the accent on dark paper,
-    /// its vivid mid tone on cream, where the pale accent reads 1.1 to 2.6:1 and is only a tint.
-    /// Fills that carry a dark glyph (the mic button, Stop) keep `accent`.
-    @MainActor static func accentGraphic(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? accent : Color(hex: AccentStore.shared.choice.graphicHexOnLight)
-    }
-    /// The same tone for views with no scheme in reach: it follows the window's appearance.
-    @MainActor static var accentGraphic: Color {
+    @MainActor static var darkAccent: Color { Color(hex: AccentStore.shared.choice.darkHex) }
+
+    @MainActor static func accentTone(_ scheme: ColorScheme) -> Color {
         let choice = AccentStore.shared.choice
-        return Color(uiColor: UIColor { traits in
-            let hex = traits.userInterfaceStyle == .light ? choice.graphicHexOnLight : choice.hex
-            return UIColor(red: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255,
-                           blue: CGFloat(hex & 255) / 255, alpha: 1)
-        })
+        return Color(hex: scheme == .dark ? choice.darkHex : choice.lightHex)
     }
+
+    @MainActor static func controlFill(_ scheme: ColorScheme) -> Color {
+        Color(hex: AccentStore.shared.choice.controlFillHex(isDark: scheme == .dark))
+    }
+
+    @MainActor static func controlInk(_ scheme: ColorScheme) -> Color {
+        Color(hex: AccentStore.shared.choice.controlInkHex(isDark: scheme == .dark))
+    }
+
+    @MainActor static func accentStroke(_ scheme: ColorScheme) -> Color {
+        let tone = UIColor(accentTone(scheme))
+        let strong = UIColor(ink(scheme))
+        return Color(uiColor: UIColor { $0.accessibilityContrast == .high ? strong : tone })
+    }
+
+    @MainActor static func inlineInk(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? accentStroke(scheme) : ink(scheme)
+    }
+
+    @MainActor static var accentTone: Color {
+        Color(uiColor: AccentStore.shared.windowTint)
+    }
+
     /// Errors and warnings only. Recording uses the accent: red read as alarm.
     static let live = Color(hex: 0xFF6B6B)
     /// One duration for every state change.
@@ -36,6 +46,9 @@ enum Zone {
 
     static func paper(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(hex: 0x2A2A2A) : Color(hex: 0xF1E9D2)
+    }
+    static func recess(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(hex: 0x242426) : Color(hex: 0xE9E0CA)
     }
     static func card(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(hex: 0x333333) : Color(hex: 0xF7F2E4)
@@ -51,19 +64,51 @@ enum Zone {
         scheme == .dark ? Color(hex: 0xC9C1AB) : Color(hex: 0x555555)
     }
     static func rule(_ scheme: ColorScheme) -> Color {
-        ink(scheme).opacity(scheme == .dark ? 0.16 : 0.18)
+        let color = UIColor(ink(scheme))
+        return Color(uiColor: UIColor { traits in
+            color.withAlphaComponent(traits.accessibilityContrast == .high ? 0.75 : (scheme == .dark ? 0.16 : 0.18))
+        })
     }
     static func field(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(hex: 0x262626) : Color(hex: 0xF6EFDB)
     }
-    /// Purple as text. #9B7DFF reads 2.6:1 on cream, so light paper gets a deeper tone of the
-    /// same hue (#6A4BDB, 4.8:1).
-    @MainActor static func accentText(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? accent : Color(hex: AccentStore.shared.choice.textHexOnLight)
+
+}
+
+private struct ZoneAccentLink: ViewModifier {
+    @Environment(\.colorSchemeContrast) private var contrast
+    let scheme: ColorScheme
+
+    func body(content: Content) -> some View {
+        let increased = contrast == .increased
+        content.foregroundStyle(increased ? Zone.ink(scheme) : Zone.inlineInk(scheme))
+            .underline(scheme == .light || increased, color: increased ? Zone.ink(scheme) : Zone.accentStroke(scheme))
     }
 }
 
-/// Observable so every view that reads `Zone.accent` redraws the moment the choice changes.
+struct ZoneCueLabelStyle: LabelStyle {
+    let scheme: ColorScheme
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 5) {
+            configuration.icon.foregroundStyle(Zone.accentTone(scheme))
+            configuration.title.foregroundStyle(Zone.ink(scheme))
+        }
+    }
+}
+
+extension View {
+    func zoneAccentLink(_ scheme: ColorScheme) -> some View {
+        modifier(ZoneAccentLink(scheme: scheme))
+    }
+
+    func zoneAccentBadge(_ scheme: ColorScheme) -> some View {
+        foregroundStyle(Zone.controlInk(scheme))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Zone.controlFill(scheme), in: Capsule())
+    }
+}
+
+/// Observable so every view that reads `Zone.accentTone` redraws the moment the choice changes.
 @Observable @MainActor
 final class AccentStore {
     static let shared = AccentStore()
@@ -73,16 +118,27 @@ final class AccentStore {
 
     /// Pickers, links and other UIKit-backed controls take the window's tint, not SwiftUI's,
     /// so they kept the old color until the screen was rebuilt. Set it on every window.
-    func applyToWindows() {
+    var windowTint: UIColor {
         let choice = choice
-        let color = UIColor { traits in
-            let hex = traits.userInterfaceStyle == .light ? choice.textHexOnLight : choice.hex
+        return UIColor { traits in
+            let hex = traits.userInterfaceStyle == .dark ? choice.darkHex : choice.lightHex
             return UIColor(red: CGFloat((hex >> 16) & 255) / 255,
                            green: CGFloat((hex >> 8) & 255) / 255,
                            blue: CGFloat(hex & 255) / 255, alpha: 1)
         }
+    }
+
+    var windowStyle: UIUserInterfaceStyle = .unspecified {
+        didSet { applyToWindows() }
+    }
+
+    func applyToWindows() {
+        let color = windowTint
         for scene in UIApplication.shared.connectedScenes {
-            for window in (scene as? UIWindowScene)?.windows ?? [] { window.tintColor = color }
+            for window in (scene as? UIWindowScene)?.windows ?? [] {
+                window.overrideUserInterfaceStyle = windowStyle
+                window.tintColor = color
+            }
         }
     }
 }
@@ -148,7 +204,7 @@ struct ZoneScreenModifier: ViewModifier {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Zone.paper(scheme).ignoresSafeArea())
-            .tint(Zone.accentText(scheme))
+            .tint(Zone.inlineInk(scheme))
     }
 }
 
@@ -240,7 +296,28 @@ extension View {
     func zoneCard(padding: CGFloat = 16) -> some View { modifier(ZoneCardModifier(padding: padding)) }
 }
 
-/// A 1 pt rule between sections.
+/// One physical pixel between sibling rows. Its container aligns it with the row text.
+struct RowRule: View {
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.displayScale) private var scale
+
+    var body: some View {
+        Rectangle().fill(Zone.rule(scheme)).frame(height: 1 / scale)
+            .accessibilityHidden(true)
+    }
+}
+
+/// Open paper before a new group. Keep its title close to the first row.
+struct SectionBreak: View {
+    static let spacing: CGFloat = 28
+
+    var body: some View {
+        Color.clear.frame(height: Self.spacing).accessibilityHidden(true)
+    }
+}
+
+/// A one-point stroke used in documents and fixed controls.
+/// Use RowRule between library entries and SectionBreak between library groups.
 struct Hairline: View {
     @Environment(\.colorScheme) private var scheme
     var body: some View {
@@ -279,20 +356,20 @@ extension Zone {
 
 // MARK: Buttons
 
-/// Ink key, paper label. The one primary action on a screen.
+/// The primary action uses the accent fill and its contrasting label.
 struct ZonePrimaryButtonStyle: ButtonStyle {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.isEnabled) private var isEnabled
-    /// Override the ink fill (the red Stop in the app's own dictation surfaces).
-    var fill: Color?
 
     func makeBody(configuration: Configuration) -> some View {
+        let label = isEnabled ? Zone.controlInk(scheme) : Zone.muted(scheme)
         configuration.label
             .font(.body.weight(.semibold))
-            .foregroundStyle(fill == nil ? Zone.onInk(scheme) : Zone.onAccent)
+            .foregroundStyle(label)
+            .tint(label)
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity, minHeight: 52)
-            .background { Zone.keyShape.fill((fill ?? Zone.ink(scheme)).opacity(isEnabled ? 1 : 0.4)).sunShadow(scale: isEnabled ? 0.6 : 0) }
+            .background { Zone.keyShape.fill(isEnabled ? Zone.controlFill(scheme) : Zone.field(scheme)).sunShadow(scale: isEnabled ? 0.6 : 0) }
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .opacity(configuration.isPressed ? 0.85 : 1)
             .animation(Zone.motion, value: configuration.isPressed)
@@ -364,7 +441,8 @@ struct ZoneLinkButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.subheadline.weight(.medium))
-            .foregroundStyle(Zone.accentText(scheme).opacity(configuration.isPressed ? 0.6 : 1))
+            .zoneAccentLink(scheme)
+            .opacity(configuration.isPressed ? 0.6 : 1)
             .frame(minHeight: 44)
             .contentShape(Rectangle())
     }
@@ -405,6 +483,7 @@ struct ScaleButtonStyle: ButtonStyle {
 /// is shown by the surface around it (the Composer swaps to Cancel, a wave and Done), so this
 /// key has no recording face of its own.
 struct MicButton: View {
+    @Environment(\.colorScheme) private var scheme
     var diameter: CGFloat = 56
     let action: () -> Void
 
@@ -412,16 +491,16 @@ struct MicButton: View {
         Button(action: action) {
             Image(systemName: "mic.fill")
                 .font(.system(size: diameter * 0.34, weight: .semibold))
-                .foregroundStyle(Zone.onAccent)
+                .foregroundStyle(Zone.controlInk(scheme))
                 .frame(width: diameter, height: diameter)
-                .background(Zone.accent, in: Circle())
+                .background(Zone.controlFill(scheme), in: Circle())
         }
         .buttonStyle(ScaleButtonStyle())
         .accessibilityLabel("Dictate")
     }
 }
 
-/// A state light. Purple and pulsing when on, a hollow grey ring when off, so the state never
+/// A state light. Accent-colored and pulsing when on, a hollow grey ring when off, so the state never
 /// rests on color alone. The pulse is zayd.wtf's live ring: a 1.5 pt ring expands from 16 to
 /// about 29 pt and fades from 0.8 to 0 over 2 s on ease-out-quint. Reduce Motion holds it still.
 struct StatusDot: View {

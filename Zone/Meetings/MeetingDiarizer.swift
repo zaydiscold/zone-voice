@@ -81,26 +81,43 @@ enum MeetingDiarizer {
         return models
     }
 
-    /// Speaker turns over `[from, to)` seconds of the meeting, in meeting time.
-    static func turns(audio: MeetingAudio, from: Double, to: Double, models: OfflineDiarizerModels,
-                      expectedSpeakerCount: Int? = nil,
-                      progress: @escaping @Sendable (Double) -> Void) async throws -> [MeetingTurn] {
+    /// Who spoke when over a stretch, and what each voice sounds like.
+    struct Speakers: Sendable {
+        /// In meeting time, one voice at any instant.
+        var turns: [MeetingTurn]
+        /// The diarizer's voice print per speaker id in `turns`.
+        var voices: [String: [Float]]
+        /// Why the second look did not run, when it did not (the first pass is used instead).
+        var secondLookFailure: String?
+        var secondLookWindows = 0
+    }
+
+    /// The share of "Finding speakers" progress given to the first pass; the rest is the second look.
+    private static let firstPassShare = 0.65
+    /// Windows per Core ML request batch in the second look, and per progress update.
+    private static let secondLookBatch = 64
+
+    /// Speaker turns over `[from, to)` seconds of the meeting, in meeting time. `levels` are the
+    /// meeting's 100 ms RMS levels from its start (`MeetingAudio.levels(frameSamples: 1_600)`).
+    static func speakers(audio: MeetingAudio, from: Double, to: Double, levels: [Float], models: OfflineDiarizerModels,
+                         expectedSpeakerCount: Int? = nil,
+                         progress: @escaping @Sendable (Double) -> Void) async throws -> Speakers {
         try await work.run {
             try Task.checkCancellation()
             guard to - from <= MeetingRecordingSafety.maximumSpeakerSeconds else {
                 throw SpeechEngineError.unavailable(MeetingRecordingSafety.speakerLimitMessage)
             }
-            return try await turnsExclusively(audio: audio, from: from, to: to, models: models,
-                                              expectedSpeakerCount: expectedSpeakerCount, progress: progress)
+            return try await speakersExclusively(audio: audio, from: from, to: to, levels: levels, models: models,
+                                                 expectedSpeakerCount: expectedSpeakerCount, progress: progress)
         }
     }
 
-    private static func turnsExclusively(audio: MeetingAudio, from: Double, to: Double, models: OfflineDiarizerModels,
-                      expectedSpeakerCount: Int?,
-                      progress: @escaping @Sendable (Double) -> Void) async throws -> [MeetingTurn] {
+    private static func speakersExclusively(audio: MeetingAudio, from: Double, to: Double, levels: [Float],
+                                            models: OfflineDiarizerModels, expectedSpeakerCount: Int?,
+                                            progress: @escaping @Sendable (Double) -> Void) async throws -> Speakers {
         let source = MeetingSampleSource(audio: audio, offset: Int(from * 16_000),
                                          count: max(0, Int((to - from) * 16_000)))
-        guard source.sampleCount >= 16_000 * 2 else { return [] }
+        guard source.sampleCount >= 16_000 * 2 else { return Speakers(turns: [], voices: [:]) }
         var config = OfflineDiarizerConfig.default
         // One speaker at any instant, as FluidAudio did by default before 0.18 (#1081 made
         // overlapping output the default). MeetingChunkPlanner turns every turn into its own
@@ -116,11 +133,76 @@ enum MeetingDiarizer {
         let manager = OfflineDiarizerManager(config: config)
         manager.initialize(models: models)
         let result = try await manager.process(audioSource: source, audioLoadingSeconds: 0) { done, total in
-            if total > 0 { progress(Double(done) / Double(total)) }
+            if total > 0 { progress(firstPassShare * Double(done) / Double(total)) }
         }
         try Task.checkCancellation()
-        return result.segments.map {
+        let firstPass = result.segments.map {
             MeetingTurn(start: from + Double($0.startTimeSeconds), end: from + Double($0.endTimeSeconds), speaker: $0.speakerId)
+        }
+        let voices = result.speakerDatabase ?? [:]
+        var speakers = Speakers(turns: firstPass, voices: voices)
+
+        // The second look (MeetingSecondLook): short windows, each compared with every voice.
+        // A failure here keeps the first pass; it never costs the meeting its labels.
+        let windows = MeetingSecondLook.windows(levels: levels, from: from, to: to)
+        speakers.secondLookWindows = windows.count
+        guard !voices.isEmpty, !windows.isEmpty else { progress(1); return speakers }
+        do {
+            var embeddings: [[Float]] = []
+            embeddings.reserveCapacity(windows.count)
+            for first in stride(from: 0, to: windows.count, by: secondLookBatch) {
+                try Task.checkCancellation()
+                let batch = windows[first..<min(first + secondLookBatch, windows.count)].map {
+                    ($0.lowerBound - from)..<($0.upperBound - from)
+                }
+                embeddings += try await manager.embedSpans(audioSource: source, spans: batch)
+                progress(firstPassShare + (1 - firstPassShare) * Double(first + batch.count) / Double(windows.count))
+            }
+            try Task.checkCancellation()
+            speakers.turns = MeetingSecondLook.relabel(turns: firstPass, windows: windows, embeddings: embeddings,
+                                                       voices: voices, levels: levels, from: from, to: to)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            speakers.secondLookFailure = error.localizedDescription
+        }
+        progress(1)
+        return speakers
+    }
+}
+
+extension MeetingDiarizer {
+    /// One voice print per voice from stretches of a meeting's own audio (`MeetingVoiceMatch.spans`),
+    /// for speakers labeled before prints were kept. The same span embedding as the second look,
+    /// so the prints compare with the ones the speaker model leaves. Each voice's stretches are
+    /// averaged by length, leaving out one that does not sound like the rest.
+    static func voicePrints(audio: MeetingAudio, spans: [String: [Range<Double>]],
+                            models: OfflineDiarizerModels) async throws -> [String: [Float]] {
+        try await work.run {
+            let manager = OfflineDiarizerManager(config: OfflineDiarizerConfig.default)
+            manager.initialize(models: models)
+            let source = MeetingSampleSource(audio: audio, offset: 0, count: audio.sampleCount)
+            var prints: [String: [Float]] = [:]
+            for voice in spans.keys.sorted() {
+                try Task.checkCancellation()
+                guard let stretches = spans[voice], !stretches.isEmpty else { continue }
+                let vectors = try await manager.embedSpans(audioSource: source, spans: stretches)
+                prints[voice] = VoiceSetup.print(of: vectors, seconds: stretches.map { $0.upperBound - $0.lowerBound })
+            }
+            return prints
+        }
+    }
+
+    /// Voice prints for stretches of a voice setup recording (`VoiceSetupMeter.spans`): the same
+    /// WeSpeaker model and span embedding the second look uses, so the prints compare directly
+    /// with a meeting speaker's. Runs under the same lock as meeting labeling.
+    static func voicePrints(samples: [Float], spans: [Range<Double>], models: OfflineDiarizerModels) async throws -> [[Float]] {
+        guard !spans.isEmpty, !samples.isEmpty else { return [] }
+        return try await work.run {
+            try Task.checkCancellation()
+            let manager = OfflineDiarizerManager(config: OfflineDiarizerConfig.default)
+            manager.initialize(models: models)
+            return try await manager.embedSpans(audioSource: ArrayAudioSampleSource(samples: samples), spans: spans)
         }
     }
 }

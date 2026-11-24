@@ -18,10 +18,10 @@ final class WordScaleTests: XCTestCase {
         XCTAssertEqual(WordScale.headline(words: 40_000_000), "Every Harry Potter book, 37 times over.")
     }
 
-    func testCycleRunsSmallToHugeAndEndsOnThePhone() {
+    func testCycleRunsSmallToHugeAndEndsWithWhereTheCountIsSaved() {
         let lines = WordScale.cycle(words: 56_513)
         XCTAssertEqual(lines.first, "That's 1.2 Great Gatsbys.")
-        XCTAssertEqual(lines.last, WordScale.closingLine)
+        XCTAssertEqual(lines.last, "Your word count is saved on this iPhone.")
         XCTAssertTrue(lines.contains("That's 208 Gettysburg Addresses."))
         XCTAssertTrue(lines.contains("About 0.014% of the Library of Alexandria."))
         XCTAssertTrue(lines.contains("About 0.0011% of English Wikipedia."))

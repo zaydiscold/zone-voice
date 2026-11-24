@@ -646,23 +646,4 @@ public enum SpokenRepair {
         }
         return changed
     }
-
-    // MARK: Clock times
-
-    private static let dottedTimeAfterWord = try! NSRegularExpression(
-        pattern: #"(?<=\b(?:at|by|around|until|till|til|before|after|since)\s)(1[0-2]|0?[1-9])\.([0-5][0-9])(?![\d.,]\d)(?!\s*(?:%|percent|dollars?|bucks|cents?|euros?|pounds?|quid|miles?|km|kilometers?|kilos?|kg|lbs?|a\s|an\s|per\b|each\b))"#,
-        options: [.caseInsensitive])
-    private static let dottedTimeBeforeMeridiem = try! NSRegularExpression(
-        pattern: #"(?<![\d.$£€])\b(1[0-2]|0?[1-9])\.([0-5][0-9])(?=\s*(?:a\.?m\.?|p\.?m\.?|o['’]clock)(?![\p{L}]))"#,
-        options: [.caseInsensitive])
-
-    /// "at 4.30" is a time in American writing: "at 4:30". Prices say "$4.30" or "4.30 dollars"
-    /// and keep their point, because neither pattern sees a currency sign or a unit after.
-    static func americanClockTimes(_ text: String) -> String {
-        var out = dottedTimeAfterWord.stringByReplacingMatches(
-            in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "$1:$2")
-        out = dottedTimeBeforeMeridiem.stringByReplacingMatches(
-            in: out, range: NSRange(out.startIndex..., in: out), withTemplate: "$1:$2")
-        return out
-    }
 }

@@ -9,21 +9,31 @@ public struct DictationRequest: Codable, Equatable, Sendable {
     /// late result for an older generation is ignored.
     public let generation: Int
     public let createdAt: Date
+    // SharedStore's ISO dates have whole-second precision. Keep the fraction for
+    // a keyboard tap in the same second as standby expiry. Older keyboards omit it.
+    private let exactCreationTime: TimeInterval?
+    public var tappedAt: Date {
+        exactCreationTime.map(Date.init(timeIntervalSinceReferenceDate:)) ?? createdAt
+    }
     /// `UITextDocumentProxy.documentIdentifier` of the field being edited, if the host exposed one.
     /// Identifies an input session, not a document: it changes when the keyboard is dismissed.
     public let inputSession: String?
     /// The last characters before the cursor at request time, for spacing decisions and as a
     /// weak context check when no input session identifier exists.
     public let contextBefore: String?
+    /// A held space bar ends on finger-up. Absent in requests from older keyboards.
+    public let holdToTalk: Bool?
     public let schema: Int
 
     public init(id: UUID, generation: Int, createdAt: Date, inputSession: String?, contextBefore: String?,
-                schema: Int = ZoneContract.schemaVersion) {
+                holdToTalk: Bool? = nil, schema: Int = ZoneContract.schemaVersion) {
         self.id = id
         self.generation = generation
         self.createdAt = createdAt
+        exactCreationTime = createdAt.timeIntervalSinceReferenceDate
         self.inputSession = inputSession
         self.contextBefore = contextBefore
+        self.holdToTalk = holdToTalk
         self.schema = schema
     }
 }
@@ -156,7 +166,13 @@ public struct SessionState: Codable, Equatable, Sendable {
     /// Refreshed by the app while armed. Stale heartbeat means the process is gone.
     public var heartbeat: Date
 
-    public init(isArmed: Bool, armedUntil: Date?, modelReady: Bool, heartbeat: Date) {
+    /// Absent on records from older releases.
+    public var recording: Bool?
+    public var holdsMicrophoneLease: Bool?
+    public var microphoneBusyMessage: String?
+
+    public init(isArmed: Bool, armedUntil: Date?, modelReady: Bool, heartbeat: Date, recording: Bool? = nil) {
+        self.recording = recording
         self.isArmed = isArmed
         self.armedUntil = armedUntil
         self.modelReady = modelReady
@@ -184,6 +200,22 @@ public struct InsertionLedger: Codable, Equatable, Sendable {
     public var consumedResultID: UUID?
     /// Results with a generation at or below this were cancelled and must never be inserted.
     public var droppedGeneration: Int
+
+    mutating func claim(_ offered: DictationResult, current: DictationResult?, explicit: Bool, now: Date) -> Bool {
+        guard current == offered, InsertionDecider.unavailableReason(for: offered, ledger: self, now: now) == nil,
+              explicit || claimedResultID != offered.requestID else { return false }
+        claimedResultID = offered.requestID
+        claimedAt = now
+        return true
+    }
+
+    mutating func consume(_ id: UUID) {
+        consumedResultID = id
+        if claimedResultID == id {
+            claimedResultID = nil
+            claimedAt = nil
+        }
+    }
 
     public init(claimedResultID: UUID? = nil, claimedAt: Date? = nil, consumedResultID: UUID? = nil, droppedGeneration: Int = 0) {
         self.claimedResultID = claimedResultID

@@ -9,8 +9,11 @@ import ZoneCore
 @MainActor final class BottomRowWidthTests: XCTestCase {
     private func grid(_ preferences: KeyboardPreferences, layer: KeyboardLayer = .letters) -> KeyGridView {
         let proxy = SwipeIntegrationTests.Proxy()
+        proxy.hasOpenAccess = preferences.showsPasteKey
         let model = KeyboardModel(proxy: proxy)
-        model.refreshTraits(); model.apply(preferences)
+        model.refreshTraits()
+        model.refreshFullAccess(reloadVocabulary: false)
+        model.apply(preferences)
         if layer != .letters { model.handleTap(.switchLayer(.numbers, label: "123")) }
         let grid = KeyGridView(model: model, mic: MicController(), controller: nil)
         grid.frame = CGRect(x: 0, y: 0, width: 402, height: 250)
@@ -19,7 +22,7 @@ import ZoneCore
     }
 
     private func frame(_ name: String, in grid: KeyGridView) throws -> CGRect {
-        let elements = try XCTUnwrap(grid.accessibilityElements as? [UIAccessibilityElement])
+        let elements = try XCTUnwrap(grid.accessibilityElements).compactMap { $0 as? UIAccessibilityElement }
         return try XCTUnwrap(elements.first { $0.accessibilityLabel == name }, name).accessibilityFrameInContainerSpace
     }
 
@@ -53,6 +56,7 @@ import ZoneCore
     func testPasteBesideReturnLeavesTheSwitchKeyWide() throws {
         let paste = grid(KeyboardPreferences(showsPasteKey: true, showsEmojiKey: false))
         let numbers = try frame("Numbers", in: paste), space = try frame("Space", in: paste)
+        XCTAssertNotNil(paste.subviews.first { $0 is UIPasteControl })
         XCTAssertEqual(numbers.width, 93, accuracy: 1.5)
         XCTAssertGreaterThan(space.width, 3.5 * 33.5)
     }

@@ -7,6 +7,7 @@ import ZoneCore
 /// Records the ten bakeoff clips, holds their corrected references, and runs the accuracy
 /// pass and the matched energy runs. Reached only from Diagnostics.
 struct BakeoffView: View {
+    @Environment(\.colorScheme) private var scheme
     @Environment(DictationCoordinator.self) private var coordinator
     @State private var runner = BakeoffRunner()
     @State private var references: [Int: String] = [:]
@@ -29,6 +30,7 @@ struct BakeoffView: View {
             } footer: {
                 Text("Read each line in your own words at normal distance, then fix the text below it to exactly what you said. Every engine hears these same files.")
             }
+            .listRowBackground(Zone.card(scheme))
 
             Section {
                 ForEach(EngineKind.allCases.filter(\.isAvailableOnThisOS)) { kind in
@@ -53,6 +55,7 @@ struct BakeoffView: View {
             } footer: {
                 Text("Plug in and keep the screen on. Each engine loads alone, gets one untimed warm-up, then hears all clips at real-time pace. Models download on first use.")
             }
+            .listRowBackground(Zone.card(scheme))
 
             if let report = runner.lastAccuracy {
                 Section("Results") {
@@ -60,6 +63,7 @@ struct BakeoffView: View {
                         resultRow(result)
                     }
                 }
+                .listRowBackground(Zone.card(scheme))
             }
 
             Section {
@@ -80,6 +84,7 @@ struct BakeoffView: View {
             } footer: {
                 Text("Choose the engine in Diagnostics first. Unplug, start Power Profiler (Settings > Developer > Performance Trace), then start the run. It arms a session and replays one clip every 30 seconds for five minutes. For the background run, switch to Messages during the countdown and leave the keyboard up.")
             }
+            .listRowBackground(Zone.card(scheme))
 
             Section("Reports") {
                 ForEach(BakeoffFiles.reports(), id: \.self) { url in
@@ -88,9 +93,11 @@ struct BakeoffView: View {
                     }
                 }
             }
+            .listRowBackground(Zone.card(scheme))
 
             if let error {
                 Text(error).foregroundStyle(.red)
+                    .listRowBackground(Zone.card(scheme))
             }
         }
         .scrollContentBackground(.hidden)
@@ -171,7 +178,7 @@ struct BakeoffView: View {
                 try BakeoffFiles.writeClip(samples, id: id)
                 clipSeconds[id] = Double(samples.count) / 16_000
             } catch {
-                self.error = error.localizedDescription
+                self.error = RecordingProblem.storage.message(for: error)
             }
             return
         }
@@ -182,7 +189,7 @@ struct BakeoffView: View {
                 recordingID = id
                 recordStarted = Date()
             } catch {
-                self.error = error.localizedDescription
+                self.error = RecordingProblem.microphone.message(for: error)
             }
         }
     }

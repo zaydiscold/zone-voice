@@ -1,6 +1,7 @@
 // by zayd/cold @ zayd.wtf
 
 import Foundation
+import notify
 import WatchConnectivity
 import ZoneCore
 
@@ -11,6 +12,8 @@ final class PhoneNoteBridge: NSObject, WCSessionDelegate {
     static let shared = PhoneNoteBridge()
     private var importer: ((CompanionNoteEnvelope) throws -> Void)?
     private var exporter: (() throws -> [CompanionShareItem])?
+    private var messagesURL: URL?
+    private var cacheGeneration = 0
     private var observer: NSObjectProtocol?
     private var pending: [CompanionNoteEnvelope] = []
     private var pendingURL: URL?
@@ -19,8 +22,12 @@ final class PhoneNoteBridge: NSObject, WCSessionDelegate {
 
     func start(importNote: @escaping (CompanionNoteEnvelope) throws -> Void,
                exportNotes: @escaping () throws -> [CompanionShareItem]) {
+        if let url = CompanionShareCache.url, FileManager.default.fileExists(atPath: url.path) {
+            do { try CompanionShareCache.excludeFromBackup(at: url) }
+            catch { lastError = "Could not exclude recent Messages text from iPhone backups." }
+        }
         importer = importNote
-        exporter = exportNotes
+        observeMessages(at: CompanionShareCache.url, exportNotes: exportNotes)
         do {
             let support = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                        appropriateFor: nil, create: true)
@@ -34,18 +41,97 @@ final class PhoneNoteBridge: NSObject, WCSessionDelegate {
             canWritePending = false
             lastError = "Queued Watch notes could not be read. Existing files were kept."
         }
-        if observer == nil {
-            observer = NotificationCenter.default.addObserver(forName: Notification.Name("ZoneLibraryDidChange"),
-                                                               object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.publishCache() }
-            }
-        }
-        publishCache()
         if WCSession.isSupported() {
             WCSession.default.delegate = self
             WCSession.default.activate()
         }
         processPending()
+    }
+
+    func observeMessages(at url: URL?, exportNotes: @escaping () throws -> [CompanionShareItem]) {
+        exporter = exportNotes
+        messagesURL = url
+        if observer == nil {
+            observer = NotificationCenter.default.addObserver(forName: Notification.Name("ZoneLibraryDidChange"),
+                                                               object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.scheduleCacheRefresh()
+                }
+            }
+        }
+    }
+
+    private func scheduleCacheRefresh() {
+        cacheGeneration &+= 1
+        let generation = cacheGeneration
+        Task { @MainActor in
+            guard generation == cacheGeneration else { return }
+            publishCache()
+        }
+    }
+
+    func clearMessagesCache(at url: URL) throws {
+        cacheGeneration &+= 1
+        try Self.clearCache(at: url)
+    }
+
+    func publishAccent(_ accent: AccentChoice) {
+        guard WCSession.isSupported() else { return }
+        let session = WCSession.default
+        guard session.activationState == .activated, session.isWatchAppInstalled else { return }
+        var context = session.applicationContext
+        let cutoff = UserDefaults.standard.object(forKey: cutoffKey) as? Date
+        guard context[AccentChoice.defaultsKey] as? String != accent.rawValue ||
+                context["eraseNotesThrough"] as? Date != cutoff else { return }
+        context[AccentChoice.defaultsKey] = accent.rawValue
+        context["eraseNotesThrough"] = cutoff
+        do {
+            try session.updateApplicationContext(context)
+        } catch {
+            ZoneLog.coordinator.error("Could not deliver accent to Watch: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private let cutoffKey = "zone.watchNotesErasedThrough"
+
+    /// Read the file itself. A failed startup read leaves an empty in-memory list which
+    /// must never replace newer notes still waiting in the inbox on disk.
+    nonisolated static func clearInbox(at url: URL, through cutoff: Date) throws -> [CompanionNoteEnvelope] {
+        let current: [CompanionNoteEnvelope]
+        do { current = try JSONDecoder().decode([CompanionNoteEnvelope].self, from: Data(contentsOf: url)) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { current = [] }
+        for note in current { try note.validate() }
+        let remaining = current.filter { $0.createdAt > cutoff }
+        try JSONEncoder().encode(remaining).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        return remaining
+    }
+
+    func eraseWatchNotes(through cutoff: Date) -> (inboxCleared: Bool, watchStatus: String?) {
+        let cutoff = max(cutoff, UserDefaults.standard.object(forKey: cutoffKey) as? Date ?? .distantPast)
+        UserDefaults.standard.set(cutoff, forKey: cutoffKey)
+        var cleared = false
+        if let url = pendingURL {
+            do {
+                pending = try Self.clearInbox(at: url, through: cutoff)
+                canWritePending = true
+                cleared = true
+            } catch { canWritePending = false }
+        }
+        return (cleared, queueWatchErase(through: cutoff))
+    }
+
+    private func queueWatchErase(through cutoff: Date) -> String? {
+        guard WCSession.isSupported() else { return nil }
+        let session = WCSession.default
+        guard session.activationState == .activated else { return "Watch deletion is queued for the next connection." }
+        guard session.isPaired && session.isWatchAppInstalled else { return nil }
+        var context = session.applicationContext
+        context["eraseNotesThrough"] = cutoff
+        do {
+            try session.updateApplicationContext(context)
+            return nil
+        } catch { return "Watch deletion is queued. Zone will try again when the Watch connects." }
     }
 
     private func receive(_ note: CompanionNoteEnvelope) {
@@ -64,25 +150,59 @@ final class PhoneNoteBridge: NSObject, WCSessionDelegate {
         guard let importer, let url = pendingURL, canWritePending else { return }
         for note in pending {
             do {
-                try importer(note)
+                let cutoff = UserDefaults.standard.object(forKey: cutoffKey) as? Date ?? .distantPast
+                if note.createdAt > cutoff {
+                    try importer(note)
+                }
                 // The authoritative notes file has persisted before sending this receipt.
                 if WCSession.default.activationState == .activated {
-                    WCSession.default.transferUserInfo(CompanionNoteReceipt(noteID: note.id).userInfo)
+                    if note.createdAt > cutoff {
+                        WCSession.default.transferUserInfo(CompanionNoteReceipt(noteID: note.id).userInfo)
+                    }
                     let next = pending.filter { $0.id != note.id }
                     try JSONEncoder().encode(next).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
                     pending = next
                 }
                 lastError = nil
-            } catch { lastError = "A Watch note is waiting for storage on this iPhone. \(error.localizedDescription)" }
+            } catch { lastError = "A Watch note is waiting. Free up space on your iPhone and open Zone again." }
         }
         publishCache()
     }
 
+    /// One at a time and in order, so the newest request writes last.
+    nonisolated private static let cacheQueue = DispatchQueue(label: "wtf.zayd.zone.share-cache", qos: .utility)
+
+    nonisolated static func clearCache(at url: URL) throws {
+        try cacheQueue.sync {
+            do { try FileManager.default.removeItem(at: url) }
+            catch let error as CocoaError where error.code == .fileNoSuchFile { }
+            notify_post(CompanionShareCache.clearedNotification)
+        }
+    }
+
+    /// Rebuilds the list Messages shows. The notes come from the main actor's store; the history
+    /// read (a whole-library decode), the encode and the write happen on `cacheQueue`. This runs at
+    /// launch and after every saved dictation, and on the main thread it cost one full decode of
+    /// the library each time, in front of the first frame and of a cold mic tap.
     func publishCache() {
-        guard let exporter, let url = CompanionShareCache.url else { return }
+        guard let exporter, let url = messagesURL else { return }
+        let notes: [CompanionShareItem]
+        do { notes = try exporter() } catch {
+            lastError = "Messages could not load recent notes. Unlock your iPhone and open Zone again."
+            return
+        }
+        Self.cacheQueue.async { [weak self] in
+            let failure = Self.writeCache(notes: notes, to: url)
+            guard let failure else { return }
+            Task { @MainActor in self?.lastError = failure }
+        }
+    }
+
+    /// Returns what went wrong, or nil.
+    nonisolated private static func writeCache(notes: [CompanionShareItem], to url: URL) -> String? {
         do {
-            var candidates = try exporter()
-            let history = TranscriptHistory.shared?.recent(limit: 40) ?? []
+            var candidates = notes
+            let history = TranscriptHistory.shared?.recentDictations(limit: 40) ?? []
             candidates += history.filter { $0.status != .recording && $0.status != .paused && $0.status != .note }
                 .map { CompanionShareItem(id: $0.id, text: $0.text, createdAt: $0.createdAt, source: .dictation) }
             candidates.sort { $0.createdAt > $1.createdAt }
@@ -96,12 +216,16 @@ final class PhoneNoteBridge: NSObject, WCSessionDelegate {
                 items.append(item)
                 bytes += item.text.utf8.count
             }
+            if items.isEmpty {
+                do { try FileManager.default.removeItem(at: url) }
+                catch let error as CocoaError where error.code == .fileNoSuchFile { }
+                notify_post(CompanionShareCache.clearedNotification)
+                return nil
+            }
             let cache = CompanionShareCache(updatedAt: Date(), items: items, omittedCount: max(0, candidates.count - items.count))
-            let data = try JSONEncoder().encode(cache)
-            guard data.count <= CompanionShareCache.maximumBytes else { throw CompanionNoteError.tooLarge }
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        } catch { lastError = "Messages could not refresh its recent notes. \(error.localizedDescription)" }
+            try cache.write(to: url)
+            return nil
+        } catch { return "Messages could not load recent notes. Unlock your iPhone and open Zone again." }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any]) {
@@ -111,9 +235,15 @@ final class PhoneNoteBridge: NSObject, WCSessionDelegate {
     nonisolated func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState,
                              error: Error?) {
         Task { @MainActor in
-            if let error { self.lastError = error.localizedDescription }
-            if activationState == .activated { self.processPending() }
+            if error != nil { self.lastError = "Zone could not reach your Watch. Bring it near your iPhone and open Zone again." }
+            if activationState == .activated {
+                self.publishAccent(AccentChoice.current)
+                self.processPending()
+            }
         }
+    }
+    nonisolated func sessionWatchStateDidChange(_ session: WCSession) {
+        Task { @MainActor in self.publishAccent(AccentChoice.current) }
     }
     nonisolated func sessionDidBecomeInactive(_ session: WCSession) {}
     nonisolated func sessionDidDeactivate(_ session: WCSession) { session.activate() }

@@ -85,8 +85,11 @@ final class TextStyleFuzzTests: XCTestCase {
             let text = randomText(&rng, tokens: rng.int(0...40), commands: 0.12, fillers: 0.06, oddities: 0.12)
             // The deliberate losses: an accidental doubled word ("I I", "to to") keeps one copy, and
             // a number said in words is written in digits ("twelve" is 12).
-            let expected = Self.words(SpokenNumbers.writingDigits(SpokenRepair.collapsingStutters(text)), dropping: Self.ignorable)
             for style in TextStyle.allCases {
+                // The texting styles also write two to nine as digits.
+                let expected = Self.words(SpokenNumbers.writingDigits(
+                    SpokenRepair.collapsingStutters(text), small: style.writesSmallNumbersAsDigits ? .digits : .asSaid),
+                    dropping: Self.ignorable)
                 let out = style.apply(text)
                 XCTAssertEqual(Self.words(out, dropping: Self.ignorable), expected,
                                "round \(round) \(style): \(text.debugDescription) -> \(out.debugDescription)")

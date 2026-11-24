@@ -102,9 +102,11 @@ public final class LinkStore: @unchecked Sendable {
     public let clips: LinkClipOutbox
     private let lock = NSLock()
 
-    public init(directory: URL) {
+    /// - Parameter defaults: where the clip outbox remembers withdrawn clips when its file
+    ///   cannot be rewritten (`LinkClipOutbox`). The app passes `.standard`.
+    public init(directory: URL, defaults: UserDefaults? = nil) {
         self.directory = directory
-        self.clips = LinkClipOutbox(fileURL: directory.appendingPathComponent("clips.json"))
+        self.clips = LinkClipOutbox(fileURL: directory.appendingPathComponent("clips.json"), defaults: defaults)
     }
 
     /// The record of what the person deleted on purpose, beside the rest.
@@ -176,7 +178,8 @@ public final class LinkStore: @unchecked Sendable {
 
     /// Writes down records the person deleted on purpose, sparing the computers that keep
     /// their copies at this moment.
-    public func recordDeletion(_ ids: [UUID], kind: LinkKind, at date: Date = Date(), in log: LinkDeletionLog) {
+    @discardableResult
+    public func recordDeletion(_ ids: [UUID], kind: LinkKind, at date: Date = Date(), in log: LinkDeletionLog) -> Bool {
         log.record(ids, kind: kind, at: date, keptBy: computers().filter(\.keepsDeleted).map(\.endpointID))
     }
 

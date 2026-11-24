@@ -4,24 +4,41 @@ import XCTest
 @testable import ZoneCore
 
 final class AccentChoiceTests: XCTestCase {
-    func testEveryAccentHasReadableTextOnPaperAndFilledControls() {
+    func testLastChoiceSurvivesEmptyReadsAndTracksChanges() throws {
+        let suite = "last-accent-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let cache = LastAccentChoice(defaults: defaults)
+        XCTAssertEqual(cache.resolve(stored: nil), .defaultChoice)
+        defaults.set("unknown", forKey: LastAccentChoice.key)
+        XCTAssertEqual(cache.resolve(stored: nil), .defaultChoice)
         for choice in AccentChoice.allCases {
-            XCTAssertGreaterThanOrEqual(contrast(choice.textHexOnLight, 0xF1E9D2), 4.5, choice.label + " on light paper")
-            XCTAssertGreaterThanOrEqual(contrast(choice.hex, 0x2A2A2A), 4.5, choice.label + " on dark paper")
-            XCTAssertGreaterThanOrEqual(contrast(choice.foregroundHex, choice.hex), 4.5, choice.label + " filled control")
+            XCTAssertEqual(cache.resolve(stored: choice), choice)
+            XCTAssertEqual(LastAccentChoice(defaults: defaults).resolve(stored: nil), choice)
         }
     }
 
-    /// The wave, the bars and the swipe trail are shapes, so they need 3:1, not text's 4.5:1,
-    /// against the light keyboard backdrop and Zone's cream paper and card.
-    func testEveryAccentHoldsItsShapeOnLightSurfaces() {
+    func testContrastOnReviewedSurfaces() {
         for choice in AccentChoice.allCases {
-            for (surface, hex) in [("light keyboard", UInt32(0xD1D3D9)), ("cream paper", 0xF1E9D2), ("cream card", 0xF7F2E4)] {
-                XCTAssertGreaterThanOrEqual(contrast(choice.graphicHexOnLight, hex), 3, "\(choice.label) wave on \(surface)")
+            for dark in [false, true] {
+                XCTAssertGreaterThanOrEqual(contrast(choice.controlFillHex(isDark: dark), choice.controlInkHex(isDark: dark)), 4.5, choice.label)
             }
-            // Brighter than the text tone: a filled shape in the text tone goes dull.
-            XCTAssertGreaterThan(luminance(choice.graphicHexOnLight), luminance(choice.textHexOnLight), choice.label)
+            for surface: UInt32 in [0xD1D3D9, 0xE2E4E8, 0xF1E9D2, 0xF7F2E4] {
+                XCTAssertGreaterThanOrEqual(contrast(choice.lightHex, surface), 3, choice.label)
+            }
+            XCTAssertGreaterThanOrEqual(contrast(choice.lightHex, 0xFFFFFF), 4.5, choice.label)
+            for surface: UInt32 in [0x2A2A2A, 0x333333, 0x171717, choice.foregroundHex] {
+                XCTAssertGreaterThanOrEqual(contrast(choice.darkHex, surface), 4.5, choice.label)
+            }
+            XCTAssertGreaterThanOrEqual(contrast(choice.darkHex, 0x2E2E2F), 3, choice.label)
+            XCTAssertGreaterThanOrEqual(contrast(choice.lightHex, choice.darkHex), 2.2, choice.label)
         }
+    }
+
+    func testReviewedPairsAndFillInk() {
+        XCTAssertEqual(AccentChoice.allCases.map(\.lightHex), [0x7149E8, 0x007D9D, 0xD14200, 0x0E8657, 0xC44068])
+        XCTAssertEqual(AccentChoice.allCases.map(\.darkHex), [0xC48AFF, 0xA5D6E4, 0xFFA341, 0x8CE6BE, 0xF6ACBE])
+        XCTAssertEqual(Set(AccentChoice.allCases.map(\.foregroundHex)), [0x262626])
     }
 
     func testExistingSavedAccentsKeepTheirIdentityAlongsidePastels() {
@@ -30,7 +47,7 @@ final class AccentChoiceTests: XCTestCase {
         XCTAssertEqual(AccentChoice(rawValue: "ember"), .ember)
         XCTAssertEqual(AccentChoice(rawValue: "mint"), .mint)
         XCTAssertEqual(AccentChoice(rawValue: "rose"), .rose)
-        XCTAssertEqual(Set(AccentChoice.allCases.map(\.hex)).count, AccentChoice.allCases.count)
+        XCTAssertEqual(Set(AccentChoice.allCases.map(\.darkHex)).count, AccentChoice.allCases.count)
     }
 
     private func contrast(_ first: UInt32, _ second: UInt32) -> Double {

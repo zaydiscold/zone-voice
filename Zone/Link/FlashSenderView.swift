@@ -171,7 +171,7 @@ struct FlashSenderView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
-                    FlashGuideArt(accent: Zone.accent, ink: Zone.ink(scheme), paper: Zone.paper(scheme),
+                    FlashGuideArt(accent: Zone.accentTone(scheme), ink: Zone.ink(scheme), paper: Zone.paper(scheme),
                                   scene: blackAndWhite ? nil : LinkFlashScene(session: plan?.encoder.session ?? 0),
                                   animated: !reduceMotion)
                         .frame(maxWidth: .infinity)
@@ -210,7 +210,7 @@ struct FlashSenderView: View {
                         Text("Screen stays awake at full brightness during transfer, then restores automatically.")
                             .fixedSize(horizontal: false, vertical: true)
                     } icon: {
-                        Image(systemName: "sun.max.fill").foregroundStyle(Zone.accentText(scheme))
+                        Image(systemName: "sun.max.fill").foregroundStyle(Zone.accentTone(scheme))
                     }
                     .font(.footnote)
                     .foregroundStyle(Zone.muted(scheme))
@@ -252,7 +252,7 @@ struct FlashSenderView: View {
                 Text(Self.flashingWarning)
                     .fixedSize(horizontal: false, vertical: true)
             } icon: {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Zone.accentText(scheme))
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Zone.accentTone(scheme))
             }
             .font(.footnote)
             .foregroundStyle(Zone.ink(scheme))
@@ -266,7 +266,7 @@ struct FlashSenderView: View {
                 started = true
             } label: {
                 if plan == nil && problem == nil {
-                    ProgressView().tint(Zone.onInk(scheme))
+                    ProgressView()
                 } else {
                     Label("Start Flash", systemImage: "bolt.fill")
                 }
@@ -278,7 +278,7 @@ struct FlashSenderView: View {
             .padding(.bottom, 12)
             .accessibilityIdentifier("flash.start")
         }
-        .tint(Zone.accentText(scheme))
+        .tint(Zone.inlineInk(scheme))
     }
 
     /// For people whom flashing light can harm. Black and white is no safer: it changes as
@@ -319,7 +319,7 @@ struct FlashSenderView: View {
                 } else {
                     FlashStage(frames: frames, progress: progress,
                                palette: FlashPalette(paper: UIColor(Zone.paper(scheme)), ink: UIColor(Zone.ink(scheme)),
-                                                     accent: UIColor(Zone.accent)),
+                                                     accent: UIColor(Zone.accentTone(scheme))),
                                calm: reduceMotion, clearTop: headerBottom + 10, clearBottom: footerTop - 10)
                 }
             }
@@ -571,9 +571,9 @@ private struct FlashGuideStep: View {
         HStack(alignment: .top, spacing: 14) {
             Text("\(number)")
                 .font(.subheadline.weight(.semibold).monospacedDigit())
-                .foregroundStyle(Zone.accentText(scheme))
+                .foregroundStyle(Zone.ink(scheme))
                 .frame(width: 30, height: 30)
-                .background(Zone.accent.opacity(scheme == .dark ? 0.18 : 0.14), in: Circle())
+                .background(Zone.accentTone(scheme).opacity(scheme == .dark ? 0.18 : 0.14), in: Circle())
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(LocalizedStringKey(title))
@@ -869,7 +869,7 @@ final class FlashStageUIView: UIView {
     private var clockSet = false
     private var modules = 103
     private var calm = false
-    private var palette = FlashPalette(paper: .black, ink: .white, accent: .systemPurple)
+    private var palette = FlashPalette(paper: .black, ink: .white, accent: .clear)
     private var clearTop: CGFloat = 0
     private var clearBottom: CGFloat = 0
 

@@ -9,7 +9,7 @@ import ZoneCore
 ///
 ///     echo "listening dictate" > <group container>/keyboard-fixture.txt
 ///
-/// Words, in any order: a state (idle, listening, quiet, low, mid, high, transcribing, inserted,
+/// Words, in any order: a state (idle, listening, quiet, finishing, low, mid, high, transcribing, inserted,
 /// no-full-access, mic-denied, pending, starting, live), a face (type, dictate) and `capslock`
 /// (locks Shift as a double tap would); other words are ignored. `live` records with no synthetic levels, so the meter shows only what arrives
 /// on `LevelChannel` (post one with `notifyutil` inside the simulator). The keyboard polls the file while it is on screen; deleting it leaves the last state
@@ -21,11 +21,17 @@ import ZoneCore
 /// it again; write the next line to deliver another. A word written `[hour:0.42]` is delivered as
 /// "hour" with that confidence, as Fluid Speech Mini reports it, and turns the unsure-word check on
 /// for that dictation.
+///
+/// `style-formal` (or `style-casual`, `style-veryCasual`, `style-excited`) picks a style as the
+/// style row does, and `undo` taps Undo, so a rewrite of the last dictation can be driven after a
+/// `say`. Like `say`, each is delivered once and the file is removed.
 struct KeyboardFixture: Equatable {
     enum State: String, CaseIterable {
         case idle
         case listening
         case quiet
+        /// Finish when quiet counting down: 3 seconds left.
+        case finishing
         case low
         case mid
         case high
@@ -44,10 +50,13 @@ struct KeyboardFixture: Equatable {
     var say: String?
     /// `capslock`: lock Shift as a double tap would, so a caps-lock dictation can be driven.
     var capsLock = false
-    /// `wave-plain`, `wave-edges`, `wave-core` or `wave-halo`: how the live wave borrows darkness.
-    var waveShading: String?
     /// `accent-ice`, `accent-ember` and so on: sets the shared accent, so one build shows them all.
     var accent: AccentChoice?
+    /// `style-formal`, `style-veryCasual` and so on: picks the style as a tap in the style row
+    /// would, which also rewrites a dictation still at the cursor.
+    var style: TextStyle?
+    /// `undo`: taps Undo, when the strip offers it.
+    var undo = false
 
     static let fileName = "keyboard-fixture.txt"
 
@@ -72,8 +81,10 @@ struct KeyboardFixture: Equatable {
                 fixture.mode = mode
             } else if token.lowercased().hasPrefix("accent-") {
                 fixture.accent = AccentChoice(rawValue: String(token.lowercased().dropFirst(7)))
-            } else if token.lowercased().hasPrefix("wave-") {
-                fixture.waveShading = String(token.lowercased().dropFirst(5))
+            } else if token.hasPrefix("style-") {
+                fixture.style = TextStyle(rawValue: String(token.dropFirst(6)))
+            } else if token.lowercased() == "undo" {
+                fixture.undo = true
             }
         }
         return fixture

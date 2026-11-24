@@ -7,6 +7,7 @@ import ZoneCore
 /// time a call or alarm paused it and how long until it resumed, who stopped it, how long the
 /// words took and where they were saved. No words are in it. Share exports the raw lines.
 struct RecordingLogView: View {
+    @Environment(\.colorScheme) private var scheme
     @State private var groups: [Group] = []
     @State private var loose: [JournalEvent] = []
     @State private var exportURL: URL?
@@ -23,6 +24,7 @@ struct RecordingLogView: View {
             if groups.isEmpty && loose.isEmpty {
                 Text("No recordings logged yet. Timings and mic events appear here without saving any spoken words.")
                     .foregroundStyle(.secondary)
+                    .listRowBackground(Zone.card(scheme))
             }
             ForEach(groups) { group in
                 Section {
@@ -45,6 +47,7 @@ struct RecordingLogView: View {
                 } header: {
                     Text(group.id)
                 }
+                .listRowBackground(Zone.card(scheme))
             }
             if !loose.isEmpty {
                 Section("App and microphone") {
@@ -52,8 +55,11 @@ struct RecordingLogView: View {
                         EventRow(event: event)
                     }
                 }
+                .listRowBackground(Zone.card(scheme))
             }
         }
+        .scrollContentBackground(.hidden)
+        .zoneScreen()
         .navigationTitle("Recording log")
         .zoneBackButton()
         .toolbar {
@@ -154,6 +160,9 @@ private struct EventRow: View {
         case "inputRecovered": "Audio back"
         case "standbyInterrupted": "Standby paused"
         case "standbyResumed": "Standby back"
+        case "standbyEndedByClearedCard": "Zone turned off: its card was cleared"
+        case "clearedCardNotice": "Said Zone is off"
+        case "pressArmRetried": "Press tried the microphone again"
         case "appLaunch": "Zone started"
         case "appForeground": "Zone opened"
         case "appBackground": "Zone in the background"
@@ -162,6 +171,7 @@ private struct EventRow: View {
         case "keyboardResult": "Keyboard got the words"
         case "keyboardDroppedWrite": "Keyboard ignored a key"
         case "keyboardVisit": "Keyboard shown"
+        case "keyboardOpenSkipped": "Keyboard did not open Zone twice"
         default: name
         }
     }

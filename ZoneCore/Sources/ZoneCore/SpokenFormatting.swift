@@ -101,6 +101,46 @@ enum SpokenFormatting {
         return abbreviations.contains(String(word.reversed()).lowercased())
     }
 
+    private static let boundaryStart = #"(?<![\p{L}\p{N}_'’\-])"#
+    private static let boundaryEnd = #"(?![\p{L}\p{N}_'’\-])"#
+
+    private static func canonicalVocabulary(_ personalWords: [String]) -> [String: String] {
+        var vocabulary: [String: String] = [:]
+        for value in personalWords {
+            let word = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !word.isEmpty else { continue }
+            if vocabulary[word.lowercased()] == nil { vocabulary[word.lowercased()] = word }
+        }
+        return vocabulary
+    }
+
+    private static func knownPattern(_ text: String, vocabulary: [String: String], prefilter: Bool) -> String {
+        let candidates = VocabularyCandidates(text)
+        let present = prefilter ? vocabulary.values.filter { candidates.mayMatch($0) } : Array(vocabulary.values)
+        let names = present.sorted { $0.count > $1.count }.flatMap { word -> [String] in
+            let exact = NSRegularExpression.escapedPattern(for: word)
+            let letters = Array(word)
+            guard (2...32).contains(letters.count), letters.allSatisfy({ $0.isASCII && $0.isLetter }) else { return [exact] }
+            let spelled = letters.map { NSRegularExpression.escapedPattern(for: String($0)) }.joined(separator: "[ \\t]+")
+            return [spelled, exact]
+        }
+        return names.isEmpty ? "(?!)" : "(?:" + names.joined(separator: "|") + ")"
+    }
+
+    static func writingKnownNames(_ text: String, words: [String]) -> String {
+        let vocabulary = canonicalVocabulary(words)
+        let pattern = boundaryStart + knownPattern(text, vocabulary: vocabulary, prefilter: true) + boundaryEnd
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return text }
+        let output = NSMutableString(string: text)
+        for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            let original = output.substring(with: match.range).lowercased()
+            if let saved = vocabulary[original] ?? vocabulary[original.filter { !$0.isWhitespace }] {
+                output.replaceCharacters(in: match.range, with: saved)
+            }
+        }
+        return output as String
+    }
+
     /// `mentions` turns a spoken "at Kevin" into "@kevin" (see `SpokenMentions`); "at sign Kevin"
     /// is explicit and tags with or without it. `handles` are the person's own ("at cold").
     /// `spellsInCapitals` is caps lock: "spell d a a n" writes DAAN rather than Daan. The spelling
@@ -110,12 +150,7 @@ enum SpokenFormatting {
                         wordsBefore: [String] = [], spellsInCapitals: Bool = false) -> Result {
         // One escaped alternation and canonical lookup cover all stored vocabulary. ASR hint
         // limits belong to each engine, not to the user's dictionary or formatting.
-        var vocabulary: [String: String] = [:]
-        for value in personalWords {
-            let word = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !word.isEmpty else { continue }
-            if vocabulary[word.lowercased()] == nil { vocabulary[word.lowercased()] = word }
-        }
+        let vocabulary = canonicalVocabulary(personalWords)
         // Mentions are marked before anything else reads the text, so the name after "at" is
         // not also taken as a personal word or a command.
         let marked = SpokenMentions.mark(spoken, bare: mentions, vocabulary: vocabulary, handles: handles, before: wordsBefore)
@@ -126,20 +161,9 @@ enum SpokenFormatting {
         // Only words that can occur in this text join the expression: a dictionary that learns
         // from corrections grows without bound, and a 500-word alternation tried at every
         // position cost about 110 ms per dictation on an M4 (seconds on a long one).
-        let candidates = VocabularyCandidates(text)
-        let present = prefilter ? vocabulary.values.filter { candidates.mayMatch($0) } : Array(vocabulary.values)
-        let names = present.sorted { $0.count > $1.count }.flatMap { word -> [String] in
-            let exact = NSRegularExpression.escapedPattern(for: word)
-            let letters = Array(word)
-            guard (2...32).contains(letters.count), letters.allSatisfy({ $0.isASCII && $0.isLetter }) else { return [exact] }
-            let spelled = letters.map { NSRegularExpression.escapedPattern(for: String($0)) }.joined(separator: "[ \\t]+")
-            return [spelled, exact]
-        }
-        let boundaryStart = #"(?<![\p{L}\p{N}_'’\-])"#
-        let boundaryEnd = #"(?![\p{L}\p{N}_'’\-])"#
+        let known = knownPattern(text, vocabulary: vocabulary, prefilter: prefilter)
         let spelling = #"(?:spell|spelled)[ \t]+(?:[a-z][ \t]+){1,31}[a-z](?:[ \t]+end[ \t]+spelling)?"#
         let commands = #"literal[ \t]+(?:bullet[ \t]+point|next[ \t]+bullet|next[ \t]+item|comma|quote|period|colon|(?:semi[ \t-]?colon|semi[ \t]?cola)|question[ \t]+mark|exclamation[ \t]+(?:mark|point)|new[ \t]+(?:line|paragraph))|bullet[ \t]+point|bullet|next[ \t]+bullet|start[ \t]+numbered[ \t]+list|next[ \t]+item|end[ \t]+list|(?:open|close)[ \t]+parenthes(?:is|es)|(?:open|close|begin|end)[ \t]+quote|new[ \t]+(?:paragraph|line)|insert[ \t]+(?:comma|period|colon|(?:semi[ \t-]?colon|semi[ \t]?cola))|full[ \t]+stop|question[ \t]+mark|exclamation[ \t]+(?:mark|point)|quote|unquote|comma|period|colon|(?:semi[ \t-]?colon|semi[ \t]?cola)"#
-        let known = names.isEmpty ? "(?!)" : "(?:" + names.joined(separator: "|") + ")"
         let knownSpelling = "(?:spell|spelled)[ \t]+" + known + "(?:[ \t]+end[ \t]+spelling)?"
         let mention = handles.isEmpty ? "(?!)" : "\(SpokenMentions.lead)[0-9]+\(SpokenMentions.end)"
         let pattern = boundaryStart + "(?:(?<mention>" + mention + ")|(?<knownspelling>" + knownSpelling + ")|(?<spelling>" + spelling + ")|(?<known>" + known + ")|(?<command>" + commands + "))" + boundaryEnd

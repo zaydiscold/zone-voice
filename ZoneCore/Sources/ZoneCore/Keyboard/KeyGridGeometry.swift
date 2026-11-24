@@ -16,6 +16,7 @@ public enum KeySlotWidth: Equatable, Sendable {
 public struct KeyGridRow: Equatable, Sendable {
     public var widths: [KeySlotWidth]
     /// Extra room after the first key and before the last (shift and delete on the third row).
+    public var duplicatesCenter: Bool = false
     public var edgeGaps: Bool
 
     public init(_ widths: [KeySlotWidth], edgeGaps: Bool = false) {
@@ -96,20 +97,71 @@ public struct KeyGridGeometry: Equatable, Sendable {
     /// Visible caps, per row, left to right, in the grid's coordinates.
     public let caps: [[CGRect]]
 
-    public init(size: CGSize, rows: [KeyGridRow], metrics: KeyGridMetrics? = nil) {
+    /// First key of the right group in each row, including duplicated letters and space.
+    private let splits: [Int]?
+
+    public init(size: CGSize, rows: [KeyGridRow], metrics: KeyGridMetrics? = nil, splitAt: [Int]? = nil) {
         let metrics = metrics ?? .standard(width: size.width)
         self.size = size
         self.metrics = metrics
         let usable = max(size.width - 2 * metrics.sideInset, 0)
         let full = CGFloat(metrics.unitsPerFullRow)
         let unit = max((usable - metrics.keySpacing * (full - 1)) / full, 0)
-        unitWidth = unit
+        let splitAt = splitAt.flatMap { cuts in
+            cuts.count == rows.count && zip(cuts, rows).allSatisfy { $0 > 0 && $0 < $1.widths.count } ? cuts : nil
+        }
+        self.splits = splitAt
+        unitWidth = splitAt == nil ? unit : 46.3
         let count = rows.count
         caps = rows.enumerated().map { rowIndex, row in
             let bottom = size.height - metrics.bottomInset - CGFloat(count - 1 - rowIndex) * metrics.rowPitch
             let top = bottom - metrics.keyHeight
+            if let splitAt {
+                return Self.splitCaps(row: row, index: rowIndex, cut: splitAt[rowIndex],
+                                      side: metrics.sideInset, width: size.width, top: top, height: metrics.keyHeight)
+            }
             return Self.layoutRow(row, unit: unit, usable: usable, metrics: metrics, top: top)
         }
+    }
+
+    // Cap measurements from the iOS 27.2 English split. Build each half from its
+    // outside edge so Return and Delete stay under the right thumb as the host resizes.
+    private static func splitCaps(row: KeyGridRow, index: Int, cut: Int, side: CGFloat,
+                                  width: CGFloat, top: CGFloat, height: CGFloat) -> [CGRect] {
+        let pitch: CGFloat = 57, letter: CGFloat = 46.3, gap = pitch - letter
+        func half(_ keys: ArraySlice<KeySlotWidth>, right: Bool) -> [CGRect] {
+            var offset = side
+            if index == 1 && row.widths.count == 10 && row.duplicatesCenter { offset += pitch / 2 }
+            let outward = right ? Array(keys.reversed()) : Array(keys)
+            let bottom = outward.enumerated().map { slot, key -> CGFloat in
+                if key == .fill { return 0 }
+                if slot == 0 { return right ? 66 : 66.7 }
+                return 40.7
+            }
+            let space = 5 * pitch - gap - bottom.reduce(0, +) - gap * CGFloat(max(0, bottom.count - 1))
+            var caps: [CGRect] = []
+            for (slot, key) in outward.enumerated() {
+                var capWidth = letter
+                if index == 2 && slot == 0 { capWidth = 63.3 }
+                if index == 3 { capWidth = key == .fill ? space : bottom[slot] }
+                let x = right ? width - offset - capWidth : offset
+                caps.append(CGRect(x: x, y: top, width: capWidth, height: height))
+                offset += capWidth + gap
+                if index == 2 && slot == 0 { offset = side + 1.5 * pitch }
+            }
+            return right ? Array(caps.reversed()) : caps
+        }
+        return half(row.widths[..<cut], right: false) + half(row.widths[cut...], right: true)
+    }
+
+    public func sameHalf(_ first: CGPoint, _ second: CGPoint) -> Bool {
+        splits == nil || (first.x < size.width / 2) == (second.x < size.width / 2)
+    }
+
+    private func inSplitGap(_ x: CGFloat, row: Int) -> Bool {
+        guard let cut = splits?[row] else { return false }
+        let padding: CGFloat = 5.35
+        return x >= caps[row][cut - 1].maxX + padding && x < caps[row][cut].minX - padding
     }
 
     private static func layoutRow(_ row: KeyGridRow, unit: CGFloat, usable: CGFloat, metrics: KeyGridMetrics, top: CGFloat) -> [CGRect] {
@@ -207,6 +259,7 @@ public struct KeyGridGeometry: Equatable, Sendable {
         let aimed = Self.aimed(touch)
         guard let nearest = nearestRow(toAimedY: aimed.y) else { return nil }
         let row = likelihood.map { claimedRow(from: nearest, aimed: aimed, likelihood: $0) } ?? nearest
+        guard !inSplitGap(aimed.x, row: nearest), !inSplitGap(aimed.x, row: row) else { return nil }
         return Position(row: row, index: index(inRow: row, atAimedX: aimed.x, likelihood: likelihood))
     }
 
@@ -238,7 +291,7 @@ public struct KeyGridGeometry: Equatable, Sendable {
     public func boundary(row: Int, after index: Int, likelihood: ((Position) -> Double?)? = nil) -> CGFloat {
         let left = caps[row][index], right = caps[row][index + 1]
         let middle = (left.maxX + right.minX) / 2
-        guard let likelihood,
+        guard splits?[row] != index + 1, let likelihood,
               let l = likelihood(Position(row: row, index: index)),
               let r = likelihood(Position(row: row, index: index + 1)),
               l >= 0, r >= 0, l.isFinite, r.isFinite, (l + r).isFinite, l + r > 0 else { return middle }
@@ -317,8 +370,12 @@ public struct KeyGridGeometry: Equatable, Sendable {
     public func touchRegion(_ position: Position) -> CGRect? {
         guard let cap = cap(position) else { return nil }
         let rects = caps[position.row]
-        let left = position.index == 0 ? 0 : (rects[position.index - 1].maxX + cap.minX) / 2
-        let right = position.index == rects.count - 1 ? size.width : (cap.maxX + rects[position.index + 1].minX) / 2
+        var left = position.index == 0 ? 0 : (rects[position.index - 1].maxX + cap.minX) / 2
+        var right = position.index == rects.count - 1 ? size.width : (cap.maxX + rects[position.index + 1].minX) / 2
+        if let cut = splits?[position.row] {
+            if position.index == cut - 1 { right = cap.maxX + 5.35 }
+            if position.index == cut { left = cap.minX - 5.35 }
+        }
         // Neighbors are the nearest rows that have keys: `nearestRow` skips empty rows, so the
         // regions must too or they disagree with `key(at:)`.
         let bias = Self.touchBias

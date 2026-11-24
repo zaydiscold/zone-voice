@@ -34,6 +34,7 @@ final class BranchPainter: VoicePainter {
     private var stem: [CGPoint] = []
     private var heading: CGFloat = 0
     private var twigs: [Twig] = []
+    var twigCount: Int { twigs.count }
     private var leaves: [Leaf] = []
     private var side: CGFloat = -1
     private var scroll: CGFloat = 0
@@ -48,7 +49,7 @@ final class BranchPainter: VoicePainter {
         time += dt
         if stem.isEmpty { stem = [CGPoint(x: -h * 0.2, y: h * 0.6), CGPoint(x: 0, y: h * 0.58)] }
         sinceTwig += dt
-        if voice.quiet < 0.2, voice.level > 0.05, var tip = stem.last {
+        if voice.quiet == 0, var tip = stem.last {
             let speed = h * (0.34 + 0.08 * CGFloat(min(voice.pace, 7)))
             heading += random.bell() * 2.4 * dt
             // The bough stays in the strip: it bends back toward the middle as it nears an edge.
@@ -156,6 +157,7 @@ final class InkblotPainter: VoicePainter {
 
     private var random: ArtRandom
     private var drops: [Drop] = []
+    var dropCount: Int { drops.count }
     private var level: CGFloat = 0
     private var sinceDrop: CGFloat = 0
     private static let life: CGFloat = 3.2
@@ -166,7 +168,7 @@ final class InkblotPainter: VoicePainter {
         let h = size.height
         level += (CGFloat(voice.level) - level) * (1 - exp(-dt / 0.08))
         sinceDrop += dt
-        if voice.onset > 0 || (voice.level > 0.2 && sinceDrop > 0.45) {
+        if voice.onset > 0 || (voice.quiet == 0 && voice.level > 0.2 && sinceDrop > 0.45) {
             sinceDrop = 0
             let strength = voice.onset > 0 ? CGFloat(voice.onset) : 0.4
             // Ink spreads out from the fold the longer and louder the phrase runs.

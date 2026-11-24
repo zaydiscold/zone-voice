@@ -216,6 +216,23 @@ final class TextProxyGateTests: XCTestCase {
 
     // MARK: Traits
 
+    func testWebSearchUsesTheOrdinarySpaceRowAndURLKeepsPunctuation() {
+        let document = Document()
+        document._keyboardType = .webSearch
+        document._returnKeyType = .search
+        let search = FieldTraits(reading: document, needsGlobeKey: false)
+        XCTAssertTrue(search.isSearchField)
+        XCTAssertEqual(search.returnKeyLabel, "search")
+        func bottomRow(_ traits: FieldTraits) -> [Key] {
+            KeyboardLayout.rows(for: .letters, shifted: false, needsGlobe: false, fieldKeys: traits.fieldKeys)[3]
+        }
+        XCTAssertEqual(bottomRow(search), [.switchLayer(.numbers, label: "123"), .space, .newline])
+
+        document._keyboardType = .URL
+        let url = FieldTraits(reading: document, needsGlobeKey: false)
+        XCTAssertEqual(bottomRow(url), [.switchLayer(.numbers, label: "123"), .space, .character("."), .character("/"), .newline])
+    }
+
     func testOneBatchReadsEachTraitPropertyOnceAndDerivesWhatTheGettersDid() {
         let document = Document()
         document._keyboardType = .numberPad

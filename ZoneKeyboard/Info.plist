@@ -42,6 +42,10 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).KeyboardViewController</string>
 	</dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Zone records while you dictate. Speech is processed on iPhone by default. If you choose a GPU server, the keyboard sends finished recordings there.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Lets the Zone keyboard use Apple’s on-device speech recognition if Zone’s speech model cannot recognize your dictation.</string>
 	<key>ZoneAppGroup</key>
 	<string>$(ZONE_APP_GROUP)</string>
 </dict>

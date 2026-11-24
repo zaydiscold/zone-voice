@@ -1,0 +1,1 @@
+let workerPointID: StaticString = "@PREFIX@.zone.speechworker"

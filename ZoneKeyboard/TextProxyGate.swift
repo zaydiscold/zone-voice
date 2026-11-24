@@ -13,6 +13,7 @@ struct FieldTraits: Equatable {
     var fieldNeverCapitalizes = false
     var allowsAutocorrection = true
     var allowsSwipeTyping = true
+    var allowsEmojiShortcodes = true
     /// Smart punctuation may curl quotes and join dashes here (`SmartPunctuation`).
     var allowsSmartQuotes = true
     var allowsSmartDashes = true
@@ -30,6 +31,9 @@ struct FieldTraits: Equatable {
     /// gives a custom keyboard no way to receive it, so this field is handed off too.
     var isCodeField = false
     var handsOffToSystemKeyboard: Bool { isEmailField || isCodeField }
+    /// What a fresh copy may be in this field (`ClipboardCapture`): a secret in a password, code or
+    /// card field, perhaps one in a user name or email field, anything in the rest.
+    var clipboardField = ClipboardField.ordinary
 
     /// The proxy properties one batch reads, for the read accounting in `TextProxyGate`.
     static let proxyReadsPerBatch = 10
@@ -91,7 +95,6 @@ struct FieldTraits: Equatable {
         }
 
         switch keyboard {
-        case .webSearch: fieldKeys = ["."]
         case .URL: fieldKeys = [".", "/"]
         case .twitter: fieldKeys = ["@", "#"]
         default: fieldKeys = []
@@ -111,6 +114,13 @@ struct FieldTraits: Equatable {
         default: isSearchField = keyboard == .webSearch || keyboard == .URL
         }
 
+        allowsEmojiShortcodes = !takesLiteralText && !prefersNumbers
+            && keyboard != .asciiCapable
+        if #available(iOS 17.0, *) {
+            let cardContent: Set<UITextContentType> = [.creditCardExpiration, .creditCardExpirationMonth,
+                .creditCardExpirationYear, .creditCardType]
+            if contentType.map({ cardContent.contains($0) }) == true { allowsEmojiShortcodes = false }
+        }
         dimsReturnWhenEmpty = enablesReturn == true
 
         switch appearance {
@@ -122,6 +132,18 @@ struct FieldTraits: Equatable {
         self.needsGlobeKey = needsGlobeKey
         isEmailField = keyboard == .emailAddress || contentType == .emailAddress
         isCodeField = contentType == .oneTimeCode
+
+        var secretContent: Set<UITextContentType> = [.password, .newPassword, .oneTimeCode, .creditCardNumber]
+        if #available(iOS 17.0, *) {
+            secretContent.formUnion([.creditCardSecurityCode, .creditCardExpiration, .creditCardExpirationMonth,
+                                     .creditCardExpirationYear, .creditCardName, .creditCardGivenName,
+                                     .creditCardMiddleName, .creditCardFamilyName, .creditCardType])
+        }
+        if secure || contentType.map({ secretContent.contains($0) }) == true {
+            clipboardField = .secret
+        } else if isEmailField || contentType == .username {
+            clipboardField = .signIn
+        }
     }
 }
 
@@ -184,6 +206,7 @@ final class TextProxyGate {
     var viewState: () -> (inWindow: Bool, hidden: Bool) = { (false, false) }
     /// Runs once each time the document goes live, after the traits are read.
     var onLive: (Trigger) -> Void = { _ in }
+    var onClipboardFieldChange: (() -> Void)?
 
     init(readTraits: @escaping () -> FieldTraits,
          readSession: @escaping () -> String?,
@@ -347,10 +370,12 @@ final class TextProxyGate {
     }
 
     private func readTraitBatch(session: String?) {
+        let previousField = traits.clipboardField
         traits = readTraits()
         traitReads += FieldTraits.proxyReadsPerBatch
         traitsSession = session
         traitsCurrent = true
+        if traits.clipboardField != previousField { onClipboardFieldChange?() }
     }
 
     private func offScreenTouch() {

@@ -2,6 +2,14 @@
 
 import Foundation
 
+/// Frame-rate independent attack and release for the moving meter.
+public enum VoiceEnvelope {
+    public static func response(seconds: Double, rising: Bool) -> Double {
+        guard seconds.isFinite, seconds > 0 else { return 0 }
+        return -expm1(-seconds / (rising ? 0.032 : 0.135))
+    }
+}
+
 /// The Bars voice graphic: a dense row of thin upright bars, tallest in the middle and tapering
 /// to both ends, the look of a dictation pill. Only sampled levels are drawn. The newest sound
 /// is at the right end and moves left as it ages, so a word swells as it reaches the middle and

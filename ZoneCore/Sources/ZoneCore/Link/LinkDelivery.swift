@@ -129,9 +129,11 @@ public struct LinkDeliveryState: Codable, Equatable, Sendable {
 /// on my computer too" and "the phone stopped keeping it".
 public final class LinkDeletionLog: @unchecked Sendable {
     public let fileURL: URL
-    private let lock = NSLock()
-    /// Far more than anyone deletes between two syncs; the oldest go first.
-    public static let capacity = 20_000
+    private static let fileLock = NSLock()
+    private var lock: NSLock { Self.fileLock }
+
+    private var waiting: [LinkDeletion] = []
+    private var retryURL: URL { fileURL.appendingPathExtension("retry") }
 
     public init(fileURL: URL) {
         self.fileURL = fileURL
@@ -139,15 +141,48 @@ public final class LinkDeletionLog: @unchecked Sendable {
 
     /// - Parameter keptBy: the computers that keep their copies of these records
     ///   (`LinkStore.recordDeletion` fills it in).
-    public func record(_ ids: [UUID], kind: LinkKind, at date: Date = Date(), keptBy: [String] = []) {
-        guard !ids.isEmpty else { return }
+    @discardableResult
+    public func record(_ ids: [UUID], kind: LinkKind, at date: Date = Date(), keptBy: [String] = []) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !ids.isEmpty else { return true }
         let at = LinkEncoding.seconds(date)
-        change { entries in
-            let known = Set(entries.map(\.id))
-            entries += ids.map(\.uuidString).filter { !known.contains($0) }
-                .map { LinkDeletion(id: $0, kind: kind, at: at, keptBy: keptBy.isEmpty ? nil : keptBy) }
-            if entries.count > Self.capacity { entries.removeFirst(entries.count - Self.capacity) }
+        waiting += ids.map { LinkDeletion(id: $0.uuidString, kind: kind, at: at, keptBy: keptBy.isEmpty ? nil : keptBy) }
+        do {
+            _ = try flush()
+            return true
+        } catch {
+            // A damaged log can stay unreadable across launches. Keep the new IDs apart from its original bytes.
+            if let previous = try? read(at: retryURL),
+               (try? write(merged(previous, waiting), to: retryURL)) != nil {
+                waiting.removeAll()
+            }
+            return false
         }
+    }
+
+    private func flush() throws -> [LinkDeletion] {
+        let entries = try read(at: fileURL)
+        let retry: [LinkDeletion]
+        do { retry = try read(at: retryURL) }
+        catch is DecodingError {
+            // Keep the original bytes for repair. Protected or temporarily inaccessible
+            // files still throw and can be read on a later attempt.
+            let damaged = retryURL.appendingPathExtension("damaged-" + UUID().uuidString)
+            try FileManager.default.moveItem(at: retryURL, to: damaged)
+            retry = []
+        }
+        guard !waiting.isEmpty || !retry.isEmpty else { return entries }
+        let next = merged(entries, retry + waiting)
+        try write(next, to: fileURL)
+        if !retry.isEmpty { try FileManager.default.removeItem(at: retryURL) }
+        waiting.removeAll()
+        return next
+    }
+
+    private func merged(_ entries: [LinkDeletion], _ additions: [LinkDeletion]) -> [LinkDeletion] {
+        var known = Set(entries.map(\.id))
+        return entries + additions.filter { known.insert($0.id).inserted }
     }
 
     /// Spares one computer every deletion written down so far: it keeps those copies for good.
@@ -161,7 +196,7 @@ public final class LinkDeletionLog: @unchecked Sendable {
 
     public func all() -> [LinkDeletion] {
         lock.lock(); defer { lock.unlock() }
-        return read()
+        return (try? flush()) ?? merged((try? read(at: retryURL)) ?? [], waiting)
     }
 
     /// Drops the entries no paired computer needs any more.
@@ -171,22 +206,36 @@ public final class LinkDeletionLog: @unchecked Sendable {
 
     public func clear() {
         lock.lock(); defer { lock.unlock() }
+        waiting.removeAll()
+        try? FileManager.default.removeItem(at: retryURL)
         try? FileManager.default.removeItem(at: fileURL)
     }
 
     private func change(_ body: (inout [LinkDeletion]) -> Void) {
         lock.lock(); defer { lock.unlock() }
-        var entries = read()
+        guard var entries = try? flush() else {
+            body(&waiting)
+            // Preserve damaged primary bytes. Changes to readable retry records must
+            // survive a restart before the primary file can be repaired.
+            if var retry = try? read(at: retryURL) {
+                body(&retry)
+                try? write(retry, to: retryURL)
+            }
+            return
+        }
         let before = entries
         body(&entries)
         guard entries != before else { return }
-        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        guard let data = try? JSONEncoder().encode(entries) else { return }
-        try? data.write(to: fileURL, options: LinkStore.writeOptions)
+        try? write(entries, to: fileURL)
     }
 
-    private func read() -> [LinkDeletion] {
-        guard let data = try? Data(contentsOf: fileURL) else { return [] }
-        return (try? JSONDecoder().decode([LinkDeletion].self, from: data)) ?? []
+    private func write(_ entries: [LinkDeletion], to url: URL) throws {
+        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(entries).write(to: url, options: LinkStore.writeOptions)
+    }
+
+    private func read(at url: URL) throws -> [LinkDeletion] {
+        do { return try JSONDecoder().decode([LinkDeletion].self, from: Data(contentsOf: url)) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [] }
     }
 }

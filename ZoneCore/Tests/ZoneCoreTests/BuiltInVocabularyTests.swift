@@ -104,9 +104,11 @@ final class BuiltInVocabularyTests: XCTestCase {
         XCTAssertEqual(TextStyle.casual.apply("we all left"), "We all left")
     }
 
-    func testFormalKeepsTheRecognizersSpelling() {
+    /// Formal writes the words that were meant (`TextStyle.formalWording`); "y'all" is a word.
+    func testFormalWritesImmaOutAndKeepsYall() {
         XCTAssertEqual(TextStyle.formal.apply("Y'all ready"), "Y'all ready.")
-        XCTAssertEqual(TextStyle.formal.apply("I'ma head out"), "I'ma head out.")
+        XCTAssertEqual(TextStyle.formal.apply("I'ma head out"), "I'm going to head out.")
+        XCTAssertEqual(TextStyle.excited.apply("I'ma head out"), "I'ma head out!")
     }
 
     func testBuiltInWordsAreAddedOnceAndPersonalSpellingsWin() {

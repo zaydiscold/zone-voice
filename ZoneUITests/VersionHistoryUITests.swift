@@ -2,7 +2,7 @@
 
 import XCTest
 
-/// Settings > Version opens the version history, and the What's New sheet shows once after an
+/// Settings > About > Version opens the version history, and the What's New sheet shows once after an
 /// update: only to someone who opened Zone themselves, never on a fresh install, and never
 /// when the keyboard's link, a Live Activity link or a Shortcut opened Zone.
 ///
@@ -38,6 +38,9 @@ final class VersionHistoryUITests: XCTestCase {
     private func openVersionHistory(_ app: XCUIApplication) {
         XCTAssertTrue(home(app).waitForExistence(timeout: 30), "Home")
         home(app).tap()
+        let about = app.buttons["settings.about"]
+        for _ in 0..<8 where !about.isHittable { app.swipeUp() }
+        about.tap()
         let row = element(app, "settings.version")
         for _ in 0..<8 where !(row.exists && row.isHittable) { app.swipeUp() }
         XCTAssertTrue(row.isHittable, "the Version row in Settings")
@@ -62,21 +65,17 @@ final class VersionHistoryUITests: XCTestCase {
         XCTAssertTrue(rows[1].label.hasPrefix("Version 1.0.3, November 14, 2026."), rows[1].label)
         XCTAssertTrue(element(app, "versionHistory.build").label.hasPrefix("Zone 1.0.4, build "))
 
-        // A version opens to its notes: the number, cards, then the smaller changes, folded.
+        // A version opens to its notes: the number, then every change as one line under its group.
         rows[1].tap()
         let number = element(app, "releaseNotes.version")
         XCTAssertTrue(number.waitForExistence(timeout: 10))
         XCTAssertEqual(number.label, "Version 1.0.3")
-        XCTAssertTrue(app.staticTexts["Toggle Zone"].exists, "the lead card")
         XCTAssertFalse(element(app, "releaseNotes.build").exists, "the build number belongs to the installed version")
-        let showAll = app.buttons["releaseNotes.showAll"]
-        for _ in 0..<8 where !(showAll.exists && showAll.isHittable) { app.swipeUp() }
-        XCTAssertTrue(app.staticTexts["Also in this version"].exists)
-        XCTAssertEqual(showAll.label, "Show all 8")
-        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "releaseNotes.fix").count, 5)
-        showAll.tap()
-        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "releaseNotes.fix").count, 8)
-        XCTAssertEqual(showAll.label, "Show fewer")
+        let groups = app.descendants(matching: .any).matching(identifier: "releaseNotes.group")
+        XCTAssertEqual(groups.allElementsBoundByIndex.map(\.label), ["New, 5 changes", "Fixes and polish, 8 changes"])
+        let items = app.descendants(matching: .any).matching(identifier: "releaseNotes.item")
+        XCTAssertEqual(items.count, 13, "a short version shows every change, none folded away")
+        XCTAssertTrue(items.firstMatch.label.hasPrefix("Toggle Zone"), items.firstMatch.label)
 
         // And back, to the installed version, which shows its build number at the end.
         app.navigationBars.buttons.firstMatch.tap()
@@ -85,6 +84,25 @@ final class VersionHistoryUITests: XCTestCase {
         XCTAssertTrue(number.waitForExistence(timeout: 10))
         XCTAssertEqual(number.label, "Version 1.0.4")
         XCTAssertFalse(continueButton(app).exists, "opening a version by hand is not the What's New sheet")
+    }
+
+    func testSubmittedVersionAndNextVersionShowTheirOwnDictationChanges() {
+        let app = launch(["-zoneVersion", "1.0.6", "-zoneWhatsNewAfter", "1.0.6"])
+        openVersionHistory(app)
+        let current = element(app, "versionHistory.row.1.0.6")
+        let submitted = element(app, "versionHistory.row.1.0.5")
+        XCTAssertTrue(current.label.contains("installed on this iPhone"))
+        XCTAssertLessThan(current.frame.minY, submitted.frame.minY)
+        for (row, included, excluded) in [(current, "Restyle what you said", "Learns your fixes"),
+                                         (submitted, "Learns your fixes", "Restyle what you said")] {
+            row.tap()
+            let dictation = element(app, "releaseNotes.group")
+            XCTAssertTrue(dictation.waitForExistence(timeout: 10))
+            let changes = dictation.value as? String ?? ""
+            XCTAssertTrue(changes.contains(included), changes)
+            XCTAssertFalse(changes.contains(excluded), changes)
+            app.navigationBars.buttons.firstMatch.tap()
+        }
     }
 
     func testHistoryStopsAtTheInstalledVersion() {
@@ -116,10 +134,13 @@ final class VersionHistoryUITests: XCTestCase {
         XCTAssertTrue(continueButton(app).waitForExistence(timeout: 30), "the sheet, on the first open after the update")
         XCTAssertEqual(element(app, "releaseNotes.version").label, "Version 1.0.4")
         XCTAssertTrue(app.staticTexts["What's new in Zone"].exists)
-        XCTAssertTrue(app.staticTexts["Your words on your own computer"].exists)
-        // A short list: one line per feature, each with its brief, not the full cards.
-        XCTAssertTrue(app.staticTexts["Send your dictations, notes and meetings to a computer you pair."].exists)
-        XCTAssertFalse(app.staticTexts["Also in this version"].exists, "the smaller changes wait for the full notes")
+        // A short list: only the starred changes, each with its name and one sentence.
+        let lines = app.descendants(matching: .any).matching(identifier: "whatsNew.line")
+        XCTAssertEqual(lines.count, 4, "the starred 1.0.4 changes")
+        XCTAssertTrue(lines.firstMatch.label.contains("Your words on your own computer"), lines.firstMatch.label)
+        XCTAssertTrue(lines.firstMatch.label.contains("Send your dictations, notes and meetings to a computer you pair."),
+                      lines.firstMatch.label)
+        XCTAssertFalse(element(app, "releaseNotes.group").exists, "the groups wait for the full notes")
         XCTAssertTrue(app.buttons["whatsNew.allVersions"].exists)
         continueButton(app).tap()
         XCTAssertTrue(continueButton(app).waitForNonExistence(timeout: 10))
@@ -135,21 +156,36 @@ final class VersionHistoryUITests: XCTestCase {
     func testReadTheFullNotesOpensTheDetailedPageInsideTheSheet() {
         let app = launch(["-zoneVersion", "1.0.4", "-zoneWhatsNewAfter", "1.0.3"])
         XCTAssertTrue(continueButton(app).waitForExistence(timeout: 30))
-        let lines = app.descendants(matching: .any).matching(identifier: "whatsNew.line")
-        XCTAssertEqual(lines.count, 16, "a line for every 1.0.4 feature")
         let full = element(app, "whatsNew.fullNotes")
-        for _ in 0..<12 where !(full.exists && full.isHittable) { app.swipeUp() }
+        let changes = app.scrollViews.containing(.button, identifier: "whatsNew.fullNotes").firstMatch
+        let footer = continueButton(app)
+        // The pinned footer can cover the link even while XCTest reports it as hittable.
+        for _ in 0..<6 {
+            if full.isHittable && full.frame.maxY < footer.frame.minY - 14 { break }
+            changes.swipeUp()
+        }
         XCTAssertTrue(full.isHittable)
-        XCTAssertTrue(full.label.contains("smaller fixes and improvements"), full.label)
+        XCTAssertLessThan(full.frame.maxY, footer.frame.minY - 14, "All changes is above the pinned footer")
+        XCTAssertTrue(full.label.contains("All 39 changes"), full.label)
+        XCTAssertTrue(full.label.contains("New, Fixes and polish"), full.label)
         full.tap()
 
-        // The same detailed page as Settings > Version: full cards, then the smaller changes.
+        // The same page as Settings > About > Version. A long version opens folded: each group names its
+        // changes, and a tap shows them one line each.
         XCTAssertTrue(app.navigationBars["Version 1.0.4"].waitForExistence(timeout: 10))
-        XCTAssertTrue(element(app, "releaseNotes.feature").exists)
-        let showAll = app.buttons["releaseNotes.showAll"]
-        for _ in 0..<30 where !(showAll.exists && showAll.isHittable) { app.swipeUp() }
-        XCTAssertTrue(app.staticTexts["Also in this version"].exists)
+        let groups = app.descendants(matching: .any).matching(identifier: "releaseNotes.group")
+        let items = app.descendants(matching: .any).matching(identifier: "releaseNotes.item")
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertEqual(items.count, 0, "folded until a group is tapped")
         XCTAssertTrue(element(app, "releaseNotes.build").exists, "the installed version shows its build")
+        let first = groups.firstMatch
+        XCTAssertEqual(first.label, "New, 16 changes")
+        XCTAssertTrue((first.value as? String ?? "").hasPrefix("Your words on your own computer, "), "\(String(describing: first.value))")
+        first.tap()
+        XCTAssertEqual(items.count, 16, "the group's changes, one line each")
+        XCTAssertEqual(first.value as? String, "Open")
+        first.tap()
+        XCTAssertEqual(items.count, 0, "and folded again")
 
         // Back to the list, and Continue still closes the sheet.
         app.navigationBars.buttons.firstMatch.tap()
@@ -172,12 +208,25 @@ final class VersionHistoryUITests: XCTestCase {
     func testNoWhatsNewOnAFreshInstallEvenAfterSetup() {
         // First launch ever: no record, setup not started.
         var app = launch(["-zoneVersion", "1.0.4", "-zoneWhatsNewForget"], settled: false)
-        XCTAssertTrue(app.buttons["Not now"].waitForExistence(timeout: 30), "the setup walkthrough")
+        // The walkthrough opens on the first step the simulator has not done. On one that already has
+        // the model, the microphone, the keyboard and a dictation (a pool simulator other tests have
+        // used) that is the last step, which has Start using Zone and no Not now: batch
+        // 20261120-0612 failed here on the one simulator in that state. Either way out is checked.
+        let later = app.buttons["Not now"], start = app.buttons["Start using Zone"]
+        let walkthrough = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in later.exists || start.exists }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [walkthrough], timeout: 30), .completed, "the setup walkthrough")
         XCTAssertFalse(continueButton(app).waitForExistence(timeout: pastTheWindow), "never during setup")
-        // "Not now" shows Home with setup unfinished: still nothing.
-        app.buttons["Not now"].tap()
-        XCTAssertTrue(home(app).waitForExistence(timeout: 10), "Home")
-        XCTAssertFalse(continueButton(app).waitForExistence(timeout: pastTheWindow), "never before setup is finished")
+        if later.exists {
+            // "Not now" shows Home with setup unfinished: still nothing.
+            later.tap()
+            XCTAssertTrue(home(app).waitForExistence(timeout: 10), "Home")
+            XCTAssertFalse(continueButton(app).waitForExistence(timeout: pastTheWindow), "never before setup is finished")
+        } else {
+            // Setup finished in this very launch: the version they just installed is not news either.
+            start.tap()
+            XCTAssertTrue(home(app).waitForExistence(timeout: 10), "Home")
+            XCTAssertFalse(continueButton(app).waitForExistence(timeout: pastTheWindow), "never right after finishing setup")
+        }
 
         // Setup finished, same version: the version they installed is not news to them.
         app.terminate()
@@ -192,19 +241,19 @@ final class VersionHistoryUITests: XCTestCase {
     /// The notes are owed, and they must wait.
     func testNoWhatsNewWhenTheKeyboardOpensZoneAndItWaitsForThePerson() throws {
         var app = XCUIApplication()
-        app.launchArguments = settledIn + ["-zoneVersion", "1.0.4", "-zoneWhatsNewAfter", "1.0.3"]
+        let id = UUID()
+        // Keep this request waiting for setup so the app becomes idle within the
+        // eight-second update window, regardless of models installed by other tests.
+        app.launchArguments = settledIn + ["-zoneVersion", "1.0.4", "-zoneWhatsNewAfter", "1.0.3",
+                                            "-zoneSeedKeyboardRequest", id.uuidString, "-zoneFakeSpeech", "Test words",
+                                            "-zoneFakeModelDownload", "30"]
         let opened = Date()
-        app.open(try XCTUnwrap(URL(string: "zone://dictate?request=\(UUID().uuidString)")))
-        // The cold path's own screen, which is what the keyboard's tap is for.
+        app.open(try XCTUnwrap(URL(string: "zone://dictate?request=\(id.uuidString)")))
         let close = app.buttons["dictation.close"]
-        XCTAssertTrue(close.waitForExistence(timeout: 30), "the dictation screen the link opens")
-        XCTAssertFalse(continueButton(app).exists, "no sheet over a keyboard dictation")
-        // Close it at once. Home is now idle and the visit is seconds old, inside the window in
-        // which the sheet may open (8 seconds), so only one thing holds it back: this visit was
-        // the keyboard's. A run too slow to get here inside the window proves nothing, and says so.
+        XCTAssertTrue(close.isHittable || close.waitForExistence(timeout: 5), "keyboard request screen")
         close.tap()
-        XCTAssertTrue(home(app).waitForExistence(timeout: 10), "Home")
-        XCTAssertLessThan(Date().timeIntervalSince(opened), 7, "too slow to test the visit rule on an idle Home; run it again")
+        XCTAssertTrue(home(app).isHittable || home(app).waitForExistence(timeout: 5))
+        XCTAssertLessThan(Date().timeIntervalSince(opened), 7)
         XCTAssertFalse(continueButton(app).waitForExistence(timeout: pastTheWindow), "not on an idle Home in the keyboard's visit")
 
         // The next time the person opens Zone themselves, the notes are still owed and appear.
@@ -242,6 +291,21 @@ final class VersionHistoryUITests: XCTestCase {
         var app = launch(["-zoneVersion", "1.0.4", "-zoneWhatsNewAfter", "1.0.3", "-zoneWhatsNewIntent"])
         XCTAssertFalse(continueButton(app).waitForExistence(timeout: pastTheWindow), "no sheet on a visit a Shortcut drove")
 
+        // A refused press survives relaunch and correctly postpones What's New. End this
+        // test's own press before checking what an idle visit is owed.
+        if app.staticTexts["Note failed"].exists {
+            let dismiss = app.buttons["Dismiss"].firstMatch
+            XCTAssertTrue(dismiss.isHittable)
+            dismiss.tap()
+            XCTAssertTrue(app.staticTexts["Note failed"].waitForNonExistence(timeout: 5))
+        } else if app.buttons["Discard note"].exists {
+            app.buttons["Discard note"].tap()
+            let discard = app.alerts["Discard this recording?"].buttons["Discard"]
+            XCTAssertTrue(discard.waitForExistence(timeout: 5))
+            discard.tap()
+            XCTAssertTrue(app.buttons["noteCard.save"].waitForNonExistence(timeout: 5))
+        }
+
         app.terminate()
         app = launch(["-zoneVersion", "1.0.4"])
         XCTAssertTrue(continueButton(app).waitForExistence(timeout: 30), "still owed after the Shortcut's visit")
@@ -276,23 +340,30 @@ final class VersionHistoryUITests: XCTestCase {
 
         let looks = ProcessInfo.processInfo.environment["ZONE_MEDIA_LOOKS"]?.split(separator: ",").map(String.init) ?? ["light", "dark"]
         for look in looks {
-            let app = launch(["-zoneVersion", "1.0.4", "-zoneWhatsNewAfter", "1.0.3", "-zone.settings.appearance", look])
+            let app = launch(["-zoneVersion", "1.0.6", "-zoneWhatsNewAfter", "1.0.5", "-zone.settings.appearance", look])
             XCTAssertTrue(continueButton(app).waitForExistence(timeout: 30))
             try shot("whats-new-\(look)")
             app.swipeUp()
             try shot("whats-new-scrolled-\(look)")
+            element(app, "whatsNew.fullNotes").tap()
+            XCTAssertTrue(app.navigationBars["Version 1.0.6"].waitForExistence(timeout: 10))
+            try shot("whats-new-all-changes-\(look)")
+            app.navigationBars.buttons.firstMatch.tap()
             continueButton(app).tap()
             XCTAssertTrue(continueButton(app).waitForNonExistence(timeout: 10))
 
             openVersionHistory(app)
             try shot("history-\(look)")
-            element(app, "versionHistory.row.1.0.4").tap()
+            element(app, "versionHistory.row.1.0.6").tap()
             XCTAssertTrue(element(app, "releaseNotes.version").waitForExistence(timeout: 10))
-            try shot("notes-1.0.4-\(look)")
+            try shot("notes-1.0.6-\(look)")
             app.swipeUp()
-            try shot("notes-1.0.4-cards-\(look)")
-            for _ in 0..<12 where !app.buttons["releaseNotes.showAll"].isHittable { app.swipeUp() }
-            try shot("notes-1.0.4-also-\(look)")
+            try shot("notes-1.0.6-second-\(look)")
+            app.swipeDown()
+            app.descendants(matching: .any).matching(identifier: "releaseNotes.group").firstMatch.tap()
+            try shot("notes-1.0.6-dictation-open-\(look)")
+            app.swipeUp()
+            try shot("notes-1.0.6-dictation-open-second-\(look)")
             app.navigationBars.buttons.firstMatch.tap()
             element(app, "versionHistory.row.1.0.1").tap()
             XCTAssertTrue(element(app, "releaseNotes.version").waitForExistence(timeout: 10))

@@ -15,8 +15,18 @@ struct ModelLibraryView: View {
     @Environment(\.colorScheme) private var scheme
     @State private var inventory: ModelLibraryInventory?
     @State private var measured: [EngineKind: EngineResult] = [:]
+    @State private var keyboardRecognition = KeyboardVoiceRoute.load().mode
     @State private var selecting = false
+    @State private var clearingHelper = false
     @State private var pendingDelete: [SpeechModel]?
+
+    private var keyboardRouteLabel: String {
+        switch keyboardRecognition {
+        case .standard: "Zone default"
+        case .webView: "Fluid Speech Mini · iPhone"
+        case .computer: "Zone Link GPU · Beta"
+        }
+    }
 
     private let model = SpeechModel.fluidSpeechMini
 
@@ -43,21 +53,30 @@ struct ModelLibraryView: View {
 
             Section {
                 SpeechPipelineCard()
+                DisclosureGroup("What changes when I use the keyboard?") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        LabeledContent("Selected keyboard route", value: keyboardRouteLabel)
+                        Label("With Zone ready, the app handles recognition.", systemImage: "waveform")
+                        Label("With the app closed, the keyboard uses its configured route. Fluid Speech Mini in WebKit can run on iPhone after its separate download.", systemImage: "keyboard")
+                        Label("Zone Link GPU (beta) can send the finished audio to your own server over HTTPS (for example, over Tailscale). Your words and writing style are applied on iPhone.", systemImage: "desktopcomputer")
+                        NavigationLink("Choose keyboard recognition") { KeyboardVoiceSettings() }
+                    }.font(.subheadline).padding(.vertical, 6)
+                }
             } header: {
                 Text("How your words get here")
             } footer: {
-                Text("Every step runs on this iPhone, with or without a connection.")
+                Text("This is the on-device dictation path. Open the keyboard routes below the diagram to see where recognition can also run.")
             }
             .listRowBackground(Zone.card(scheme))
 
             storageSection
         }
         .scrollContentBackground(.hidden)
-        .tint(Zone.accentGraphic)
+        .tint(Zone.inlineInk(scheme))
         .navigationTitle("Speech model")
         .zoneBackButton()
         .zoneScreen()
-        .onAppear(perform: loadMeasurements)
+        .onAppear { loadMeasurements(); keyboardRecognition = KeyboardVoiceRoute.load().mode }
         .task(id: "\(coordinator.libraryRevision)-\(coordinator.isPreparingModel)-\(coordinator.selectedModel.rawValue)") {
             let snapshot = await ModelLibraryInventory.read()
             guard !Task.isCancelled else { return }
@@ -117,7 +136,7 @@ struct ModelLibraryView: View {
             if let progress {
                 VStack(alignment: .leading, spacing: 4) {
                     ProgressView(value: progress)
-                        .tint(Zone.accentGraphic)
+                        .tint(Zone.accentTone(scheme))
                     Text("\(Int64(Double(model.approximateDownloadBytes) * progress).byteCountLabel) of \(model.approximateDownloadBytes.byteCountLabel) · \(Int(progress * 100))%")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -142,7 +161,28 @@ struct ModelLibraryView: View {
                     detail("Download", model.approximateDownloadBytes.byteCountLabel)
                     if storage.modelFiles > 0 { detail("Model files", storage.modelFiles.byteCountLabel) }
                     if storage.preparedFiles > 0 { detail("Prepared by iOS", storage.preparedFiles.byteCountLabel) }
-                    Text("iOS prepares the model the first time it loads, which takes more space than the download. Removing the model removes both.")
+                    if storage.helperFiles > 0 {
+                        // The keyboard helper's own folder: only the helper can delete in it.
+                        HStack(alignment: .firstTextBaseline) {
+                            detail("Keyboard helper", storage.helperLeftovers > 0
+                                   ? "\(storage.helperFiles.byteCountLabel), \(storage.helperLeftovers.byteCountLabel) left over"
+                                   : storage.helperFiles.byteCountLabel)
+                            Spacer(minLength: 8)
+                            Button(clearingHelper ? "Clearing…" : "Clear") {
+                                clearingHelper = true
+                                Task {
+                                    await coordinator.clearKeyboardHelperFiles()
+                                    clearingHelper = false
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .disabled(clearingHelper || coordinator.isDeletingModels)
+                            .accessibilityIdentifier("models.clearKeyboardHelper")
+                            .accessibilityLabel("Clear keyboard helper files, \(storage.helperFiles.byteCountLabel)")
+                        }
+                    }
+                    SettingsNote("Model storage", "Removal frees the download and prepared files.", detail: "You can also clear files kept by the keyboard speech helper here.")
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     detail("License", model.license)
@@ -162,7 +202,9 @@ struct ModelLibraryView: View {
     @ViewBuilder
     private func action(progress: Double?) -> some View {
         if inventory == nil {
-            ProgressView().controlSize(.small)
+            BoundedProgress(message: "Storage did not load. Go back and open this page again.", limit: .seconds(10)) {
+                ProgressView().controlSize(.small)
+            }
         } else if progress != nil {
             // Offline, a download can wait for a connection for hours; this is the way out.
             Button("Cancel") { coordinator.cancelModelDownload(model) }
@@ -172,13 +214,13 @@ struct ModelLibraryView: View {
         } else if downloaded && coordinator.selectedModel == model {
             Label("In use", systemImage: "checkmark.circle.fill")
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Zone.accentText(scheme))
+                .zoneAccentBadge(scheme)
         } else if downloaded {
             Text("Downloaded").font(.subheadline).foregroundStyle(.secondary)
         } else {
             Button("Download") { Task { await coordinator.downloadModel(model) } }
                 .buttonStyle(.bordered)
-                .foregroundStyle(Zone.accentText(scheme))
+                .foregroundStyle(Zone.ink(scheme))
                 .controlSize(.small)
                 .disabled(coordinator.isDeletingModels)
                 .accessibilityLabel("Download \(model.libraryName), \(model.approximateDownloadBytes.byteCountLabel)")
@@ -231,7 +273,9 @@ struct ModelLibraryView: View {
                 $0 + (inventory?.entries[$1]?.storage.total ?? 0)
             }.byteCountLabel)
             if coordinator.isDeletingModels {
-                ProgressView("Removing model files…")
+                BoundedProgress(message: "Removing files is taking longer than usual. Reopen Zone to check storage.") {
+                    ProgressView("Removing model files…")
+                }
             } else if let blocker = coordinator.modelDeletionBlocker {
                 Text(blocker).font(.footnote).foregroundStyle(.secondary)
             }
@@ -303,15 +347,13 @@ struct SpeechPipelineCard: View {
     }
 
     private func row(_ step: SpeechPipelineStep, isLast: Bool) -> some View {
-        let accent = Zone.accentGraphic(scheme)
         return HStack(alignment: .top, spacing: 12) {
             ZStack {
                 Circle()
-                    .fill(step.isModel ? accent : accent.opacity(scheme == .dark ? 0.18 : 0.14))
-                    .shadow(color: step.isModel ? accent.opacity(0.55) : .clear, radius: 8)
+                    .fill(step.isModel ? Zone.controlFill(scheme) : Zone.rule(scheme))
                 Image(systemName: step.symbol)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(step.isModel ? Zone.onAccent : Zone.accentText(scheme))
+                    .foregroundStyle(step.isModel ? Zone.controlInk(scheme) : Zone.ink(scheme))
             }
             .frame(width: dot, height: dot)
             VStack(alignment: .leading, spacing: 2) {
@@ -329,7 +371,7 @@ struct SpeechPipelineCard: View {
         // is the top of the next dot.
         .background(alignment: .topLeading) {
             if !isLast {
-                LinearGradient(colors: [accent.opacity(0.7), accent.opacity(0.25)], startPoint: .top, endPoint: .bottom)
+                Rectangle().fill(Zone.rule(scheme))
                     .frame(width: 2)
                     .padding(.top, dot + 2)
                     .padding(.leading, dot / 2 - 1)
@@ -358,8 +400,8 @@ private struct SizePill: View {
             .imageScale(.small)
             .lineLimit(1)
             .padding(.horizontal, 8).padding(.vertical, 3)
-            .background(Capsule().fill(Zone.accent.opacity(scheme == .dark ? 0.16 : 0.10)))
-            .foregroundStyle(Zone.accentText(scheme))
+            .background(Zone.controlFill(scheme), in: Capsule())
+            .foregroundStyle(Zone.controlInk(scheme))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(fact.spoken)
     }

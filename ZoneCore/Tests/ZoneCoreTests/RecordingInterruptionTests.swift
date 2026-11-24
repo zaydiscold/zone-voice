@@ -317,6 +317,18 @@ final class RecordingJournalTests: XCTestCase {
         try? FileManager.default.removeItem(at: directory)
     }
 
+    func testOpeningJournalExcludesBothLegacyFilesBeforeEitherLogs() throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let urls = ["app.jsonl", "keyboard.jsonl"].map { directory.appendingPathComponent($0) }
+        for url in urls { try Data("legacy".utf8).write(to: url) }
+        let journal = RecordingJournal(directory: directory, process: "app")
+        journal.flush()
+        for url in urls {
+            XCTAssertEqual(try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+            XCTAssertEqual(try Data(contentsOf: url), Data("legacy".utf8))
+        }
+    }
+
     func testEventsFromBothProcessesReadBackInTimeOrder() {
         let app = RecordingJournal(directory: directory, process: "app")
         let keyboard = RecordingJournal(directory: directory, process: "keyboard")
@@ -344,6 +356,8 @@ final class RecordingJournalTests: XCTestCase {
         }
         journal.flush()
         let size = try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("app.jsonl").path)[.size] as? Int ?? 0
+        let file = directory.appendingPathComponent("app.jsonl")
+        XCTAssertEqual(try file.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
         XCTAssertLessThanOrEqual(size, RecordingJournal.maxBytes)
         let events = journal.events()
         XCTAssertEqual(events.last?.f["n"], "2999")

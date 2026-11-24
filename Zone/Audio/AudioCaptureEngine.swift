@@ -6,6 +6,7 @@ import UIKit
 import ZoneCore
 
 enum CaptureError: LocalizedError {
+    case startTimedOut
     case noInputAvailable
     case converterUnavailable
     /// A call, Siri or another app took the microphone while Zone was still arming.
@@ -13,8 +14,9 @@ enum CaptureError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .noInputAvailable: return "No microphone input is available."
-        case .converterUnavailable: return "The microphone format cannot be converted for recognition."
+        case .startTimedOut: return "The mic did not start. Try the mic again."
+        case .noInputAvailable: return "Zone could not use a microphone. Check microphone access in Settings and try recording again."
+        case .converterUnavailable: return "Zone could not read audio from this microphone. Try the iPhone microphone or reconnect your headset."
         case .interrupted: return "Something else took the microphone. Try again when it is free."
         }
     }
@@ -61,6 +63,27 @@ final class AudioCaptureEngine {
     var onSamples: (([Float]) -> Void)? {
         didSet { shared.withLock { $0.sink = onSamples } }
     }
+    func recordOnArm(_ sink: @escaping ([Float]) -> Void) {
+        #if targetEnvironment(simulator)
+        simulatorClip.withLock { $0?.cursor = 0 }
+        #endif
+        onSamples = sink
+        shared.withLock {
+            $0.recording = true
+            $0.wantsMusicPaused = true
+        }
+        if state == .armed { updatePlaybackInterruption() }
+    }
+
+    func cancelRecordingOnArm() {
+        onSamples = nil
+        shared.withLock {
+            $0.recording = false
+            $0.wantsMusicPaused = false
+        }
+        if state == .armed { updatePlaybackInterruption() }
+    }
+
     var onInterruption: ((Interruption) -> Void)?
     /// Main-thread level updates, about ten a second while recording.
     var onLevel: ((Float) -> Void)?
@@ -82,11 +105,13 @@ final class AudioCaptureEngine {
     /// Hardware queue only: true from a successful arm until the engine is torn down, so a
     /// configuration change restarts only an engine that is meant to run.
     nonisolated(unsafe) private var engineWanted = false
+    nonisolated(unsafe) private var ownsPlaybackInterruption = false
 
     // Scalars crossing the audio/main boundary need synchronization too. Snapshot only;
     // conversion, signal processing and sink callbacks must run outside this lock.
     private struct SharedWithAudioThread {
         var recording = false
+        var wantsMusicPaused = false
         var lastBufferUptime: TimeInterval = 0
         /// Buffers the tap has delivered, so the stall watch can tell real audio from its own
         /// reset of `lastBufferUptime`.
@@ -103,7 +128,7 @@ final class AudioCaptureEngine {
     /// WAV instead (long-dictation tests). Compiled out of device builds.
     private let simulatorClip = Locked<(samples: [Float], cursor: Int)?>(
         ProcessInfo.processInfo.environment["ZONE_SIM_CLIP"].flatMap { value in
-            (try? value == "1" ? TestClip.samples() : TestClip.samples(from: URL(fileURLWithPath: value))).map { ($0, 0) }
+            (try? TestClip.simulatorInput(value)).map { ($0, 0) }
         })
     #endif
     nonisolated(unsafe) private var lastHeartbeat: TimeInterval = 0
@@ -111,9 +136,7 @@ final class AudioCaptureEngine {
     private var stallRestarts = 0
     /// `buffersDelivered` when the stall watch last restarted the engine.
     private var buffersAtStallRestart: UInt64 = 0
-    nonisolated(unsafe) private var lastLevelPost: TimeInterval = 0
-    nonisolated(unsafe) private var levelPeak: Float = 0
-    nonisolated(unsafe) private var levelScale = AdaptiveLevelScale()
+    nonisolated(unsafe) private var levelWindow = RecordingLevelWindow()
 
     nonisolated private static let targetFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
@@ -137,7 +160,7 @@ final class AudioCaptureEngine {
     /// actor before this returns. Calls made while an arm is under way share it. A `disarm()`
     /// meanwhile wins: this throws `CancellationError` and the session ends inactive. An
     /// interruption meanwhile throws `CaptureError.interrupted`.
-    func arm() async throws {
+    func arm(startLimit: TimeInterval = 30) async throws {
         guard state == .stopped else { return }
         if let pendingArm { return try await pendingArm.task.value }
         let generation = advanceGeneration()
@@ -147,7 +170,13 @@ final class AudioCaptureEngine {
             guard let self else { throw CancellationError() }
             defer { if self.pendingArm?.generation == generation { self.pendingArm = nil } }
             do {
-                try await AudioHardwareQueue.run { try self.armHardware(generation: generation, appState: appState) }
+                try await Watchdog.run(what: "The microphone", limit: startLimit) {
+                    try await AudioHardwareQueue.run { try self.armHardware(generation: generation, appState: appState) }
+                }
+            } catch is Watchdog.Stalled {
+                guard self.pendingArm?.generation == generation else { throw CancellationError() }
+                self.cancelPendingArm(CaptureError.startTimedOut)
+                throw CaptureError.startTimedOut
             } catch {
                 if generation != self.generation, let reason = self.armSupersededBy { throw reason }
                 throw error
@@ -156,27 +185,66 @@ final class AudioCaptureEngine {
                 throw self.armSupersededBy ?? CancellationError()
             }
             self.state = .armed
+            self.updatePlaybackInterruption()
             self.startStallWatch()
         }
         pendingArm = (generation, task)
         try await task.value
     }
 
-    func startRecording() {
+    func startRecording(pausingMusic: Bool = false) {
         guard state == .armed else { return }
         stallRestarts = 0
-        shared.withLock { $0.recording = true }
         #if targetEnvironment(simulator)
-        simulatorClip.withLock { $0?.cursor = 0 }
+        if shared.withLock({ !$0.recording }) { simulatorClip.withLock { $0?.cursor = 0 } }
         #endif
+        shared.withLock {
+            $0.recording = true
+            $0.wantsMusicPaused = pausingMusic
+        }
         state = .recording
+        if pausingMusic { updatePlaybackInterruption() }
     }
 
     func stopRecording() {
         guard state == .recording else { return }
-        shared.withLock { $0.recording = false }
+        shared.withLock {
+            $0.recording = false
+            $0.wantsMusicPaused = false
+        }
+        updatePlaybackInterruption()
         state = .armed
         level = 0
+    }
+
+    /// A warm take already owns the mic. Changing its category on the serial hardware queue
+    /// leaves the sample tap in place. To end an interruption, stop I/O before deactivating,
+    /// notify the interrupted player, then rebuild the mixable standby graph if still owned.
+    private func updatePlaybackInterruption() {
+        let generation = self.generation
+        let appState = Self.appStateName()
+        AudioHardwareQueue.async { [self] in
+            guard engineWanted, isCurrent(generation) else { return }
+            if shared.withLock({ $0.wantsMusicPaused }) {
+                guard !ownsPlaybackInterruption else { return }
+                do { try activateDictationSession() }
+                catch { Journal.log("dictationAudioSessionChangeFailed", ["error": JournalFormat.error(error)]) }
+            } else if ownsPlaybackInterruption {
+                teardownEngine()
+                do {
+                    try hardware.deactivateSession()
+                    guard isCurrent(generation) else { return }
+                    try armHardware(generation: generation, appState: appState)
+                } catch {
+                    Journal.log("dictationMusicStandbyFailed", ["error": JournalFormat.error(error)])
+                    Task { @MainActor [weak self] in
+                        guard let self, self.generation == generation else { return }
+                        self.stopForInterruption(releaseSession: true)
+                        self.onInterruption?(.began(reason: "restartFailed"))
+                    }
+                }
+            }
+        }
     }
 
     /// Stops the engine and deactivates the session. Safe to call in any state.
@@ -192,6 +260,7 @@ final class AudioCaptureEngine {
         pendingArm = nil
         shared.withLock {
             $0.recording = false
+            $0.wantsMusicPaused = false
             $0.converter = nil
         }
         state = .stopped
@@ -228,24 +297,47 @@ final class AudioCaptureEngine {
         hardwareGeneration.withLock { $0 } == generation
     }
 
+    nonisolated private func activateDictationSession() throws {
+        // The category change can interrupt playback even if the subsequent activation
+        // fails. Either outcome needs a notifying deactivation at the end of the take.
+        ownsPlaybackInterruption = true
+        do { try hardware.activateSession(mixing: false) }
+        catch {
+            Journal.log("dictationMusicPauseFailed", ["error": JournalFormat.error(error)])
+            // iOS may allow mixing but refuse to interrupt another session in the background.
+            try hardware.activateSession(mixing: true)
+        }
+    }
+
     nonisolated private func armHardware(generation: UInt64, appState: String) throws {
         guard isCurrent(generation) else { throw CancellationError() }
         do {
-            try hardware.activateSession()
+            PressTiming.mark("activate")
+            let interrupt = shared.withLock { $0.wantsMusicPaused }
+            if interrupt { try activateDictationSession() }
+            else {
+                try hardware.activateSession(mixing: true)
+                ownsPlaybackInterruption = false
+            }
         } catch {
             Journal.log("micArmFailed", ["error": JournalFormat.error(error), "step": "setActive", "appState": appState])
+            try? hardware.deactivateSession()
+            ownsPlaybackInterruption = false
             throw error
         }
         do {
+            PressTiming.mark("activateDone")
             try startEngine(arming: true, appState: appState)
         } catch {
             if !(error is AudioEngineException) {
                 Journal.log("micArmFailed", ["error": JournalFormat.error(error), "step": "engineStart", "appState": appState])
             }
             try? hardware.deactivateSession()
+            ownsPlaybackInterruption = false
             throw error
         }
         shared.withLock { $0.lastBufferUptime = ProcessInfo.processInfo.systemUptime }
+        PressTiming.mark("engineStarted")
         engineWanted = true
         // A disarm or an interruption landed while this ran. Its own teardown may have run
         // before this block (it was queued first), so undo the work here as well.
@@ -336,6 +428,7 @@ final class AudioCaptureEngine {
     /// Removes the tap and stops the engine. Never raises out.
     nonisolated private func teardownEngine() {
         engineWanted = false
+        ownsPlaybackInterruption = false
         let hardware = self.hardware
         try? AudioEngineException.catching("removeTap") { hardware.removeTap() }
         if hardware.isRunning {
@@ -346,9 +439,9 @@ final class AudioCaptureEngine {
     // MARK: Audio thread
 
     nonisolated private func process(_ buffer: AVAudioPCMBuffer) {
-        let now = Date().timeIntervalSinceReferenceDate
+        let now = ProcessInfo.processInfo.systemUptime
         let (recording, sink) = shared.withLock { box in
-            box.lastBufferUptime = ProcessInfo.processInfo.systemUptime
+            box.lastBufferUptime = now
             box.buffersDelivered &+= 1
             return (box.recording, box.sink)
         }
@@ -371,13 +464,7 @@ final class AudioCaptureEngine {
 
         // Every buffer counts toward the next post: the loudest one since the last post wins,
         // so a syllable between posts is never skipped.
-        levelPeak = max(levelPeak, Self.rootMeanSquare(samples))
-        if now - lastLevelPost >= 0.05 {
-            let elapsed = min(now - lastLevelPost, 0.5)
-            lastLevelPost = now
-            let decibels = 20 * log10(max(levelPeak, 1e-6))
-            levelPeak = 0
-            let mapped = levelScale.map(decibels: decibels, elapsed: elapsed)
+        if let mapped = levelWindow.sample(samples, at: now) {
             DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self, self.state == .recording else { return }
@@ -446,15 +533,6 @@ final class AudioCaptureEngine {
         }
     }
 
-    nonisolated private static func rootMeanSquare(_ samples: [Float]) -> Float {
-        guard !samples.isEmpty else { return 0 }
-        var sum: Float = 0
-        for sample in samples {
-            sum += sample * sample
-        }
-        return (sum / Float(samples.count)).squareRoot()
-    }
-
     // MARK: System notifications
 
     private func registerObservers() {
@@ -501,15 +579,21 @@ final class AudioCaptureEngine {
 
     /// The microphone is gone until something arms it again; the recording side decides whether
     /// that is a hold or the end of a standby.
-    private func stopForInterruption() {
+    private func stopForInterruption(releaseSession: Bool = false) {
         stallWatch?.cancel()
         stallWatch = nil
         _ = advanceGeneration()
-        shared.withLock { $0.recording = false }
+        shared.withLock {
+            $0.recording = false
+            $0.wantsMusicPaused = false
+        }
         state = .stopped
         level = 0
         // iOS already took the session; stopping the engine need not hold up the main thread.
-        AudioHardwareQueue.async { [self] in teardownEngine() }
+        AudioHardwareQueue.async { [self] in
+            teardownEngine()
+            if releaseSession { try? hardware.deactivateSession() }
+        }
     }
 
     private func handleMediaServicesReset() {
@@ -526,7 +610,10 @@ final class AudioCaptureEngine {
         }
         guard state != .stopped else { return }
         _ = advanceGeneration()
-        shared.withLock { $0.recording = false }
+        shared.withLock {
+            $0.recording = false
+            $0.wantsMusicPaused = false
+        }
         state = .stopped
         level = 0
         shared.withLock { $0.converter = nil }
@@ -571,7 +658,7 @@ final class AudioCaptureEngine {
                 DispatchQueue.main.async { [weak self] in
                     MainActor.assumeIsolated {
                         guard let self, self.generation == generation, self.state != .stopped else { return }
-                        self.stopForInterruption()
+                        self.stopForInterruption(releaseSession: true)
                         self.onInterruption?(.began(reason: "restartFailed"))
                     }
                 }
@@ -612,7 +699,7 @@ final class AudioCaptureEngine {
                     // Standby too: stopping silently left the coordinator "armed" with no capture,
                     // so the keyboard was told to open Zone and opening Zone re-armed nothing.
                     // The interruption path stands the session down, and the next open arms again.
-                    self.stopForInterruption()
+                    self.stopForInterruption(releaseSession: true)
                     self.onInterruption?(.began(reason: "inputStalled"))
                     return
                 }

@@ -84,12 +84,12 @@ final class ChatVocabularyTests: XCTestCase {
         }
     }
 
-    /// A short word one slip from a far more common one is not listed, so the slip is still fixed.
-    func testSlipsOntoVeryCommonWordsAreStillFixed() throws {
-        let corrector = Autocorrector(words: try XCTUnwrap(WordList.shared))
-        XCTAssertEqual(corrector.evaluate("og").replacement, "of")
+    /// "og" and "ig" were left out on November 15 as slips for "of" and "if". Zayd asked for both
+    /// on November 20: they are words now, and only the tap decides (`ShorthandAndCoarseWordTests`).
+    func testOgAndIgAreWordsNow() throws {
+        XCTAssertTrue(ModernVocabulary.words.contains("og"))
+        XCTAssertTrue(ModernVocabulary.words.contains("ig"))
         XCTAssertNil(ModernVocabulary.names["og"])
-        XCTAssertFalse(ModernVocabulary.words.contains("ig"))
     }
 
     func testRespellingsNeverOutrankTheStandardWordInSwipe() {

@@ -12,9 +12,7 @@ I broke my hand kickboxing. After about a week of my non-dominant hand on Apple'
 
 An iPhone keyboard and app for dictation. Tap the mic, talk, and the text lands at the cursor in any app. Speech recognition runs on the phone: no account, no server, no analytics. Models download when needed; after that it works offline.
 
-**This is the production version of Zone 1.0.5 on the App Store. Feel free to take it and modify it.**
-
-Free on the [App Store](https://apps.apple.com/app/id6830955448) for iPhone. [TestFlight invitation](https://testflight.apple.com/join/cStumGN1).
+Status: free on the [App Store](https://apps.apple.com/app/id6830955448) for iPhone. [TestFlight invitation](https://testflight.apple.com/join/cStumGN1).
 
 **Two open source parts.** This repository is the iPhone app and keyboard. The computer side, with an MCP server for your AI agents (Claude Code, Codex, Cursor and more), a command line and wireless sync, is [zaydiscold/zone-mcp](https://github.com/zaydiscold/zone-mcp).
 
@@ -32,7 +30,7 @@ Start with the [feature guide](docs/features.md) and the [build changelog](CHANG
 - Recent dictations one tap away
 - Text styles per dictation: casual, very casual, formal, excited
 - Spoken formatting: "comma", "period", "new line", "new paragraph", "quote", "bullet point" and more
-- Handles: say "at sign Kevin" for @kevin, always. Smart @ (experimental) also takes a bare "at Kevin". Save handles such as cold or txm in Settings > @ Handles; spell "at sign T X M" for @txm. Filtering can make mistakes; review the text before sending.
+- Handles: say "at sign Kevin" for @kevin, always. Turn on Say “at” to tag names in Settings to use the shorter “at Kevin”. Save handles such as cold or txm in Settings > My words > Saved @handles; spell "at sign T X M" for @txm. Filtering can make mistakes; review the text before sending.
 - Personal words: names and terms spelled your way, including sound-alikes
 - California Mode (experimental, off by default): takes the filler "like" out of dictation, lightly or aggressively, and keeps every "like" that means something
 
@@ -52,7 +50,7 @@ Start with the [feature guide](docs/features.md) and the [build changelog](CHANG
 
 ### Swipe typing beta
 
-Enable **Settings → Keyboard → Swipe typing (Beta)**, then glide over letters and lift.
+Enable **Settings → Zone keyboard → Swipe typing (Beta)**, then glide over letters and lift.
 The next word gets a separating space; punctuation attaches to the last word. Tap an
 alternative to replace the last swipe, or Delete to remove it as a word. Manual Shift
 and the Auto-Capitalization setting still apply. Glide input is disabled for sensitive
@@ -66,6 +64,8 @@ keeps your explicit My Words entries. Full Access lets the keyboard read the app
 Zone's own decoder, in the SHARK2 family, was tuned on 2,000 human swipes, and the keyboard learns from your swipes on top of the FUTO Swipe model. It gets the top guess right 90.9% of the time on FUTO's public test set ([reproduce it](scripts/swipe-eval/README.md)).
 
 ### Move the cursor by holding space
+
+In **Settings → Hold the space bar**, choose **Move cursor** or **Talk**. A sideways slide still moves the cursor with Talk selected.
 
 On Zone's keyboard, **slide along the space bar** (or hold it, then slide) and it becomes a small trackpad. Lift your finger to return to typing. A slide or a hold never inserts a space; an ordinary tap still does.
 
@@ -111,7 +111,7 @@ It does not force every meeting to contain two people.
 
 ### Keep your notes
 
-Settings → Your data → Backup and export saves a complete `.zonebackup` document through Files, including notes, dictation history, meeting transcripts, speaker names and meeting audio. The document also contains a readable text export. Choose On My iPhone or iCloud Drive, outside Zone's own folder if you intend to delete the app. Import adds missing records and keeps existing ones; repeated imports do not duplicate them. Imported dictation history is kept until you delete it.
+Settings → Your data → Backup and export saves a complete `.zonebackup` document through Files, including notes, dictation history, meeting transcripts, speaker names, meeting audio, My words with heard spellings, saved handles, and keyboard words and corrections shared with Full Access. The document also contains a readable text export. Choose On My iPhone or iCloud Drive, outside Zone's own folder if you intend to delete the app. Import adds missing records and keeps existing ones; repeated imports do not duplicate them. Imported dictation history is kept until you delete it.
 
 You can also choose a folder for automatic backups. Zone updates that copy while the app is running, and retains records previously backed up even when you delete them in the app. Stop a meeting to include its finished audio. The last-save time confirms a file write; iCloud Drive delivery is handled by iOS. Save a backup before a clean reinstall.
 
@@ -203,6 +203,8 @@ xcodebuild -project Zone.xcodeproj -scheme Zone \
 ```
 
 Run `xcodegen generate` again after adding or removing files.
+
+The first `xcodegen generate` on a Mac also builds iroh, the library behind Computers, from source (`scripts/build-iroh.sh`). That takes 10 to 20 minutes once, and needs [rustup](https://rustup.rs) and the network. Later runs reuse the result from `~/Library/Caches/zone-iroh/`.
 
 Simulator builds need ad-hoc signing (`CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=`). Without it the App Group is dropped and History can't load.
 

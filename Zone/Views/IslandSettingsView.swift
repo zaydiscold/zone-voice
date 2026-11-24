@@ -3,75 +3,97 @@
 import SwiftUI
 import ZoneCore
 
-/// Settings > Dynamic Island: pick a look, see it drawn, then try it in the real island.
+/// Settings > Dynamic Island. The switch at the top decides whether Zone is in the island at
+/// all, so everything else (look, color, buttons) only shows while it is on.
 struct IslandSettingsView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(DictationCoordinator.self) private var coordinator
     @Environment(\.colorScheme) private var scheme
     @State private var previewing = false
+    @State private var previewError: String?
 
     var body: some View {
         @Bindable var settings = settings
         Form {
             Section {
-                ForEach(IslandLook.allCases) { look in
-                    Button {
-                        withAnimation(Zone.motion) { settings.islandLook = look }
-                        coordinator.refreshIsland()
-                    } label: {
-                        IslandLookRow(look: look, selected: settings.islandLook == look)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(settings.islandLook == look ? .isSelected : [])
-                }
-            } header: {
-                Text("Look")
-            }
-            .listRowBackground(Zone.card(scheme))
-
-            Section {
-                Button {
-                    previewing = true
-                    Task {
-                        await coordinator.previewIsland()
-                        previewing = false
-                    }
-                } label: {
-                    HStack {
-                        Text(previewing ? "Playing in the island…" : "Try it in the Dynamic Island")
-                        Spacer()
-                        if previewing { ProgressView() }
-                    }
-                }
-                .disabled(previewing || coordinator.activity.isBusy)
-            } footer: {
-                Text("Runs a 12-second demo in your Dynamic Island. Swipe to the Home Screen to watch it, or hold the island to expand. Nothing is recorded.")
-            }
-            .listRowBackground(Zone.card(scheme))
-
-            Section {
-                Toggle("Buttons", isOn: $settings.islandControls)
-                    .onChange(of: settings.islandControls) { coordinator.refreshIsland() }
-            } footer: {
-                SettingsNote("Hold the island to open it.", points: [
-                    "**While you dictate:** Pause on the left, Stop on the right. Stop is on the Lock Screen too.",
-                    "**While Zone waits:** Dictate records and copies your words, so you can paste them with any keyboard. Note saves a voice note.",
-                    "**Zone stays closed.** The buttons work without opening the app.",
-                ])
-            }
-            .listRowBackground(Zone.card(scheme))
-
-            Section {
-                Toggle("Show Zone during standby", isOn: $settings.islandWhileReady)
+                Toggle("Zone in the Dynamic Island", isOn: $settings.islandWhileReady.animation(Zone.motion))
                     .onChange(of: settings.islandWhileReady) { coordinator.refreshIsland() }
+                    .accessibilityIdentifier("island.master")
             } footer: {
-                SettingsNote("Keeps the island compact while the mic waits for keyboard dictation.", points: [
-                    "**On:** shows a small Zone dot and countdown ring.",
-                    "**Off:** shows Apple's wide orange mic pill instead.",
-                    "**Audio is only captured** while you actively dictate.",
+                SettingsNote("Dynamic Island", "", detail: settings.islandWhileReady
+                             ? "A dot shows standby. The indicator changes when you record."
+                             : "iOS shows its wide orange mic pill during standby. When you dictate, Zone shows a dot with Stop.", points: [
+                    "**Buttons:** Hold the island for Note and Dictate during standby, or Pause and Stop while recording.",
+                    "**Note** saves a voice note. **Dictate** copies your words without opening Zone.",
+                    "**Times:** Clock shows start and end times. Live counts time on standby and time left.",
+                    "Zone captures audio only while you record.",
                 ])
             }
             .listRowBackground(Zone.card(scheme))
+
+            if settings.islandWhileReady {
+                Section {
+                    NavigationLink {
+                        IslandLooksGalleryView()
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text("Island look")
+                                Text(settings.islandStyle.look.title)
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            selectedPreview
+                        }
+                    }
+                    .accessibilityIdentifier("island.gallery")
+                }
+                .listRowBackground(Zone.card(scheme))
+                Section {
+                    Button {
+                        previewing = true
+                        Task {
+                            do {
+                                previewError = nil
+                                try await coordinator.previewIsland()
+                            } catch {
+                                previewError = error.localizedDescription
+                            }
+                            previewing = false
+                        }
+                    } label: {
+                        HStack {
+                            Text(previewing ? "Playing in the island…" : "Try it in the Dynamic Island")
+                            Spacer()
+                            if previewing { ProgressView() }
+                        }
+                    }
+                    .disabled(previewing || coordinator.activity.isBusy)
+                } footer: {
+                    Text(previewError ?? "Watch a silent 12-second preview on the Home Screen. Hold the island to expand it.")
+                }
+                .listRowBackground(Zone.card(scheme))
+
+                Section {
+                    Toggle("Buttons", isOn: $settings.islandControls)
+                        .onChange(of: settings.islandControls) { coordinator.refreshIsland() }
+                }
+                .listRowBackground(Zone.card(scheme))
+
+                Section {
+                    Picker("Times", selection: $settings.islandTimes) {
+                        ForEach(IslandTimes.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: settings.islandTimes) { coordinator.refreshIsland() }
+                    .accessibilityIdentifier("island.times")
+                } header: {
+                    Text("Times")
+                }
+                .listRowBackground(Zone.card(scheme))
+
+                IslandLostNoticeSection()
+            }
         }
         .scrollContentBackground(.hidden)
         .navigationTitle("Dynamic Island")
@@ -79,83 +101,190 @@ struct IslandSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .zoneScreen()
     }
-}
 
-/// One look: its name, what it does, and a drawing of its compact island.
-private struct IslandLookRow: View {
-    let look: IslandLook
-    let selected: Bool
+    private var selectedPreview: some View {
+        IslandLookPreview(look: settings.islandStyle.look, accent: settings.accent,
+                          words: settings.wordsDictated, garden: settings.islandGarden, still: !AppSettings.showsIslandGallery)
+            .padding(.vertical, 4)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Dynamic Island preview")
+            .accessibilityValue(previewDescription)
+    }
 
-    var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            // One column width for every sketch, so the text lines up even beside the ghost's
-            // shorter island.
-            IslandSketch(look: look).frame(width: 124, alignment: .leading)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(look.title).font(.body.weight(.semibold))
-                Text(look.summary).font(.footnote).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                .font(.title3)
-                .foregroundStyle(selected ? Zone.accent : .secondary)
-        }
-        .padding(.vertical, 6)
-        .contentShape(Rectangle())
+    private var previewDescription: String {
+        let look = settings.islandStyle.look
+        let color = !AppSettings.showsIslandGallery && look == .recorder ? "Recorder red" : settings.accent.label
+        return "\(look.title), \(color)"
     }
 }
 
-/// A drawing of the compact island for a look, animated with a pretend voice. It is a
-/// sketch for choosing, not the island itself: the real one lives in the widget extension.
-struct IslandSketch: View {
-    let look: IslandLook
-
-    private var tint: Color { look == .recorder ? Color(red: 1, green: 0.27, blue: 0.23) : Zone.accent }
+private struct IslandLooksGalleryView: View {
+    @Environment(AppSettings.self) private var settings
+    @Environment(DictationCoordinator.self) private var coordinator
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 12)) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 0) {
-                leading(t).frame(width: 34, alignment: .leading)
-                Spacer(minLength: 0)
-                // The camera, where the island's middle always is.
-                Circle().fill(Color(white: 0.09)).frame(width: 10, height: 10)
-                Spacer(minLength: 0)
-                trailing(t).frame(width: 34, alignment: .trailing)
+        Form {
+            Section("Island look") {
+                ForEach(AppSettings.showsIslandGallery ? IslandLook.allCases.filter { !$0.isPet } : IslandLook.classic) { look in lookRow(look) }
             }
-            .padding(.horizontal, 10)
-            .frame(width: look == .ghost ? 104 : 124, height: 30)
-            .background(Capsule().fill(.black))
+            .listRowBackground(Zone.card(scheme))
+            if AppSettings.showsIslandGallery {
+                Section("Companions") {
+                    ForEach(IslandLook.allCases.filter(\.isPet)) { look in lookRow(look) }
+                }
+                .listRowBackground(Zone.card(scheme))
+            }
+            if settings.islandStyle.look.isPet {
+                Section("Your companion") {
+                    let words = settings.wordsDictated
+                    let stage = settings.islandGarden.stage(words: words)
+                    let look = settings.islandStyle.look
+                    Text("\(look.title) · \(petStageName(stage, look: look))")
+                    let garden = settings.islandGarden
+                    Text("\(garden.sessionsToday()) dictations today · \(garden.activeDays) active days")
+                    Text(["A copper pin arrives after three dictations.", "Copper pin earned. Speak on three days and record a 20-second take to earn a scarf.", "Silk scarf earned. Reach seven active days and 20 dictations to earn a star.", "Star earned. All three keepsakes are yours."][Int(garden.accessory)])
+                        .font(.footnote)
+                    Text(IslandPetGrowth.hasWordBox(words) ? "First box open · Wren is yours." :
+                            "\((IslandPetGrowth.firstBox - words).formatted()) words until your first box.")
+                        .font(.footnote)
+                }
+                .listRowBackground(Zone.card(scheme))
+            }
         }
-        .accessibilityHidden(true)
+        .scrollContentBackground(.hidden)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in
+            coordinator.refreshStats()
+        }
+        .navigationTitle("Island looks")
+        .navigationBarTitleDisplayMode(.inline)
+        .zoneBackButton()
+        .zoneScreen()
     }
 
-    @ViewBuilder private func leading(_ t: TimeInterval) -> some View {
-        if look == .ghost {
-            Circle().fill(tint).frame(width: 7, height: 7)
-        } else {
-            HStack(spacing: 1.35) {
-                ForEach(0..<13, id: \.self) { i in
-                    Capsule().fill(tint).frame(width: 1.4, height: 2 + 14 * Self.voice(i, t))
+    /// One look in the gallery. Its own function so the Form stays quick to type-check.
+    private func lookRow(_ look: IslandLook) -> some View {
+        let locked = look == .wren && !IslandPetGrowth.hasWordBox(settings.wordsDictated)
+        let selected = settings.islandStyle.look == look
+        return Button {
+            settings.islandLook = look
+            settings.islandPalette = .accent
+            coordinator.refreshIsland()
+        } label: {
+            HStack(spacing: 12) {
+                IslandLookPreview(look: look, accent: settings.accent, words: settings.wordsDictated, garden: settings.islandGarden)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(look.title).font(.headline)
+                    Text(locked ? "First box opens at 1,000 words." : look.summary)
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                if selected || locked {
+                    Image(systemName: locked ? "lock.fill" : "checkmark")
+                        .foregroundStyle(Zone.accentStroke(scheme))
                 }
             }
-            .frame(height: 16)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(locked)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier("island.look.\(look.rawValue)")
+    }
+
+    private func petStageName(_ stage: IslandPetGrowth.Stage, look: IslandLook) -> String {
+        if look == .hare && stage.index <= 1 { return stage.index == 0 ? "Newborn" : "Kit" }
+        return stage.name
+    }
+}
+
+/// Both sides use the widget's compact views. Only the sample audio and clock are local.
+struct IslandLookPreview: View {
+    let look: IslandLook
+    let accent: AccentChoice
+    let words: Int
+    var garden = IslandGardenProgress()
+    var still = false
+    @Environment(\.displayScale) private var displayScale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var start = Date()
+    @State private var snapshot: UIImage?
+
+    private struct SnapshotKey: Equatable {
+        let look: IslandLook
+        let accent: AccentChoice
+        let words: Int
+        let garden: IslandGardenProgress
+        let scale: CGFloat
+        let gallery: Bool
+    }
+
+    var body: some View {
+        if still || reduceMotion {
+            let key = SnapshotKey(look: look, accent: accent, words: words, garden: garden, scale: displayScale,
+                                  gallery: AppSettings.showsIslandGallery)
+            Color.clear
+                .frame(width: 116, height: 34)
+                .overlay { if let snapshot { Image(uiImage: snapshot) } }
+                .task(id: key) { updateSnapshot(scale: key.scale) }
+                .accessibilityHidden(true)
+        } else if look.spins {
+            TimelineView(.animation(minimumInterval: 1.0 / 30)) { tick in
+                frame(time: max(0, tick.date.timeIntervalSince(start)))
+            }
+            .accessibilityHidden(true)
+        } else {
+            TimelineView(.periodic(from: start, by: 0.25)) { timeline in
+                frame(time: max(0, timeline.date.timeIntervalSince(start)))
+            }
+            .accessibilityHidden(true)
         }
     }
 
-    @ViewBuilder private func trailing(_ t: TimeInterval) -> some View {
-        switch look {
-        case .ghost: Color.clear.frame(width: 7, height: 7)
-        case .caption:
-            Text("\(12 + Int(t * 1.6) % 40)").font(.system(size: 12, weight: .semibold, design: .rounded))
-                .monospacedDigit().foregroundStyle(tint)
-        default:
-            Text(String(format: "0:%02d", Int(t) % 60)).font(.system(size: 12, weight: look == .recorder ? .regular : .medium))
-                .monospacedDigit().foregroundStyle(tint)
-        }
+    private func updateSnapshot(scale: CGFloat) {
+        let renderer = ImageRenderer(content: frame(time: 5))
+        renderer.scale = scale
+        snapshot = renderer.uiImage
     }
 
+    private func frame(time: Double) -> some View {
+        let beat = Int(time)
+        let kit = sample(time: time, beat: beat)
+        return HStack(spacing: 0) {
+            if kit.alive { AliveCompactLeading(kit: kit) } else { CompactLeading(kit: kit) }
+            Spacer(minLength: 14)
+            if kit.alive && kit.spansCamera {
+                AliveCompactTrailing(kit: kit)
+            } else {
+                CompactTrailing(kit: kit)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(width: 116, height: 34)
+        .foregroundStyle(kit.ink)
+        .background(.black, in: Capsule())
+    }
+
+    private func sample(time: Double, beat: Int) -> IslandKit {
+        var state = RecordingActivityAttributes.ContentState(phase: .recording, noteMode: false, startedAt: (still || reduceMotion) ? Date.now.addingTimeInterval(-time) : start)
+        state.look = look
+        state.gallery = AppSettings.showsIslandGallery
+        state.accentChoice = accent.rawValue
+        state.beat = UInt16(truncatingIfNeeded: Int(time * 4))
+        state.levels = (0..<16).map { UInt8(15 * IslandSketch.voice($0, Double(beat))) }
+        state.words = 15 + beat
+        state.tail = ["a quiet", "quiet morning", "morning by", "by the", "the lake"][beat % 5]
+        state.petStage = UInt8(garden.stage(words: words).index)
+        state.dailyEnergy = garden.dailyEnergy()
+        state.accessory = garden.accessory
+        state.nightGarden = !((7..<19).contains(Calendar.current.component(.hour, from: .now)))
+        var kit = IslandKit(state: state)
+        kit.clock = .timeline(time)
+        return kit
+    }
+}
+
+enum IslandSketch {
     /// Speech-like: syllables move across the bars with pauses between words.
     static func voice(_ bar: Int, _ t: TimeInterval) -> Double {
         let phase = t * 2.6 - Double(bar) * 0.42

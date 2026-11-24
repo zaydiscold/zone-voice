@@ -22,6 +22,11 @@ enum ZoneIntentHost {
         throw Unavailable()
     }
 
+    @MainActor
+    static func showIsland() async throws {
+        throw Unavailable()
+    }
+
     struct Unavailable: LocalizedError, CustomLocalizedStringResourceConvertible {
         var errorDescription: String? { "Open Zone to record." }
         var localizedStringResource: LocalizedStringResource { "Open Zone to record." }

@@ -2,7 +2,7 @@
 
 import Foundation
 
-/// What holding the space bar does (Settings > Keyboard > Hold space).
+/// What holding the space bar does (Settings > Hold the space bar).
 public enum SpaceHold: String, Codable, CaseIterable, Sendable {
     /// The space bar becomes a trackpad (`SpacebarCursorGesture`). The default.
     case moveCursor

@@ -60,6 +60,18 @@ final class LinkItemTests: XCTestCase {
         XCTAssertTrue(json["engine"] is NSNull)
     }
 
+    func testLinkedHistoryIsSentOnlyAsTheSavedNote() {
+        let raw = LinkFixtures.dictation(1, text: "raw", status: .note)
+        let note = LibraryNote(text: "clean", recordingID: raw.id)
+        let items = LinkEncoding.library(dictations: [raw], notes: [note], meetings: [])
+        XCTAssertEqual(items.map(\.text), ["clean"])
+        let ordinary = LinkFixtures.dictation(2, text: "actual dictation")
+        XCTAssertEqual(LinkEncoding.library(dictations: [raw, ordinary], notes: [], meetings: []).map(\.text),
+                       ["actual dictation"], "An unlinked raw note stays on disk and is never sent as a dictation")
+        let legacy = LibraryNote(text: "edited older note")
+        XCTAssertEqual(LinkEncoding.library(dictations: [raw], notes: [legacy], meetings: []).map(\.text), [legacy.text])
+    }
+
     func testNote() throws {
         var note = LinkFixtures.note(1, text: "buy milk")
         let created = try object(try XCTUnwrap(LinkEncoding.item(note)))

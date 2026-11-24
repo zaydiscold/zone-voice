@@ -9,18 +9,27 @@ import ZoneCore
 @MainActor
 final class MeetingLiveActivity {
     enum State { case recording, paused, interrupted }
+    private let colors: @MainActor () -> (accentChoice: String, palette: IslandPalette)
     private var current: Activity<RecordingActivityAttributes>?
     private var title = "Meeting"
     private var lastState: State = .recording
     private var lastSeconds: Double = 0
-    private var updatedAt = Date.distantPast
+    private var levels = MeetingActivityLevels()
+    private var updatedAt = -Double.infinity
     private var pending: Task<Void, Never>?
-    var isActive: Bool { current?.activityState == .active }
+    var isActive: Bool {
+        current?.activityState == .active || current?.activityState == .stale
+    }
 
-    func start(title: String) {
+    init(colors: @escaping @MainActor () -> (accentChoice: String, palette: IslandPalette)) {
+        self.colors = colors
+    }
+
+    func start(title: String, state: State = .recording, recordedSeconds: Double = 0) {
+        levels.reset()
         self.title = title
-        lastSeconds = 0
-        lastState = .recording
+        lastSeconds = recordedSeconds
+        lastState = state
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
         do {
             let activity = try Activity.request(attributes: RecordingActivityAttributes(),
@@ -28,7 +37,7 @@ final class MeetingLiveActivity {
             let previous = current
             current = activity
             if let previous { Task { await previous.end(nil, dismissalPolicy: .immediate) } }
-            updatedAt = Date()
+            updatedAt = ProcessInfo.processInfo.systemUptime
         } catch {
             Journal.log("meetingLiveActivityFailed", ["error": JournalFormat.error(error)])
         }
@@ -40,26 +49,46 @@ final class MeetingLiveActivity {
     }
 
     func update(state: State, recordedSeconds: Double) {
+        if lastState != state {
+            levels.reset()
+        }
         lastState = state
         lastSeconds = recordedSeconds
         publish()
     }
 
-    /// The timer counts by itself; this only keeps the activity from going stale and moves
-    /// the anchor if capture drifted. 30 s, not every tick: about 720 renders in six hours.
+    /// Keep the real audio envelope even while the recorder screen is asleep.
+    func appendLevel(_ level: Float) {
+        if lastState == .recording { levels.append(level) }
+    }
+
     func heartbeat(recordedSeconds: Double) {
         lastSeconds = recordedSeconds
-        if Date().timeIntervalSince(updatedAt) >= Self.heartbeat { publish() }
+        guard current != nil else { return }
+        let elapsed = ProcessInfo.processInfo.systemUptime - updatedAt
+        // Speech can change the picture once a second. A quiet or paused meeting needs
+        // only the occasional timer and freshness update.
+        let changed = lastState == .recording && levels.takeSnapshot(after: elapsed)
+        if changed || elapsed >= Self.heartbeat { publish() }
     }
 
     private static let heartbeat: TimeInterval = 30
     /// Three missed heartbeats: Zone was killed, and the Lock Screen says so.
     private static let staleAfter: TimeInterval = 90
 
-    private func content() -> RecordingActivityAttributes.ContentState {
-        .init(phase: lastState == .recording ? .recording : .paused, noteMode: true,
-              startedAt: Date().addingTimeInterval(-lastSeconds), meetingTitle: title,
-              meetingNote: note(), meetingHeld: lastState == .interrupted ? true : nil)
+    private func content(notice: String? = nil) -> RecordingActivityAttributes.ContentState {
+        let appearance = colors()
+        let phase: RecordingActivityAttributes.ContentState.Phase = lastState == .recording ? .recording : .paused
+        return .init(phase: notice == nil ? phase : .processing, noteMode: true,
+                     startedAt: Date().addingTimeInterval(-lastSeconds), meetingTitle: title,
+                     meetingNote: notice ?? note(),
+                     meetingWaveStyle: UserDefaults.standard.string(forKey: MeetingWaveStyle.preferenceKey) ?? MeetingWaveStyle.defaultStyle.rawValue,
+                     meetingHeld: notice == nil && lastState == .interrupted ? true : nil,
+                     accentChoice: appearance.accentChoice, palette: appearance.palette, levels: lastState == .recording ? levels.snapshot : nil)
+    }
+
+    func refreshAppearance() {
+        if isActive { publish() }
     }
 
     /// Held: when it continues. Near the ceiling: the clock time it saves, which stays right
@@ -79,7 +108,7 @@ final class MeetingLiveActivity {
         guard let current else { return }
         let next = content()
         let stale = Date().addingTimeInterval(Self.staleAfter)
-        updatedAt = Date()
+        updatedAt = ProcessInfo.processInfo.systemUptime
         let previous = pending
         pending = Task {
             await previous?.value
@@ -98,9 +127,29 @@ final class MeetingLiveActivity {
             Task { await previous?.value; await current.end(nil, dismissalPolicy: .immediate) }
             return
         }
-        let saved = RecordingActivityAttributes.ContentState(
-            phase: .processing, noteMode: true, startedAt: Date().addingTimeInterval(-lastSeconds),
-            meetingTitle: title, meetingNote: notice)
+        let saved = content(notice: notice)
         Task { await previous?.value; await current.end(ActivityContent(state: saved, staleDate: nil), dismissalPolicy: .default) }
+    }
+}
+
+/// Capture supplies levels whether or not the recorder view is visible. Each system
+/// update contains the latest syllables and can be skipped if the picture is unchanged.
+struct MeetingActivityLevels {
+    private var meter = IslandMeter(capacity: MeetingWaveSignal.count)
+    private(set) var snapshot: [UInt8]?
+
+    mutating func append(_ level: Float) { meter.append(level) }
+
+    mutating func reset() {
+        meter.reset()
+        snapshot = nil
+    }
+
+    mutating func takeSnapshot(after elapsed: TimeInterval) -> Bool {
+        guard elapsed >= 1 else { return false }
+        let next = meter.snapshot
+        guard next != snapshot else { return false }
+        snapshot = next
+        return true
     }
 }

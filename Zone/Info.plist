@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>ZoneBuildAction</key>
+	<string>$(ACTION)</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
@@ -44,9 +46,9 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>After you pair a computer in Settings, Zone can send your dictations, notes and meeting transcripts to it directly when both are on the same network.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Zone turns your speech into text on this iPhone, and keeps the microphone ready during a session so the keyboard's mic key starts at once.</string>
+	<string>Zone uses the mic for dictation, voice notes and meetings. Standby keeps it ready for the keyboard.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Lets you choose Apple's on-device speech recognition in Settings, for example the Apple Dictation model, instead of Zone's own.</string>
+	<string>Lets the Zone keyboard use Apple’s on-device speech recognition if Zone’s speech model cannot recognize your dictation.</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UIApplicationShortcutItems</key>
@@ -87,7 +89,7 @@
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>Share Zone with a friend</string>
 			<key>UIApplicationShortcutItemSubtitle</key>
-			<string>App Store and beta links</string>
+			<string>App Store link</string>
 			<key>UIApplicationShortcutItemIconSymbolName</key>
 			<string>heart</string>
 		</dict>

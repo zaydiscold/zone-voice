@@ -75,50 +75,45 @@ public struct ReleaseDay: Hashable, Comparable, Sendable {
     }
 }
 
-/// One card in a version's notes: a short title, a picture, and one to three plain sentences.
-public struct ReleaseFeature: Equatable, Sendable, Identifiable {
+/// One change in a version's notes: an optional short name and one plain sentence or two.
+public struct ReleaseItem: Equatable, Sendable, Identifiable {
+    public var id: String { (title ?? "") + "|" + text }
+    /// A few words that name the change ("Finish when quiet"). Optional: a small fix is only a sentence.
+    public let title: String?
+    /// A small label beside the title, such as "Beta". Written after the title in brackets.
+    public let tag: String?
+    public let text: String
+    /// Starred in the file: one of the few changes the What's New sheet shows.
+    public let isHighlight: Bool
+
+    public init(title: String? = nil, tag: String? = nil, text: String, isHighlight: Bool = false) {
+        self.title = title
+        self.tag = tag
+        self.text = text
+        self.isHighlight = isHighlight
+    }
+}
+
+/// The changes to one part of Zone ("Keyboard"), with the picture that stands for it.
+public struct ReleaseGroup: Equatable, Sendable, Identifiable {
     public var id: String { title }
     public let title: String
     /// An SF Symbol name.
     public let symbol: String
-    /// A small label above the title, such as "Beta" or "Keyboard". Optional.
-    public let tag: String?
-    /// Where to turn it on or find it, such as "Settings > Computers". Optional.
-    public let location: String?
-    public let body: String
-    /// One short line for the What's New sheet, which lists every card as a line. Optional: without
-    /// it the sheet shows the body's first sentence.
-    public let brief: String?
+    public let items: [ReleaseItem]
 
-    public init(title: String, symbol: String, tag: String? = nil, location: String? = nil, body: String,
-                brief: String? = nil) {
+    public init(title: String, symbol: String, items: [ReleaseItem]) {
         self.title = title
         self.symbol = symbol
-        self.tag = tag
-        self.location = location
-        self.body = body
-        self.brief = brief
+        self.items = items
     }
+}
 
-    /// The line the What's New sheet shows under the title: `brief`, or the body's first sentence.
-    public var headline: String {
-        if let brief, !brief.isEmpty { return brief }
-        return Self.firstSentence(of: body)
-    }
-
-    /// Up to and including the first ". ", "! " or "? " that ends a sentence. A period inside a
-    /// web address or a number ("github.com", "2.5") is followed by a letter or digit, so it never
-    /// ends one.
-    static func firstSentence(of text: String) -> String {
-        let paragraph = text.components(separatedBy: "\n").first ?? text
-        let characters = Array(paragraph)
-        for index in characters.indices where ".!?".contains(characters[index]) {
-            let next = index + 1
-            if next == characters.count { return paragraph }
-            if characters[next] == " " { return String(characters[...index]) }
-        }
-        return paragraph
-    }
+/// A starred change and the group it belongs to, for the What's New sheet.
+public struct ReleaseHighlight: Equatable, Sendable, Identifiable {
+    public var id: String { group.title + "|" + item.id }
+    public let group: ReleaseGroup
+    public let item: ReleaseItem
 }
 
 /// One version's release notes: what the history screen and the What's New sheet show.
@@ -127,43 +122,50 @@ public struct ReleaseNote: Equatable, Sendable, Identifiable {
     public let version: AppVersion
     /// Nil until the version has a release day.
     public let day: ReleaseDay?
+    /// What the update is called ("Curate"), shown as "The Curate update". Optional.
+    public let name: String?
     /// One sentence under the version number.
     public let summary: String
-    public let features: [ReleaseFeature]
-    /// "Also in this version": smaller changes and fixes, one line each.
-    public let fixes: [String]
+    /// Every change, grouped by the part of Zone it belongs to.
+    public let groups: [ReleaseGroup]
 
-    public init(version: AppVersion, day: ReleaseDay?, summary: String, features: [ReleaseFeature], fixes: [String]) {
+    public init(version: AppVersion, day: ReleaseDay?, name: String? = nil, summary: String, groups: [ReleaseGroup]) {
         self.version = version
         self.day = day
+        self.name = name
         self.summary = summary
-        self.features = features
-        self.fixes = fixes
+        self.groups = groups
+    }
+
+    /// How many changes the version lists.
+    public var count: Int { groups.reduce(0) { $0 + $1.items.count } }
+
+    /// The starred changes, in the file's order.
+    public var highlights: [ReleaseHighlight] {
+        groups.flatMap { group in group.items.filter(\.isHighlight).map { ReleaseHighlight(group: group, item: $0) } }
     }
 }
 
 /// Reads one version's notes from the Markdown in `Zone/ReleaseNotes/`.
 ///
 /// ```
-/// # 1.0.4
-/// date: 2026-11-15
+/// # 1.0.5
+/// date: 2026-11-20
+/// name: Curate
 /// summary: One sentence about the version.
 ///
-/// ## A short title
-/// symbol: desktopcomputer
-/// tag: Beta
-/// where: Settings > Computers
-/// brief: One short line for the What's New sheet.
+/// ## Keyboard
+/// symbol: keyboard
 ///
-/// One to three plain sentences.
-///
-/// ## Also in this version
-///
-/// - A smaller change.
+/// * Next word: Finish a word and the row above the keys offers the next one.
+/// - Hold space to talk (Beta): Hold the space bar, speak, let go.
+/// - A plain sentence for a small fix.
 /// ```
 ///
-/// `date`, `tag`, `where` and `brief` are optional. Everything else is required, and a mistake is an
-/// error with its line number, not a guess: these files ship inside the app.
+/// A version is a few groups, one per part of Zone, and each change is one bullet: a short name,
+/// a colon and one sentence or two. A star in place of the dash marks one of the few changes the
+/// What's New sheet shows. `date` and `name` are optional. Everything else is required, and a
+/// mistake is an error with its line number, not a guess: these files ship inside the app.
 public enum ReleaseNotesParser {
     public struct Failure: Error, Equatable, CustomStringConvertible {
         public let line: Int
@@ -171,45 +173,49 @@ public enum ReleaseNotesParser {
         public var description: String { "line \(line): \(message)" }
     }
 
-    /// The heading that starts the list of smaller changes.
-    public static let fixesHeading = "Also in this version"
+    /// The longest text before a colon that is read as a change's name.
+    public static let titleLimit = 40
 
     public static func parse(_ text: String) throws -> ReleaseNote {
         var version: AppVersion?
         var day: ReleaseDay?
+        var name: String?
         var summary: String?
-        var features: [ReleaseFeature] = []
-        var fixes: [String] = []
+        var groups: [ReleaseGroup] = []
 
-        /// The feature being read.
+        /// The group being read.
         var title: String?
         var titleLine = 0
-        var fields: [String: String] = [:]
-        var paragraphs: [[String]] = []
-        var inFixes = false
-        var sawFixes = false
+        var symbol: String?
+        /// Each bullet as written, with whether it was starred and its line.
+        var bullets: [(text: String, starred: Bool, line: Int)] = []
         var inComment = false
         /// Keys are only read straight after a heading, before any other text.
         var acceptsKeys = false
-        var keysSinceHeading = 0
 
         func fail(_ line: Int, _ message: String) -> Failure { Failure(line: line, message: message) }
 
-        func closeFeature() throws {
-            guard let name = title else { return }
-            let body = paragraphs.filter { !$0.isEmpty }.map { $0.joined(separator: " ") }.joined(separator: "\n\n")
-            guard let symbol = fields["symbol"], !symbol.isEmpty else {
-                throw fail(titleLine, "\"\(name)\" needs a symbol: line (an SF Symbol name)")
+        func closeGroup() throws {
+            guard let group = title else { return }
+            guard let picture = symbol, !picture.isEmpty else {
+                throw fail(titleLine, "\"\(group)\" needs a symbol: line (an SF Symbol name)")
             }
-            guard !body.isEmpty else { throw fail(titleLine, "\"\(name)\" has no text under it") }
-            guard !features.contains(where: { $0.title == name }) else {
-                throw fail(titleLine, "\"\(name)\" appears twice")
+            guard !bullets.isEmpty else { throw fail(titleLine, "\"\(group)\" has no changes under it") }
+            guard !groups.contains(where: { $0.title.caseInsensitiveCompare(group) == .orderedSame }) else {
+                throw fail(titleLine, "\"\(group)\" appears twice")
             }
-            features.append(ReleaseFeature(title: name, symbol: symbol, tag: fields["tag"], location: fields["where"], body: body,
-                                           brief: fields["brief"]))
+            var items: [ReleaseItem] = []
+            for bullet in bullets {
+                let item = Self.item(bullet.text, starred: bullet.starred)
+                if bullet.starred, item.title == nil {
+                    throw fail(bullet.line, "a starred change needs a name and a colon before its sentence")
+                }
+                items.append(item)
+            }
+            groups.append(ReleaseGroup(title: group, symbol: picture, items: items))
             title = nil
-            fields = [:]
-            paragraphs = []
+            symbol = nil
+            bullets = []
         }
 
         let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
@@ -233,99 +239,101 @@ public enum ReleaseNotesParser {
                     break
                 }
             }
-            if line.isEmpty {
-                if raw.trimmingCharacters(in: .whitespaces).isEmpty {
-                    // A blank line after the keys ends them, so a sentence that happens to
-                    // start with a word and a colon is read as a sentence.
-                    if keysSinceHeading > 0 { acceptsKeys = false }
-                    if title != nil, let last = paragraphs.last, !last.isEmpty { paragraphs.append([]) }
-                }
-                continue
-            }
+            if line.isEmpty { continue }
 
             if line.hasPrefix("## ") {
                 guard version != nil else { throw fail(number, "the file must start with \"# \" and the version") }
-                guard summary != nil else { throw fail(number, "the version needs a summary: line before its first section") }
-                guard !sawFixes else { throw fail(number, "\"\(fixesHeading)\" must be the last section") }
-                try closeFeature()
-                let name = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                guard !name.isEmpty else { throw fail(number, "a section needs a title") }
-                if name.caseInsensitiveCompare(fixesHeading) == .orderedSame {
-                    inFixes = true
-                    sawFixes = true
-                    acceptsKeys = false
-                } else {
-                    title = name
-                    titleLine = number
-                    paragraphs = [[]]
-                    acceptsKeys = true
-                    keysSinceHeading = 0
-                }
+                guard summary != nil else { throw fail(number, "the version needs a summary: line before its first group") }
+                try closeGroup()
+                let group = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                guard !group.isEmpty else { throw fail(number, "a group needs a title") }
+                title = group
+                titleLine = number
+                acceptsKeys = true
                 continue
             }
             if line.hasPrefix("# ") {
                 guard version == nil else { throw fail(number, "one version per file") }
-                let name = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
-                guard let parsed = AppVersion(name) else { throw fail(number, "\"\(name)\" is not a version like 1.0.4") }
+                let text = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                guard let parsed = AppVersion(text) else { throw fail(number, "\"\(text)\" is not a version like 1.0.4") }
                 version = parsed
                 acceptsKeys = true
-                keysSinceHeading = 0
                 continue
             }
             guard version != nil else { throw fail(number, "the file must start with \"# \" and the version") }
-            guard !line.hasPrefix("#") else { throw fail(number, "use \"## \" for a section") }
+            guard !line.hasPrefix("#") else { throw fail(number, "use \"## \" for a group") }
 
-            if inFixes {
-                if line.hasPrefix("- ") || line.hasPrefix("* ") {
-                    let item = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
-                    guard !item.isEmpty else { throw fail(number, "an empty bullet") }
-                    fixes.append(item)
-                } else if !fixes.isEmpty, raw.first == " " || raw.first == "\t" {
-                    // A wrapped bullet continues on an indented line.
-                    fixes[fixes.count - 1] += " " + line
-                } else {
-                    throw fail(number, "lines under \"\(fixesHeading)\" start with \"- \"")
-                }
+            if line.hasPrefix("- ") || line.hasPrefix("* ") {
+                guard title != nil else { throw fail(number, "a change must sit under a \"## \" group") }
+                let item = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                guard !item.isEmpty else { throw fail(number, "an empty bullet") }
+                bullets.append((item, line.hasPrefix("* "), number))
+                acceptsKeys = false
+                continue
+            }
+            if !bullets.isEmpty, raw.first == " " || raw.first == "\t" {
+                // A wrapped bullet continues on an indented line.
+                bullets[bullets.count - 1].text += " " + line
                 continue
             }
 
             if acceptsKeys, let (key, value) = keyValue(line) {
-                keysSinceHeading += 1
+                guard !value.isEmpty else { throw fail(number, "\(key): is empty") }
                 if title == nil {
                     switch key {
                     case "date":
                         guard let parsed = ReleaseDay(value) else { throw fail(number, "\"\(value)\" is not a date like 2026-11-15") }
                         guard day == nil else { throw fail(number, "date: appears twice") }
                         day = parsed
+                    case "name":
+                        guard name == nil else { throw fail(number, "name: appears twice") }
+                        name = value
                     case "summary":
-                        guard !value.isEmpty else { throw fail(number, "summary: is empty") }
                         guard summary == nil else { throw fail(number, "summary: appears twice") }
                         summary = value
                     default:
-                        throw fail(number, "\"\(key):\" is not known here (date, summary)")
+                        throw fail(number, "\"\(key):\" is not known here (date, name, summary)")
                     }
                 } else {
-                    guard ["symbol", "tag", "where", "brief"].contains(key) else {
-                        throw fail(number, "\"\(key):\" is not known here (symbol, tag, where, brief)")
-                    }
-                    guard !value.isEmpty else { throw fail(number, "\(key): is empty") }
-                    guard fields[key] == nil else { throw fail(number, "\(key): appears twice") }
-                    fields[key] = value
+                    guard key == "symbol" else { throw fail(number, "\"\(key):\" is not known here (symbol)") }
+                    guard symbol == nil else { throw fail(number, "symbol: appears twice") }
+                    symbol = value
                 }
                 continue
             }
 
-            guard title != nil else { throw fail(number, "text must sit under a \"## \" section") }
-            acceptsKeys = false
-            paragraphs[paragraphs.count - 1].append(line)
+            guard title != nil else { throw fail(number, "text must sit under a \"## \" group") }
+            throw fail(number, "a change starts with \"- \", or \"* \" for a highlight")
         }
 
         if inComment { throw fail(lines.count, "a comment is never closed") }
-        try closeFeature()
+        try closeGroup()
         guard let version else { throw fail(1, "the file must start with \"# \" and the version") }
         guard let summary else { throw fail(1, "the version needs a summary: line") }
-        guard !features.isEmpty || !fixes.isEmpty else { throw fail(1, "the version has no notes") }
-        return ReleaseNote(version: version, day: day, summary: summary, features: features, fixes: fixes)
+        guard !groups.isEmpty else { throw fail(1, "the version has no notes") }
+        return ReleaseNote(version: version, day: day, name: name, summary: summary, groups: groups)
+    }
+
+    /// "Next word: Finish a word..." is a name and a sentence. The name is short, has no sentence
+    /// or path in it ("Settings > Keyboard: ..." is all sentence) and may end with a label in
+    /// brackets, "(Beta)".
+    static func item(_ text: String, starred: Bool) -> ReleaseItem {
+        guard let colon = text.range(of: ": ") else { return ReleaseItem(text: text, isHighlight: starred) }
+        var title = String(text[..<colon.lowerBound]).trimmingCharacters(in: .whitespaces)
+        let rest = String(text[colon.upperBound...]).trimmingCharacters(in: .whitespaces)
+        guard !title.isEmpty, !rest.isEmpty, title.count <= titleLimit, !title.contains(". "), !title.contains(" > "),
+              !title.contains("\"") else {
+            return ReleaseItem(text: text, isHighlight: starred)
+        }
+        var tag: String?
+        if title.hasSuffix(")"), let open = title.range(of: " (", options: .backwards) {
+            let label = String(title[open.upperBound...].dropLast())
+            if !label.isEmpty, !label.contains(" ") {
+                tag = label
+                title = String(title[..<open.lowerBound])
+            }
+        }
+        return ReleaseItem(title: title, tag: tag, text: rest, isHighlight: starred)
     }
 
     /// "symbol: mic" is a key and a value. A sentence with a colon in it is not: a key is one
@@ -350,7 +358,10 @@ public struct ReleaseNotesLibrary: Equatable, Sendable {
     /// Reads every `.md` file in a folder. A file that does not parse is left out and named in
     /// `problems`, so one bad file never empties the history; the tests fail on any problem.
     public static func load(folder: URL) -> (library: ReleaseNotesLibrary, problems: [String]) {
-        let files = ((try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [])
+        guard let contents = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else {
+            return (ReleaseNotesLibrary([]), ["The version notes folder could not be read."])
+        }
+        let files = contents
             .filter { $0.pathExtension == "md" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         var notes: [ReleaseNote] = []

@@ -47,6 +47,16 @@ final class IslandControlTests: XCTestCase {
         _ = try await ZoneIslandIntent(action).perform()
     }
 
+    private func expectRefusal(_ action: IslandAction, message: String,
+                               file: StaticString = #filePath, line: UInt = #line) async throws {
+        do {
+            try await press(action)
+            XCTFail("Expected the island to explain the refused press", file: file, line: line)
+        } catch let refusal as DictationCoordinator.ShortcutFailure {
+            XCTAssertEqual(refusal.message, message, file: file, line: line)
+        }
+    }
+
     private var isRecording: Bool {
         if case .recording = coordinator.activity { return true }
         return false
@@ -76,6 +86,75 @@ final class IslandControlTests: XCTestCase {
         XCTAssertTrue(coordinator.isArmed, "The island's own recording must hand the island back to standby, not turn Zone off")
     }
 
+    func testKeyboardTapAtStandbyDeadlineStartsOnce() async throws {
+        try await standby()
+        let deadline = try XCTUnwrap(coordinator.armedUntil)
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        let request = DictationRequest(id: UUID(), generation: 1, createdAt: deadline, inputSession: nil, contextBefore: nil)
+        store.request = request
+        store.status = DictationStatus(requestID: request.id, generation: 1, phase: .requested,
+                                       updatedAt: deadline, message: nil)
+        await coordinator.standbyReachedDeadline(deadline)
+        XCTAssertTrue(isRecording)
+        XCTAssertEqual(store.status?.requestID, request.id)
+        XCTAssertEqual(engine.starts, 1)
+        let state = StandbyControlState.read()
+        XCTAssertNil(state.until)
+        XCTAssertTrue(state.isOn())
+    }
+
+    func testKeyboardTapJustAfterStandbyDeadlineCannotTakeTheMicrophone() async throws {
+        try await standby()
+        let deadline = try XCTUnwrap(coordinator.armedUntil)
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        let request = DictationRequest(id: UUID(), generation: 1, createdAt: deadline.addingTimeInterval(0.001),
+                                       inputSession: nil, contextBefore: nil)
+        store.request = request
+        store.status = DictationStatus(requestID: request.id, generation: 1, phase: .requested,
+                                       updatedAt: deadline, message: nil)
+        await coordinator.standbyReachedDeadline(deadline)
+        XCTAssertFalse(isRecording)
+        XCTAssertFalse(coordinator.isArmed)
+        XCTAssertEqual(engine.starts, 0)
+    }
+
+    /// Finish when quiet: the card says "Quiet" with a ring to the moment the recording ends,
+    /// and stops saying it when a voice is back, on a pause, and once the recording is over.
+    func testTheCardSaysQuietUntilAVoiceAPauseOrTheEnd() async throws {
+        try await standby()
+        try await press(.dictate)
+        XCTAssertNil(card.latestState?.quiet)
+        let now = Date()
+        card.quiet(until: now.addingTimeInterval(8), now: now)
+        XCTAssertEqual(card.latestState?.quiet, now...now.addingTimeInterval(8))
+        // The same quiet, a moment later: the ring's start does not move.
+        card.quiet(until: now.addingTimeInterval(8), now: now.addingTimeInterval(1))
+        XCTAssertEqual(card.latestState?.quiet?.lowerBound, now)
+        card.quiet(until: nil)
+        XCTAssertNil(card.latestState?.quiet, "a voice is back")
+
+        card.quiet(until: Date().addingTimeInterval(8))
+        try await press(.pause)
+        XCTAssertNil(card.latestState?.quiet, "a pause is not quiet")
+        try await press(.pause)
+
+        card.quiet(until: Date().addingTimeInterval(8))
+        XCTAssertNotNil(card.latestState?.quiet)
+        try await press(.stop)
+        XCTAssertNil(card.latestState?.quiet, "nothing is quiet once the recording is over")
+        // An end already in the past says nothing.
+        card.quiet(until: Date().addingTimeInterval(-1))
+        XCTAssertNil(card.latestState?.quiet)
+    }
+
+    func testANoteNeverAdvertisesAQuietCountdown() async throws {
+        try await standby()
+        try await press(.note)
+        card.quiet(until: Date().addingTimeInterval(8))
+        XCTAssertNil(card.latestState?.quiet)
+        try await press(.stop)
+    }
+
     func testDictateAgainRightAfterTheLastOne() async throws {
         try await standby()
         for text in ["First.", "Second."] {
@@ -100,21 +179,17 @@ final class IslandControlTests: XCTestCase {
         XCTAssertTrue(coordinator.isArmed)
     }
 
-    /// The buttons are only drawn on standby, but a stale card can outlive its session. A tap
-    /// there must never switch the microphone on from the background.
-    func testDictateWithNoSessionRefusesAndNeverArms() async throws {
+    /// A delivered Note or Dictate action can wake Zone and must own a new visible card.
+    func testColdIslandStartRecordsAndStops() async throws {
         await coordinator.prepareModelAndWait()
-        XCTAssertFalse(coordinator.isArmed)
         for action in [IslandAction.dictate, .note] {
-            do {
-                try await press(action)
-                XCTFail("\(action) with no session must say why it did nothing")
-            } catch let failure as DictationCoordinator.ShortcutFailure {
-                XCTAssertTrue(failure.message.contains("Open Zone"), failure.message)
-            }
             XCTAssertFalse(coordinator.isArmed)
-            XCTAssertEqual(engine.starts, 0)
+            try await press(action)
+            XCTAssertTrue(isRecording)
+            XCTAssertEqual(card.latestState?.phase, .recording)
+            try await press(.stop)
             XCTAssertFalse(isRecording)
+            coordinator.endSession(reason: .user)
         }
     }
 
@@ -122,8 +197,8 @@ final class IslandControlTests: XCTestCase {
         try await standby()
         try await press(.dictate)
         let first = coordinator.activity
-        try await press(.dictate)
-        try await press(.note)
+        try await expectRefusal(.dictate, message: RecordingRefusal.recording)
+        try await expectRefusal(.note, message: RecordingRefusal.recording)
         XCTAssertEqual(coordinator.activity, first, "A double tap must leave the first recording alone")
         XCTAssertEqual(engine.starts, 1)
     }
@@ -150,8 +225,8 @@ final class IslandControlTests: XCTestCase {
 
     func testStopWithNothingRecordingDoesNothing() async throws {
         try await standby()
-        try await press(.stop)
-        try await press(.pause)
+        try await expectRefusal(.stop, message: RecordingRefusal.idle)
+        try await expectRefusal(.pause, message: RecordingRefusal.idle)
         XCTAssertTrue(coordinator.isArmed)
         XCTAssertEqual(coordinator.activity, .idle)
         XCTAssertEqual(engine.starts, 0)
@@ -254,6 +329,24 @@ final class IslandControlTests: XCTestCase {
         XCTAssertEqual(UIPasteboard.general.string, "Started on the island", "and copies it, as its own stop does")
     }
 
+    /// A save with the microphone off (standby off) gets no heartbeat, and recognition may take a
+    /// minute or more. The card refreshes itself, so the island, the widget and the controls do
+    /// not call a working Zone dead after `CarWidgetState.staleAfter`.
+    func testASaveWithTheMicrophoneOffStaysFresh() async throws {
+        try card.start(noteMode: true, controlOwned: true, onLost: { _ in })
+        try XCTSkipUnless(card.isActive, "Live Activities are unavailable on this simulator")
+        card.processing()
+        let first = CarWidgetState.read()
+        XCTAssertEqual(first.phase, .processing)
+        try await Task.sleep(for: .seconds(RecordingLiveActivity.refreshInterval + 2))
+        let later = CarWidgetState.read()
+        XCTAssertEqual(later.phase, .processing)
+        XCTAssertGreaterThan(later.updatedAt, first.updatedAt, "refreshed with no microphone heartbeat")
+        XCTAssertEqual(later.controlShows(noteMode: true, now: first.updatedAt.addingTimeInterval(CarWidgetState.staleAfter + 1)),
+                       .saving, "still Saving past the limit the first write alone would allow")
+        card.end()
+    }
+
     /// A keyboard dictation has a text field waiting for it. No control owns it.
     func testAKeyboardDictationIsNotControlOwned() async throws {
         try await standby()
@@ -262,7 +355,13 @@ final class IslandControlTests: XCTestCase {
         XCTAssertFalse(coordinator.shouldRunRecordingControl(noteMode: false, desiredState: false))
         if card.isActive {
             XCTAssertNotEqual(card.latestState?.controlOwned, true)
-            XCTAssertEqual(CarWidgetState.read().phase, .idle)
+            let widget = CarWidgetState.read()
+            XCTAssertEqual(widget.phase, .recording, "Zone is not free, so the file says so")
+            XCTAssertEqual(widget.controlOwned, false)
+            XCTAssertEqual(widget.controlShows(noteMode: false), .busy(note: false, saving: false),
+                           "Dictate and copy shows Dictating, not a Stop it cannot perform")
+            XCTAssertEqual(widget.controlShows(noteMode: true), .busy(note: false, saving: false),
+                           "and Voice note does not claim Off")
         }
     }
 

@@ -79,7 +79,7 @@ struct AudioEngineException: LocalizedError {
 /// be exercised without a microphone.
 protocol CaptureHardware: AnyObject, Sendable {
     /// Sets the category, then activates the session.
-    func activateSession() throws
+    func activateSession(mixing: Bool) throws
     func deactivateSession() throws
     /// The input node's output format. May raise; call through `AudioEngineException.catching`.
     func inputFormat() -> AVAudioFormat
@@ -126,13 +126,13 @@ final class LiveCaptureHardware: CaptureHardware, @unchecked Sendable {
         }
     }
 
-    func activateSession() throws {
+    func activateSession(mixing: Bool) throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(
             .playAndRecord, mode: .default,
             // A2DP keeps music and Zone's cues on AirPods while the phone's mic records, instead
             // of yanking playback to the speaker when a session arms.
-            options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP])
+            options: mixing ? [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP] : [.defaultToSpeaker, .allowBluetoothA2DP])
         // An armed session counts as recording, and by default iOS mutes haptics and system
         // sounds while an app records. Zone discards every armed buffer and the keys are hidden
         // while it really records, so a key tap's vibration never reaches a transcript.
@@ -144,7 +144,15 @@ final class LiveCaptureHardware: CaptureHardware, @unchecked Sendable {
     }
 
     func deactivateSession() throws {
-        try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        let session = AVAudioSession.sharedInstance()
+        do { try session.setActive(false, options: .notifyOthersOnDeactivation) }
+        catch let error as NSError where error.domain == NSOSStatusErrorDomain && error.code == AVAudioSession.ErrorCode.isBusy.rawValue {
+            // Apple documents that a busy deactivation stops running audio objects and
+            // still deactivates. The next standby or cue must use a mixable category.
+        }
+        if session.category == .playAndRecord, !session.categoryOptions.contains(.mixWithOthers) {
+            try session.setCategory(.ambient)
+        }
     }
 
     func inputFormat() -> AVAudioFormat { engine.inputNode.outputFormat(forBus: 0) }

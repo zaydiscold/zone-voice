@@ -36,7 +36,7 @@ struct DoubtRow: View {
         Button { mic.openDoubt(placement) } label: {
             Text(placement.word)
                 .font(.system(size: 16, weight: .medium))
-                .underline(true, pattern: .dot, color: theme.accentInk)
+                .underline(true, pattern: .dot, color: theme.accentStroke)
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
                 .fixedSize()

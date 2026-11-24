@@ -2,24 +2,50 @@
 
 import LinkPresentation
 import SwiftUI
+import UserNotifications
 import ZoneCore
 
-/// Home has two spaces under one header, switched like ChatGPT's modes: Transcribe (dictation)
-/// and Meeting (a recorder that writes a transcript after). Transcribe is one screen with one
-/// anchor: is the mic key live, and for how long. Below it the number worth bragging about,
-/// setup rows only while something is missing, notes, and the composer pinned to the bottom.
+/// Home keeps its header in place while each mode scrolls vertically inside its own page.
 struct HomeView: View {
     @Environment(DictationCoordinator.self) private var coordinator
     @Environment(MeetingCoordinator.self) private var meetings
     @AppStorage("zone.home.mode") private var mode: HomeMode = .transcribe
+    // During a finger-driven swipe, SwiftUI reports provisional page IDs. Commit only
+    // the final one. Programmatic jumps already have a destination and ignore intermediate IDs.
+    @State private var swipePage: HomeMode?
+    @State private var pageTravel = HomePageTravel()
+    @Environment(\.layoutDirection) private var layoutDirection
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    private var initialAnchor: UnitPoint {
+        let pages = HomeMode.allCases
+        let index = pages.firstIndex(of: mode) ?? 0
+        return UnitPoint(x: CGFloat(index) / CGFloat(max(1, pages.count - 1)), y: 0)
+    }
+
+    private var scrollSelection: Binding<HomeMode?> {
+        Binding(
+            get: { swipePage ?? mode },
+            set: { page in
+                if swipePage != nil, let page { swipePage = page }
+            }
+        )
+    }
+
     @Environment(AppSettings.self) private var settings
     @Environment(LinkCoordinator.self) private var link: LinkCoordinator?
     @Environment(WhatsNewGate.self) private var whatsNew: WhatsNewGate?
     @Environment(\.colorScheme) private var scheme
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.sunShadow) private var sun
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var noticeStatus: UNAuthorizationStatus = .notDetermined
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var practiceText = ""
-    @State private var cleaningPractice = false
+    @AppStorage(ZoneNoticePermission.requestedKey) private var requestedNotices = false
+    @AppStorage(ZoneNoticePermission.explainedKey) private var explainedNotices = false
+    @State private var homeVisible = false
+    @State private var heroVisible = true
     @State private var sessionError: String?
     @State private var shareImage: UIImage?
     @State private var sharing = false
@@ -36,18 +62,50 @@ struct HomeView: View {
                 .padding(.bottom, 8)
                 .onChange(of: coordinator.noteReveal?.token, initial: true) { _, token in
                     // Notes live on the Transcribe page.
-                    if token != nil, mode != .transcribe { withAnimation(Zone.motion) { mode = .transcribe } }
+                    if token != nil {
+                        swipePage = nil
+                        mode = .transcribe
+                    }
                 }
-            ZStack {
-                switch mode {
-                case .transcribe: transcribePage.transition(.opacity)
-                case .meeting: MeetingSpaceView().transition(.opacity)
-                case .cleanup: Color.clear
+            GeometryReader { viewport in
+                ScrollView(.horizontal) {
+                    HStack(spacing: 0) {
+                        ForEach(HomeMode.allCases, id: \.self) { page in
+                            content(for: page)
+                                .frame(width: viewport.size.width, height: viewport.size.height)
+                                .id(page)
+                                .accessibilityHidden(mode != page)
+                        }
+                    }
+                    .scrollTargetLayout()
+                    .onGeometryChange(for: CGFloat?.self) { geometry in
+                        let width = viewport.size.width
+                        guard width > 0 else { return nil }
+                        let frame = geometry.frame(in: .named("home.pager"))
+                        let distance = layoutDirection == .rightToLeft ? frame.maxX - width : -frame.minX
+                        return min(max(0, distance / width), CGFloat(HomeMode.allCases.count - 1))
+                    } action: { position in
+                        pageTravel.position = position
+                    }
                 }
-                CleanupView(isActive: mode == .cleanup)
-                    .opacity(mode == .cleanup ? 1 : 0)
-                    .allowsHitTesting(mode == .cleanup)
-                    .accessibilityHidden(mode != .cleanup)
+                .coordinateSpace(name: "home.pager")
+                .scrollIndicators(.hidden)
+                .scrollTargetBehavior(.viewAligned(limitBehavior: .alwaysByOne))
+                // At the leading edge even a sliver of the previous page can win the
+                // selection during a short drag. Track the page under the viewport center.
+                .scrollPosition(id: scrollSelection, anchor: .top)
+                .defaultScrollAnchor(initialAnchor, for: .initialOffset)
+                .onScrollPhaseChange { _, phase in
+                    switch phase {
+                    case .tracking, .interacting:
+                        if swipePage == nil { swipePage = mode }
+                    case .idle:
+                        if let swipePage { mode = swipePage }
+                        swipePage = nil
+                    default:
+                        break
+                    }
+                }
             }
         }
         .navigationDestination(item: $settingsShortcut) { $0.destination }
@@ -58,25 +116,33 @@ struct HomeView: View {
         .navigationTitle("Home")
         .zoneBackButton()
         .toolbar(.hidden, for: .navigationBar)
-        .sheet(isPresented: $cleaningPractice) { CleanupSheet(text: practiceText) }
         .sheet(isPresented: $showsFeedback) { FeedbackView() }
         // What's New only opens over Home itself, never over a screen pushed on top of it.
-        .onAppear { whatsNew?.homeInFront = true }
-        .onDisappear { whatsNew?.homeInFront = false }
-        .onChange(of: readyForMilestone, initial: true) { _, ready in whatsNew?.homeReadyForNote = ready }
-        #if DEBUG
         .onAppear {
-            // Design review: `-zoneHomeMode meeting` opens on the Meeting space.
-            if let raw = UserDefaults.standard.string(forKey: "zoneHomeMode"), let forced = HomeMode(rawValue: raw) { mode = forced }
+            homeVisible = true
+            whatsNew?.homeInFront = true
         }
-        #endif
+        .onDisappear {
+            homeVisible = false
+            swipePage = nil
+            whatsNew?.homeInFront = false
+        }
+        .onChange(of: readyForMilestone, initial: true) { _, ready in whatsNew?.homeReadyForNote = ready }
+    }
+
+    @ViewBuilder
+    private func content(for page: HomeMode) -> some View {
+        switch page {
+        case .transcribe: transcribePage
+        case .meeting: MeetingSpaceView(isActive: mode == .meeting)
+        }
     }
 
     private var transcribePage: some View {
         GeometryReader { page in
         ScrollViewReader { reader in
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: SectionBreak.spacing) {
                 hero
                 if let resumeSetup {
                     resumeCard(resumeSetup)
@@ -95,13 +161,29 @@ struct HomeView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 HomeNotice()
-                HomeAudioRecoverySection()
-                HomeLibraryView()
+                    .task(id: scenePhase) {
+                        guard scenePhase == .active, !explainedNotices else { return }
+                        noticeStatus = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+                    }
+                if ZoneNoticePermission.needsExplanation(requested: requestedNotices, status: noticeStatus, explained: explainedNotices) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(ZoneNoticePermission.message)
+                        Button("Got it") { explainedNotices = true }.buttonStyle(ZoneQuietButtonStyle())
+                    }
+                    .font(.subheadline)
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Zone.card(scheme), in: RoundedRectangle(cornerRadius: 12))
+                }
+                HomeAudioRecoverySection(isActive: mode == .transcribe)
+                HomeLibraryView(isActive: mode == .transcribe)
                 // A short page settles its stats toward the bottom instead of leaving the lower
                 // half empty; a long one simply scrolls.
-                Spacer(minLength: 8)
                 if settings.wordsDictated > 0 {
-                    stats
+                    VStack(alignment: .leading, spacing: 0) {
+                        Spacer(minLength: 0)
+                        stats
+                    }
                 }
             }
             .padding(.horizontal, 20)
@@ -111,14 +193,13 @@ struct HomeView: View {
         }
         // Added to Notes on the Note saved page: Notes comes into view with the note lit up
         // (HomeLibraryView opens the section and lights it).
-        .onChange(of: coordinator.noteReveal?.token, initial: true) { _, token in
-            guard token != nil else { return }
-            Task { @MainActor in
-                // One pass for the section to open before scrolling to it.
-                try? await Task.sleep(for: .milliseconds(120))
-                withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.5)) {
-                    reader.scrollTo(HomeLibraryView.notesAnchor, anchor: .top)
-                }
+        .task(id: mode == .transcribe ? coordinator.noteReveal?.token : nil) {
+            guard mode == .transcribe, coordinator.noteReveal != nil else { return }
+            // Wait for the Notes section to expand. Leaving Transcribe cancels this reveal.
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            withAnimation(reduceMotion ? nil : Zone.motion) {
+                reader.scrollTo(HomeLibraryView.notesAnchor, anchor: .top)
             }
         }
         }
@@ -128,13 +209,13 @@ struct HomeView: View {
             VStack(alignment: .trailing, spacing: 8) {
                 if !practiceText.isEmpty && !coordinator.activity.isBusy {
                     HStack(spacing: 8) {
-                        Button("Cleanup") { cleaningPractice = true }.buttonStyle(ZonePillButtonStyle())
                         Button("Copy") { Clipboard.copy(practiceText) }.buttonStyle(ZonePillButtonStyle())
                         Button("Clear") { practiceText = "" }.buttonStyle(ZonePillButtonStyle())
                     }
                     .transition(.opacity)
                 }
-                Composer(text: $practiceText, placeholder: "Test the mic here")
+                Composer(text: $practiceText, placeholder: "Test the mic here", isActive: mode == .transcribe,
+                         showsMicLight: micLightsVisible)
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
@@ -151,14 +232,31 @@ struct HomeView: View {
     private var header: some View {
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .center, spacing: 8) {
-                HomeModeSwitch(mode: $mode, recording: meetings.isRecording)
+                modeKeys
+                Spacer(minLength: 0)
                 headerIcons
             }
             VStack(alignment: .leading, spacing: 8) {
                 HStack { Spacer(); headerIcons }
-                HomeModeSwitch(mode: $mode, recording: meetings.isRecording)
+                modeKeys
             }
         }
+    }
+
+    private var modeKeys: some View {
+        HomeModeSwitch(
+            mode: Binding(
+                get: { mode },
+                set: { requested in
+                    swipePage = nil
+                    mode = requested
+                }
+            ),
+            travel: pageTravel,
+            meetingRecording: meetings.isRecording,
+            dictationRecording: coordinator.activity.isBusy && !coordinator.hasRecordingScreen && !coordinator.noteIsLive
+        )
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
     }
 
     private var headerIcons: some View {
@@ -195,6 +293,10 @@ struct HomeView: View {
         .padding(.trailing, -10)
     }
 
+    private var micLightsVisible: Bool {
+        homeVisible && mode == .transcribe && !showsFeedback && !coordinator.showsDictationScreen
+    }
+
     // MARK: Hero
 
     /// The hero: the one thing Home is for. Big serif state with its light, one short line under
@@ -203,7 +305,8 @@ struct HomeView: View {
     private var hero: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
-                StatusDot(color: heroColor, pulses: heroPulses, hollow: !coordinator.isArmed && !coordinator.activity.isBusy, size: 14)
+                StatusDot(color: heroColor, hollow: !coordinator.isArmed && !coordinator.activity.isBusy
+                          && !coordinator.isPreparingMicrophone, size: 14)
                 Text(heroTitle)
                     .font(.zoneHeadline)
                     .foregroundStyle(Zone.ink(scheme))
@@ -212,10 +315,11 @@ struct HomeView: View {
                     .minimumScaleFactor(0.8)
             }
             .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("home.standbyTitle")
             // Side by side normally; stacked at accessibility text sizes so nothing truncates.
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    heroDetailText.lineLimit(1)
+                    heroDetailText.lineLimit(1).fixedSize(horizontal: true, vertical: false)
                     Spacer(minLength: 8)
                     heroAction
                 }
@@ -248,25 +352,32 @@ struct HomeView: View {
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background { heroCard }
+        .onScrollVisibilityChange(threshold: 0.1) { heroVisible = $0 }
         .padding(.top, 4)
         .animation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.45), value: heroTitle)
         .animation(Zone.motion, value: coordinator.liveTranscript.isEmpty)
     }
 
-    /// The head card: a quiet surface lit from its top-right corner by the state's color, so
+    /// The head card: a quiet surface lit from the same side as the keys by the state's color, so
     /// on, recording and off each read at a glance without more words.
     private var heroCard: some View {
         let shape = Zone.cardShape
+        let light = UnitPoint(x: 0.5 - sun.dx / (2 * SunShadow.defaultMaxLength), y: 0)
         return shape
             .fill(Zone.card(scheme))
             .overlay {
-                RadialGradient(colors: [heroColor.opacity(coordinator.isArmed || coordinator.activity.isBusy ? 0.28 : 0.08), .clear],
-                               center: .topTrailing, startRadius: 0, endRadius: 260)
+                RadialGradient(colors: [heroColor.opacity(coordinator.isArmed || coordinator.activity.isBusy ? 0.20 : 0.06), .clear],
+                               center: light, startRadius: 0, endRadius: 260)
                     .clipShape(shape)
                     .animation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.6), value: heroColor)
             }
-            .overlay(shape.strokeBorder(Zone.rule(scheme), lineWidth: 1))
+            .overlay { if contrast == .increased { shape.strokeBorder(Zone.rule(scheme), lineWidth: 1) } }
             .sunShadow(scale: 1)
+            .overlay {
+                if micLightsVisible && heroVisible && !heroShowsNote {
+                    MicLight(surface: .standby)
+                }
+            }
     }
 
     /// About four lines' worth from the end, starting at a word.
@@ -277,27 +388,43 @@ struct HomeView: View {
         return "…" + cut[start...]
     }
 
+    /// A note is recording or being saved. Its card at the top has the clock, the bars and the
+    /// buttons, so the hero does not repeat "Listening" and a second clock under it: it names
+    /// the note and carries what the card has no room for, the words as they arrive.
+    private var heroShowsNote: Bool {
+        switch coordinator.noteCard {
+        case .recording, .saving: true
+        default: false
+        }
+    }
+
+    /// The hero's line under "Your note": how much has been heard so far.
+    static func noteDetail(liveTranscript: String) -> String {
+        let words = liveTranscript.split(whereSeparator: \.isWhitespace).count
+        switch words {
+        case 0: return "Your words appear here as you talk"
+        case 1: return "1 word so far"
+        default: return "\(words) words so far"
+        }
+    }
+
     private var heroTitle: String {
+        if heroShowsNote { return "Your note" }
         switch coordinator.activity {
         case .recording: return coordinator.showsPaused ? "Paused" : "Listening"
         case .transcribing: return "Transcribing"
-        default: return coordinator.isArmed ? "Standby on" : "Standby off"
+        default:
+            if coordinator.isPreparingMicrophone && !coordinator.isArmed { return "Starting mic…" }
+            return coordinator.isArmed ? "Standby on" : "Standby off"
         }
     }
 
     private var heroColor: Color {
         switch coordinator.activity {
-        case .recording: return coordinator.showsPaused ? Zone.muted(scheme) : Zone.accentGraphic(scheme)
-        case .transcribing: return Zone.accentGraphic(scheme)
-        default: return coordinator.isArmed ? Zone.accentGraphic(scheme) : Zone.muted(scheme)
-        }
-    }
-
-    private var heroPulses: Bool {
-        switch coordinator.activity {
-        case .recording: return !coordinator.showsPaused
-        case .transcribing: return true
-        default: return coordinator.isArmed
+        case .recording: return coordinator.showsPaused ? Zone.muted(scheme) : Zone.accentTone(scheme)
+        case .transcribing: return Zone.accentTone(scheme)
+        default:
+            return coordinator.isArmed || coordinator.isPreparingMicrophone ? Zone.accentTone(scheme) : Zone.muted(scheme)
         }
     }
 
@@ -311,21 +438,28 @@ struct HomeView: View {
     @ViewBuilder
     private var heroDetail: some View {
         switch coordinator.activity {
+        case .recording where heroShowsNote, .transcribing where heroShowsNote:
+            Text(Self.noteDetail(liveTranscript: coordinator.liveTranscript))
         case .recording(_, let startedAt):
-            TimelineView(.periodic(from: startedAt, by: 1)) { context in
+            TimelineView(.animation(minimumInterval: 1, paused: mode != .transcribe)) { context in
                 Text(context.date.timeIntervalSince(startedAt).countdownLabel)
             }
         case .transcribing:
             Text("Finishing transcript…")
+        case _ where coordinator.isPreparingMicrophone && !coordinator.isArmed:
+            Text("Getting the microphone ready")
         default:
             if coordinator.isArmed {
+                // "Keyboard ready" only once the keyboard has reported in: until then the setup
+                // list right under this still says the keyboard is missing (`HomeCopy`).
+                let reported = coordinator.keyboardPresence?.hasFullAccess == true
                 if let until = coordinator.armedUntil, !settings.inactivityPolicy.isUnbounded {
-                    Text("Keyboard ready · \(until.timeIntervalSince(coordinator.now).countdownLabel) left")
+                    Text(HomeCopy.standby(keyboardReported: reported, left: until.timeIntervalSince(mode == .transcribe ? coordinator.now : .now).countdownLabel))
                 } else {
-                    Text("Keyboard ready")
+                    Text(HomeCopy.standby(keyboardReported: reported, left: nil))
                 }
             } else {
-                Text(coordinator.modelIsReady ? "Turn on so the keyboard mic starts instantly" : "Finish setup below")
+                Text(coordinator.modelIsReady ? "Turn on for an instant start and live words." : modelDetail)
             }
         }
     }
@@ -346,12 +480,12 @@ struct HomeView: View {
                         } catch is CancellationError {
                             // Off superseded this startup; keep the user's requested state.
                         } catch {
-                            sessionError = error.localizedDescription
+                            sessionError = RecordingProblem.microphone.message(for: error)
                         }
                     }
                 }
                 .buttonStyle(ZoneInkPillButtonStyle())
-                .disabled(!coordinator.modelIsReady)
+                .disabled(!coordinator.modelIsReady || coordinator.isPreparingMicrophone)
             }
         }
     }
@@ -360,8 +494,8 @@ struct HomeView: View {
 
     private var stats: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Hairline()
-            Eyebrow("So far").padding(.top, 12)
+            // Announced like Notes and History: the same bold title in the same 44 pt row.
+            Text("So far").font(.headline).frame(minHeight: 44).accessibilityAddTraits(.isHeader)
             HStack(alignment: .firstTextBaseline) {
                 HeroNumber(text: settings.wordsDictated.formatted())
                 Spacer()
@@ -371,18 +505,20 @@ struct HomeView: View {
                 }
                 .buttonStyle(ZonePillButtonStyle())
             }
-            Text(settings.wordsDictated == 1 ? "word dictated" : "words dictated")
+            Text(HomeCopy.wordsLabel(settings.wordsDictated))
                 .font(.subheadline).foregroundStyle(Zone.muted(scheme))
             scaleLine
             if settings.sharesCompleted > 0 {
                 // For you, not the card: how many people you have passed Zone to. It only counts up.
                 Label(DictationStats.helpedLine(people: settings.sharesCompleted), systemImage: "heart.fill")
-                    .font(.footnote.weight(.medium)).foregroundStyle(Zone.accentText(scheme))
+                    .font(.footnote.weight(.medium)).labelStyle(ZoneCueLabelStyle(scheme: scheme))
                     .contentTransition(.numericText())
             }
             // Rates need a little speech behind them; zeros on a first visit read as broken.
             if settings.wordsPerMinute > 0 {
                 statRow.padding(.top, 8)
+                Text("Savings compare recording time with typing the words you kept at 36.2 wpm.")
+                    .font(.footnote).foregroundStyle(Zone.muted(scheme))
             }
             longestLine
         }
@@ -395,7 +531,7 @@ struct HomeView: View {
     }
 
     /// The total held up against a text people know. A tap moves to the next one (Hamlet, the
-    /// Library of Alexandria, Wikipedia) and the cycle ends on where the words were heard.
+    /// Library of Alexandria, Wikipedia) and the cycle ends on where the count is saved.
     /// Whatever is showing goes on the share card.
     @ViewBuilder private var scaleLine: some View {
         let lines = WordScale.cycle(words: settings.wordsDictated)
@@ -406,7 +542,7 @@ struct HomeView: View {
             } label: {
                 Text(lines[scaleIndex % lines.count])
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Zone.accentText(scheme))
+                    .zoneAccentLink(scheme)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .contentTransition(.opacity)
@@ -430,9 +566,7 @@ struct HomeView: View {
     private static let statGap: CGFloat = 16
 
     private var statItems: [(value: String, label: String)] {
-        [("\(settings.wordsPerMinute)", "words / min"),
-         (DictationStats.timeLabel(minutes: minutesSaved), "saved vs typing"),
-         ("0 bytes", "uploaded")]
+        HomeCopy.stats(wordsPerMinute: settings.wordsPerMinute, minutesSaved: settings.estimatedMinutesSaved)
     }
 
     /// Each column as wide as its text and the spare width between them, so every label stays
@@ -470,12 +604,13 @@ struct HomeView: View {
     }
 
     /// The personal record, under the stats: one quiet line, not a fourth column (three already
-    /// share 393 pt). Only from a minute up, so a first short dictation never reads "0:04".
-    /// Not on the share card. On one line while it fits, the value under the label when not.
+    /// share 393 pt). Shown from 50 words or one minute.
+    /// On the share card too, under its wave, without the day. Ends with the day it was spoken. On one line while it fits, the value under the label when not.
     @ViewBuilder private var longestLine: some View {
-        if let longest = settings.longestDictation, longest.seconds >= 60 {
-            let label = Text("Longest dictation").font(.caption).foregroundStyle(Zone.muted(scheme))
-            let value = Text("\(DictationStats.durationLabel(seconds: longest.seconds)) · \(longest.words.formatted()) \(longest.words == 1 ? "word" : "words")")
+        if let longest = settings.longestDictation, longest.isDisplayable {
+            let label = Text("Most words in one dictation").font(.caption).foregroundStyle(Zone.muted(scheme))
+            let day = DictationStats.dayLabel(longest.date)
+            let value = Text("\(longest.words.formatted()) \(longest.words == 1 ? "word" : "words") · \(DictationStats.durationLabel(seconds: longest.seconds)) · \(day)")
                 .font(.footnote.weight(.medium).monospacedDigit()).foregroundStyle(Zone.ink(scheme))
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) { label; value }.fixedSize()
@@ -487,8 +622,8 @@ struct HomeView: View {
             }
             .padding(.top, 4)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Longest dictation")
-            .accessibilityValue("\(Self.spokenDuration(longest.seconds)), \(longest.words.formatted()) \(longest.words == 1 ? "word" : "words")")
+            .accessibilityLabel("Most words in one dictation")
+            .accessibilityValue("\(Self.spokenDuration(longest.seconds)), \(longest.words.formatted()) \(longest.words == 1 ? "word" : "words"), \(day)")
         }
     }
 
@@ -498,13 +633,10 @@ struct HomeView: View {
         return Duration.seconds(whole).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .wide))
     }
 
-    private var minutesSaved: Int {
-        DictationStats.minutesSaved(words: settings.wordsDictated, secondsSpoken: settings.secondsDictated)
-    }
-
     private func renderShareCard() {
-        let card = ShareCard(words: settings.wordsDictated, wordsPerMinute: settings.wordsPerMinute,
-                             minutesSaved: minutesSaved, scale: scaleHeadline, variation: .random(in: .min ... .max),
+        let card = ShareCard(words: settings.wordsDictated, items: statItems,
+                             scale: scaleHeadline, variation: .random(in: .min ... .max),
+                             longest: settings.longestDictation,
                              scheme: scheme, sun: sun)
         let renderer = ImageRenderer(content: card)
         renderer.scale = 1.8 // 1080 x 1350, the 4:5 post size feeds expect.
@@ -530,7 +662,7 @@ struct HomeView: View {
     /// The milestone note only comes onto a Home with nothing left to set up, on its Transcribe
     /// page: never above the setup steps, and never the first thing a new person sees.
     private var readyForMilestone: Bool {
-        resumeSetup == nil && setupComplete && mode == .transcribe
+        mode == .transcribe && resumeSetup == nil && setupComplete
     }
 
     private func resumeCard(_ resume: @escaping () -> Void) -> some View {
@@ -559,9 +691,9 @@ struct HomeView: View {
                 case .failed:
                     Button("Retry") { coordinator.prepareModel() }.buttonStyle(ZonePillButtonStyle())
                 case .downloading(let progress, _):
-                    ProgressView(value: progress).frame(width: 72).tint(Zone.accentGraphic)
+                    ProgressView(value: progress).frame(width: 72).tint(Zone.accentTone(scheme))
                 default:
-                    ProgressView().tint(Zone.accentGraphic)
+                    ProgressView().tint(Zone.accentTone(scheme))
                 }
             }
             SetupRow(title: "Microphone", detail: microphoneDetail, done: coordinator.microphonePermission == .granted) {
@@ -624,11 +756,11 @@ final class ShareCardItem: NSObject, UIActivityItemSource {
     }
 }
 
-/// The message and both links (ZoneLinks.invite), sent beside the card or on its own. Saving to
+/// The message and App Store link (ZoneLinks.invite), sent beside the card or on its own. Saving to
 /// Photos, printing and contacts take the image alone; a paragraph there is clutter.
 final class ShareInviteItem: NSObject, UIActivityItemSource {
     private let invite: String
-    /// `sendsToComputer`: a computer is paired, so "nothing leaves your phone" is not said.
+    /// Pairing changes the invitation independently of the selected speech model.
     init(sendsToComputer: Bool) { invite = ZoneLinks.invite(sendsToComputer: sendsToComputer) }
 
     func activityViewControllerPlaceholderItem(_ controller: UIActivityViewController) -> Any { invite }
@@ -706,14 +838,22 @@ struct ShareSheet: UIViewControllerRepresentable {
 /// capsules, drawn by a small synth voiced by the word count.
 struct ShareCard: View {
     let words: Int
-    let wordsPerMinute: Int
-    let minutesSaved: Int
+    let items: [(value: String, label: String)]
     /// The comparison showing on Home when Share was tapped ("That's 1.2 Great Gatsbys.").
     var scale: String? = nil
     /// A fresh value per share: the same total draws a sibling wave, not a copy.
     var variation: UInt64 = 0
+    /// The personal record, written under the wave the way a voice memo's length sits under
+    /// its waveform. Length and words only: the day stays on Home.
+    var longest: LongestDictation? = nil
     let scheme: ColorScheme
     let sun: SunShadow
+
+    private var longestCaption: (length: String, words: String)? {
+        guard let longest, longest.isDisplayable else { return nil }
+        return (DictationStats.durationLabel(seconds: longest.seconds),
+                "\(longest.words.formatted()) \(longest.words == 1 ? "word" : "words")")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -722,7 +862,7 @@ struct ShareCard: View {
                     .font(.system(size: 34, weight: .semibold, design: .serif))
                     .foregroundStyle(Zone.ink(scheme))
                 Spacer()
-                Text("on-device dictation")
+                Text("dictation stats")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(Zone.muted(scheme))
             }
@@ -732,13 +872,13 @@ struct ShareCard: View {
                 .foregroundStyle(Zone.ink(scheme))
                 .minimumScaleFactor(0.4)
                 .lineLimit(1)
-            Text(words == 1 ? "word dictated" : "words dictated")
+            Text(HomeCopy.wordsLabel(words))
                 .font(.system(size: 24))
                 .foregroundStyle(Zone.muted(scheme))
             if let scale {
                 Text(scale)
                     .font(.system(size: 24, weight: .semibold, design: .serif))
-                    .foregroundStyle(Zone.accentText(scheme))
+                    .foregroundStyle(Zone.accentTone(scheme))
                     .lineLimit(2)
                     .minimumScaleFactor(0.7)
                     .padding(.top, 6)
@@ -746,15 +886,25 @@ struct ShareCard: View {
             waveform
                 .frame(height: 72)
                 .padding(.top, 30)
-                .padding(.bottom, 40)
-            statsCard
-            HStack(spacing: 8) {
-                Circle().fill(Zone.accentGraphic).frame(width: 7, height: 7)
-                Text("100% on-device speech recognition.")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(Zone.accentText(scheme))
+                .padding(.bottom, longestCaption == nil ? 40 : 10)
+            if let longestCaption {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("most words in one go")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Zone.muted(scheme))
+                    Spacer(minLength: 8)
+                    Text("\(longestCaption.words) · \(longestCaption.length)")
+                        .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Zone.ink(scheme))
+                }
+                .lineLimit(1)
+                .padding(.bottom, 22)
             }
-            .padding(.top, 24)
+            statsCard
+            Text("Savings compare recording time with typing at 36.2 wpm.")
+                .font(.system(size: 16))
+                .foregroundStyle(Zone.muted(scheme))
+                .padding(.top, 24)
         }
         .padding(44)
         .frame(width: 600, height: 750)
@@ -772,16 +922,15 @@ struct ShareCard: View {
         }
     }
 
-    /// The three numbers on one card, split by hairlines like Home's stat row. The shadow is
+    /// The same figures as Home, split by hairlines like Home's stat row. The shadow is
     /// the app's sun shadow at this phone's time of day, scaled for a 600 pt canvas.
     private var statsCard: some View {
         let shape = Zone.cardShape
         return HStack(spacing: 0) {
-            stat("\(wordsPerMinute)", "words / min")
-            Rectangle().fill(Zone.rule(scheme)).frame(width: 1)
-            stat(DictationStats.timeLabel(minutes: minutesSaved), "time saved")
-            Rectangle().fill(Zone.rule(scheme)).frame(width: 1)
-            stat("0 bytes", "uploaded")
+            ForEach(items.indices, id: \.self) { index in
+                if index > 0 { Rectangle().fill(Zone.rule(scheme)).frame(width: 1) }
+                stat(items[index].value, items[index].label)
+            }
         }
         .fixedSize(horizontal: false, vertical: true)
         .background {
@@ -817,7 +966,7 @@ struct ShareCard: View {
                 let rect = CGRect(x: CGFloat(index) * pitch + (pitch - width) / 2, y: (size.height - height) / 2,
                                   width: width, height: height)
                 let age = 0.45 + 0.55 * Double(index) / Double(max(bars.count - 1, 1))
-                context.fill(Path(roundedRect: rect, cornerRadius: width / 2), with: .color(Zone.accent.opacity(age)))
+                context.fill(Path(roundedRect: rect, cornerRadius: width / 2), with: .color(Zone.accentTone(scheme).opacity(age)))
             }
         }
     }
@@ -831,8 +980,8 @@ enum SettingsShortcut: CaseIterable, Hashable {
         switch self {
         case .myWords: return "My words"
         case .speechModel: return "Speech model"
-        case .keyboard: return "Keyboard"
-        case .appearance: return "Appearance"
+        case .keyboard: return "Zone keyboard"
+        case .appearance: return "Personalize"
         case .backup: return "Backup and export"
         }
     }
@@ -852,7 +1001,14 @@ enum SettingsShortcut: CaseIterable, Hashable {
         case .myWords: PersonalWordsView()
         case .speechModel: ModelLibraryView()
         case .keyboard: KeyboardSettingsView()
-        case .appearance: AppearanceSettingsView()
+        case .appearance:
+            Form { PersonalizeSection() }
+                .modifier(VoicePreviewPageVisibility())
+                .scrollContentBackground(.hidden)
+                .navigationTitle("Personalize")
+                .zoneBackButton()
+                .navigationBarTitleDisplayMode(.inline)
+                .zoneScreen()
         case .backup: LibraryBackupView()
         }
     }

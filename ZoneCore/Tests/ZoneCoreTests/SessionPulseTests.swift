@@ -66,6 +66,17 @@ final class SessionPulseTests: XCTestCase {
         XCTAssertFalse(reader.session!.isAlive(now: start.addingTimeInterval(9)))
     }
 
+    func testStartingAndEndingARecordingReachTheKeyboardBetweenHeartbeatWrites() {
+        var state = armed(start)
+        writer.session = state
+        state.recording = true
+        writer.session = state
+        XCTAssertEqual(reader.session?.recording, true)
+        state.recording = false
+        writer.session = state
+        XCTAssertEqual(reader.session?.recording, false)
+    }
+
     func testSubSecondDifferencesInTheEndOfStandbyAreNotAChange() throws {
         let until = Date(timeIntervalSince1970: 1_800_001_800.4)
         writer.session = armed(start, until: until)

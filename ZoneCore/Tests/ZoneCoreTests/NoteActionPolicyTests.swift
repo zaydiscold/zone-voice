@@ -43,4 +43,29 @@ final class NoteActionPolicyTests: XCTestCase {
             XCTAssertEqual(NoteActionPolicy.action(for: .transcribing, desiredState: desired), .ignore)
         }
     }
+
+    /// Zayd's phone, 2026-11-20: a note ended outside its control, and the Action Button, still showing
+    /// On, sent Off two seconds later. That press did nothing.
+    func testAnOffPressAfterARecordingEndedByItselfStarts() {
+        XCTAssertTrue(NoteActionPolicy.offPressStarts(state: .idle, noteMode: true, endedByItself: (true, 2)))
+        // Still recognizing the note that ended: the press waits for it, then starts.
+        XCTAssertTrue(NoteActionPolicy.offPressStarts(state: .transcribing, noteMode: true, endedByItself: (true, 0.5)))
+        XCTAssertTrue(NoteActionPolicy.offPressStarts(state: .idle, noteMode: false, endedByItself: (false, 60)))
+    }
+
+    func testAnOffPressWithNothingEndedByItselfStaysANoOp() {
+        XCTAssertFalse(NoteActionPolicy.offPressStarts(state: .idle, noteMode: true, endedByItself: nil))
+        // The other control's recording ended: this control was never showing On.
+        XCTAssertFalse(NoteActionPolicy.offPressStarts(state: .idle, noteMode: true, endedByItself: (false, 2)))
+        // Long ago: iOS has redrawn the control since, so Off means off.
+        XCTAssertFalse(NoteActionPolicy.offPressStarts(state: .idle, noteMode: true,
+                                                       endedByItself: (true, NoteActionPolicy.staleControlWindow + 1)))
+        XCTAssertFalse(NoteActionPolicy.offPressStarts(state: .idle, noteMode: true, endedByItself: (true, -5)))
+    }
+
+    func testAnOffPressWhileRecordingOrStartingIsNeverTurnedIntoAStart() {
+        for state in [NoteActionPolicy.State.starting, .recordingNote, .recordingDictation, .recordingElsewhere] {
+            XCTAssertFalse(NoteActionPolicy.offPressStarts(state: state, noteMode: true, endedByItself: (true, 2)), "\(state)")
+        }
+    }
 }

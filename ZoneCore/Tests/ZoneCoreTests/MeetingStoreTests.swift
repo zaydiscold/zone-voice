@@ -136,7 +136,9 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(stored.title, "Design review")
         XCTAssertEqual(stored.speakerName("S1"), "Me")
         XCTAssertEqual(stored.speakerName("S2"), "Priya")
-        try store.setMe(meeting.id, speaker: "S2")
+        // Taking "me" from someone is its own call since 2026-11-20: marking a second speaker
+        // as me joins the two (MeetingMergeSpeakersTests).
+        try store.moveMe(meeting.id, to: "S2")
         stored = try store.meeting(meeting.id)
         XCTAssertEqual(stored.speakers.filter(\.isMe).map(\.id), ["S2"])
         XCTAssertEqual(stored.speakerName("S1"), "Speaker 1")
@@ -163,6 +165,116 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(reset.transcribedThrough, 0)
         XCTAssertTrue(reset.speakers.isEmpty)
         XCTAssertEqual(reset.duration, 1, accuracy: 0.0001)
+    }
+
+    /// Transcribe again whose speaker pass labels nobody (diarization threw or heard no voices,
+    /// the model was missing, labels were off) must not lose the people someone named: they are
+    /// held, unlisted, survive a reopen and a second unlabeled pass, and a later successful pass
+    /// finds them by their own prints, in reversed order, with no voice profile involved.
+    func testUnlabeledRetranscribeHoldsNamedVoicesForTheNextSuccessfulPass() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("meetings-" + UUID().uuidString)
+        directories.append(directory)
+        var store = MeetingStore(directory: directory)
+        let meeting = try await record(store, seconds: 2, at: Date(timeIntervalSince1970: 1_800_000_000))
+        func voice(_ lead: Int, _ jitter: Float = 0) -> [Float] {
+            (0..<256).map { $0 == lead ? 1 : ($0 % 7 == lead % 7 ? jitter : 0) }
+        }
+        let ada = voice(3), ben = voice(200)
+        try store.update(meeting.id) {
+            $0.status = .done
+            $0.transcribedThrough = 2
+            $0.diarizer = "pyannote"
+            $0.segments = [MeetingSegment(start: 0, end: 1, speaker: "S1", text: "Ada opens."),
+                           MeetingSegment(start: 1, end: 2, speaker: "S2", text: "Ben answers.")]
+            $0.speakers = [MeetingSpeaker(id: "S1", name: "Ada", voice: ada),
+                           MeetingSpeaker(id: "S2", name: "Ben", voice: ben)]
+        }
+
+        // The pass the coordinator runs when it labels nobody: undivided turns, held people.
+        func unlabeledPass() throws {
+            try store.resetTranscript(meeting.id)
+            XCTAssertEqual(try store.meeting(meeting.id).speakers.map(\.name), ["Ada", "Ben"])
+            XCTAssertNil(try store.meeting(meeting.id).diarizer, "a redone transcript must not claim the old speaker model")
+            try store.update(meeting.id) {
+                $0.turns = []
+                XCTAssertTrue($0.holdSpeakersForNextPass())
+                $0.segments = [MeetingSegment(start: 0, end: 2, speaker: nil, text: "Ada opens. Ben answers.")]
+                $0.transcribedThrough = 2
+                $0.status = .done
+            }
+            let done = try store.meeting(meeting.id)
+            XCTAssertTrue(done.speakers.isEmpty, "nobody is listed for a transcript with no labels")
+            XCTAssertEqual(done.heldSpeakers?.map(\.name), ["Ada", "Ben"])
+            XCTAssertEqual(done.heldSpeakers?.map(\.voice), [ada, ben])
+            let text = MeetingExport.text(done)
+            XCTAssertFalse(text.contains("Ada:") || text.contains("Ben:") || text.contains("Speaker"), text)
+            XCTAssertTrue(text.contains("Ada opens. Ben answers."))
+        }
+        try unlabeledPass()
+
+        // Reopen: a fresh store reads the held people from disk.
+        store = MeetingStore(directory: directory)
+        XCTAssertEqual(try store.meeting(meeting.id).heldSpeakers?.map(\.name), ["Ada", "Ben"])
+        // A second unlabeled pass neither loses nor duplicates them.
+        try unlabeledPass()
+        store = MeetingStore(directory: directory)
+
+        // The successful pass: Ben speaks first, so the diarizer's raw "0" is Ben and "1" Ada.
+        try store.resetTranscript(meeting.id)
+        let reset = try store.meeting(meeting.id)
+        XCTAssertNil(reset.heldSpeakers)
+        XCTAssertEqual(reset.speakers.map(\.id), ["S1", "S2"])
+        let raw = [MeetingTurn(start: 0, end: 1, speaker: "0"), MeetingTurn(start: 1, end: 2, speaker: "1")]
+        let normalized = MeetingSpeakerLabels.normalize(raw, existing: reset.speakers,
+                                                        voices: ["0": voice(200, 0.05), "1": voice(3, 0.05)])
+        let heard = Set(normalized.turns.compactMap(\.speaker))
+        try store.update(meeting.id) {
+            $0.speakers = normalized.speakers.filter { heard.contains($0.id) }
+            $0.turns = normalized.turns
+        }
+        let labeled = try store.meeting(meeting.id)
+        XCTAssertEqual(normalized.turns.map { labeled.speakerName($0.speaker) }, ["Ben", "Ada"])
+        XCTAssertEqual(labeled.speakers.count, 2, "no new numbered speakers for people already named")
+    }
+
+    func testHeldSpeakersDecodeAsNilOnOlderRecordingsAndSkipDuplicatePrints() throws {
+        var meeting = Meeting(title: "Old", createdAt: Date(timeIntervalSince1970: 1_800_000_000), status: .done)
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(meeting)) as! [String: Any]
+        json.removeValue(forKey: "heldSpeakers")
+        XCTAssertNil(try JSONDecoder().decode(Meeting.self, from: JSONSerialization.data(withJSONObject: json)).heldSpeakers)
+
+        // Unnamed voices are not anchors; a held person whose id is taken is renumbered, and one
+        // whose print is already listed is not added twice.
+        let print: [Float] = (0..<256).map { $0 == 9 ? 1 : 0 }, other: [Float] = (0..<256).map { $0 == 90 ? 1 : 0 }
+        meeting.speakers = [MeetingSpeaker(id: "S1", name: "Cy", voice: print), MeetingSpeaker(id: "S2", voice: other)]
+        meeting.heldSpeakers = [MeetingSpeaker(id: "S1", name: "Cy", voice: print),
+                                MeetingSpeaker(id: "S1", name: "Di", voice: other)]
+        let anchors = meeting.speakerAnchors(adding: meeting.heldSpeakers ?? [])
+        XCTAssertEqual(anchors.map(\.name), ["Cy", "Di"])
+        XCTAssertEqual(anchors.map(\.id), ["S1", "S2"])
+        // Nothing to hold: the field stays nil.
+        var empty = Meeting(title: "New", createdAt: Date(), status: .recorded)
+        XCTAssertFalse(empty.holdSpeakersForNextPass())
+        XCTAssertNil(empty.heldSpeakers)
+    }
+
+    func testMergeKeepsBothRecordingsHeldPeopleForTheNextTranscribeAgain() async throws {
+        let store = makeStore()
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let first = try await record(store, seconds: 1, at: base)
+        let second = try await record(store, seconds: 1, at: base.addingTimeInterval(600))
+        let ada: [Float] = (0..<256).map { $0 == 5 ? 1 : 0 }, ben: [Float] = (0..<256).map { $0 == 50 ? 1 : 0 }
+        try store.update(first.id) { $0.heldSpeakers = [MeetingSpeaker(id: "S1", name: "Ada", voice: ada)] }
+        try store.update(second.id) { $0.heldSpeakers = [MeetingSpeaker(id: "S1", name: "Ben", voice: ben)] }
+        let merged = try store.merge(second.id, first.id)
+        XCTAssertEqual(merged.heldSpeakers?.map(\.name), ["Ada", "Ben"])
+        XCTAssertEqual(merged.heldSpeakers?.map(\.id), ["S1", "S2"])
+        XCTAssertTrue(merged.speakers.isEmpty)
+        try store.resetTranscript(merged.id)
+        let reset = try store.meeting(merged.id)
+        XCTAssertEqual(reset.speakers.map(\.name), ["Ada", "Ben"])
+        XCTAssertEqual(reset.speakers.map(\.voice), [ada, ben])
+        XCTAssertNil(reset.heldSpeakers)
     }
 
     func testDeleteRemovesAudioAndMetadata() async throws {
@@ -233,9 +345,12 @@ final class MeetingStoreTests: XCTestCase {
         XCTAssertEqual(merged.status, .done)
         XCTAssertEqual(merged.transcribedThrough, 5, accuracy: 0.0001)
         XCTAssertEqual(merged.segments.map(\.start), [0.5, 3, 4, 4.5])
-        // Me maps to me, a shared name maps to that speaker, a stranger gets a fresh id.
-        XCTAssertEqual(merged.segments.map(\.speaker), ["S1", "S1", "S2", "S3"])
-        XCTAssertEqual(merged.speakers.map(\.id), ["S1", "S2", "S3"])
+        // Me is me, a shared name is that person, a stranger is a new one. The later voices keep
+        // ids of their own (so a join can be separated) and read as the person they are.
+        XCTAssertEqual(merged.segments.map { merged.person($0.speaker) }, ["S1", "S1", "S2", "S5"])
+        XCTAssertEqual(merged.people.map(\.id), ["S1", "S2", "S5"])
+        XCTAssertEqual(merged.segments.map { merged.speakerName($0.speaker) }, ["Me", "Me", "Ana", "Speaker 3"])
+        XCTAssertNil(merged.speakerGroupsToMatch, "nobody is left to compare the stranger with")
         XCTAssertEqual(merged.speakers.filter(\.isMe).count, 1)
         XCTAssertThrowsError(try store.meeting(later.id))
         XCTAssertEqual(store.all().count, 1)
@@ -418,6 +533,8 @@ final class MeetingTranscriptTests: XCTestCase {
         XCTAssertEqual(paragraphs.map(\.text), ["one", "two", "three four"])
         meeting.speakers[2].name = "Ravi"
         XCTAssertEqual(MeetingExport.paragraphs(meeting).map(\.text), ["one two", "three four"])
+        meeting.speakers[2].sharesName = true
+        XCTAssertEqual(MeetingExport.paragraphs(meeting).map(\.text), ["one", "two", "three four"])
     }
 
     func testExportWithoutSpeakersAndDefaultTitle() {

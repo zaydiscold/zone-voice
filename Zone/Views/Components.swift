@@ -3,6 +3,40 @@
 import SwiftUI
 import ZoneCore
 
+struct BoundedProgress<Indicator: View>: View {
+    let message: String
+    var limit: Duration = .seconds(60)
+    @ViewBuilder var indicator: () -> Indicator
+    @State private var waited = false
+
+    var body: some View {
+        Group {
+            if waited { Text(message).font(.footnote) } else { indicator() }
+        }
+        .task {
+            waited = false
+            do { try await Task.sleep(for: limit); waited = true } catch {}
+        }
+    }
+}
+
+struct NewNoteButton<Content: View>: View {
+    @Environment(DictationCoordinator.self) private var coordinator
+    @State private var message: String?
+    @ViewBuilder let label: () -> Content
+
+    var body: some View {
+        Button {
+            if let reason = coordinator.startRefusal { message = reason }
+            else if coordinator.modelState == .missing { message = coordinator.composerRefusal }
+            else { coordinator.beginNoteDictation() }
+        } label: { label() }
+        .alert(message ?? "", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
+            Button("OK") { message = nil }
+        }
+    }
+}
+
 /// One line of the setup checklist: a check state, what it is, and the single action that
 /// fixes it while it is missing.
 struct SetupRow<Action: View>: View {
@@ -16,7 +50,7 @@ struct SetupRow<Action: View>: View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: done ? "checkmark.circle.fill" : "circle")
                 .font(.system(size: 22, weight: .regular))
-                .foregroundStyle(done ? Zone.accentGraphic(scheme) : Zone.rule(scheme))
+                .foregroundStyle(done ? Zone.accentTone(scheme) : Zone.rule(scheme))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.body.weight(.medium)).foregroundStyle(Zone.ink(scheme))
@@ -75,83 +109,94 @@ struct Composer: View {
     /// The composer on the Send feedback screen. While that screen is up it alone takes the
     /// dictated words; the composers underneath (Home's) leave them be.
     var forFeedback = false
+    var isActive = true
+    var showsMicLight = false
+    @FocusState private var editing: Bool
     @State private var confirmingDiscard = false
+    @State private var micMessage: String?
 
     var body: some View {
+        let activity = coordinator.noteIsLive ? DictationCoordinator.Activity.idle : coordinator.activity
         Group {
             // A note is run from its card at the top; the bar stays a field until it is done.
-            switch coordinator.noteIsLive ? .idle : coordinator.activity {
-            case .recording(_, let startedAt):
+            switch activity {
+            case .recording, .transcribing:
                 HStack(spacing: 12) {
-                    RoundAction(symbol: "xmark", label: "Cancel dictation", diameter: 44) { confirmingDiscard = true }
-                    LiveWave()
-                        .frame(height: 36)
-                    if coordinator.showsPaused {
-                        Text("Paused").font(.subheadline).foregroundStyle(Zone.accentText(scheme))
-                    } else {
-                        TimelineView(.periodic(from: startedAt, by: 1)) { context in
-                            Text(context.date.timeIntervalSince(startedAt).countdownLabel)
-                                .font(.subheadline.monospacedDigit())
-                                .foregroundStyle(Zone.muted(scheme))
-                                .accessibilityLabel("Recording for \(context.date.timeIntervalSince(startedAt).countdownLabel)")
+                    if activity.isRecording {
+                        RoundAction(symbol: "xmark", label: "Cancel dictation", diameter: 44) { confirmingDiscard = true }
+                    }
+                    Group {
+                        if isActive { LiveWave(live: activity.isRecording) }
+                        else { Color.clear }
+                    }.frame(height: 36)
+                    if case .recording(_, let startedAt) = activity {
+                        if coordinator.showsPaused {
+                            Text("Paused").font(.subheadline).zoneAccentBadge(scheme)
+                        } else {
+                            TimelineView(.animation(minimumInterval: 1, paused: !isActive)) { context in
+                                Text(context.date.timeIntervalSince(startedAt).countdownLabel)
+                                    .font(.subheadline.monospacedDigit())
+                                    .foregroundStyle(Zone.muted(scheme))
+                                    .accessibilityLabel("Recording for \(context.date.timeIntervalSince(startedAt).countdownLabel)")
+                            }
                         }
-                    }
-                    RoundAction(symbol: coordinator.showsPaused ? "play.fill" : "pause.fill",
-                                label: coordinator.showsPaused ? "Resume recording" : "Pause recording", diameter: 44) {
-                        coordinator.togglePause()
-                    }
-                    RoundAction(symbol: "checkmark", label: "Stop and keep the words", prominent: true, diameter: 44) {
-                        Task { await coordinator.stopDictation() }
+                        RoundAction(symbol: coordinator.showsPaused ? "play.fill" : "pause.fill",
+                                    label: coordinator.showsPaused ? "Resume recording" : "Pause recording", diameter: 44) {
+                            coordinator.togglePause()
+                        }
+                        RoundAction(symbol: "checkmark", label: "Stop and keep the words", prominent: true, diameter: 44) {
+                            Task { await coordinator.stopDictation() }
+                        }
+                    } else {
+                        Text("Transcribing").font(.subheadline).foregroundStyle(Zone.muted(scheme))
                     }
                 }
                 .frame(minHeight: 52)
                 .confirmsDiscard($confirmingDiscard) { coordinator.cancelDictation() }
-            case .transcribing:
-                HStack(spacing: 12) {
-                    Group {
-                        if settings.meterStyle.isDrawn || settings.meterStyle == .scope {
-                            VoiceArt(style: settings.meterStyle, level: 0, live: false,
-                                     ink: UIColor(Zone.muted(scheme)), accent: UIColor(Zone.muted(scheme)))
-                        } else if settings.meterStyle == .bars {
-                            SignalLevelMeter(levels: [], color: UIColor(Zone.muted(scheme)), shape: .swell)
-                        } else {
-                            FlowingWave(levels: [], color: UIColor(Zone.muted(scheme)))
-                        }
-                    }
-                    .frame(height: 36)
-                    Text("Transcribing").font(.subheadline).foregroundStyle(Zone.muted(scheme))
-                }
-                .frame(minHeight: 52)
             default:
                 // The field is exactly the button's height on one line, so the button sits dead
                 // center with the same 8 pt inset on every side; with more lines it stays at the
                 // bottom, under the thumb.
                 HStack(alignment: .bottom, spacing: 12) {
                     TextField(placeholder, text: $text, axis: .vertical)
+                        .focused($editing)
                         .font(.body)
                         .foregroundStyle(Zone.ink(scheme))
                         .lineLimit(1...6)
                         .frame(minHeight: 44)
                         .padding(.leading, 10)
                     MicButton(diameter: 44) {
+                        if let refusal = coordinator.composerRefusal {
+                            micMessage = refusal
+                            return
+                        }
                         Haptics.start()
-                        Task { await coordinator.startAppDictation(contextBefore: text) }
+                        Task { await coordinator.startAppDictation(contextBefore: text, replaceActive: false) }
                     }
-                    .disabled(!coordinator.modelIsReady || coordinator.noteIsLive)
                     .opacity(coordinator.modelIsReady && !coordinator.noteIsLive ? 1 : 0.45)
                 }
             }
         }
         .padding(8)
         .composerSurface()
+        .overlay {
+            if showsMicLight && isActive && !coordinator.noteIsLive {
+                MicLight(surface: .composer(ComposerSurface.radius))
+            }
+        }
+        .alert(micMessage ?? "", isPresented: Binding(get: { micMessage != nil }, set: { if !$0 { micMessage = nil } })) {
+            Button("OK") { micMessage = nil }
+        }
         .animation(Zone.motion, value: coordinator.activity.isBusy)
+        .onChange(of: isActive) { _, active in
+            if !active { editing = false }
+        }
         .onChange(of: coordinator.activity, initial: true) { _, activity in
             if case .finished(let result, let origin) = activity, origin == .app, !coordinator.lastResultWasNote, !coordinator.lastResultWasAudioRetry,
                FeedbackSession.isOpen == forFeedback {
-                let inserted = coordinator.textStyle.insertion(of: result.text, contextBefore: text, fieldCapitalizesSentences: true, personalWords: coordinator.personalWords,
-                                                            mentions: settings.handleRecognition, handles: coordinator.handles, systemWords: coordinator.systemWords,
-                                                            spokenCorrections: settings.spokenCorrections, emoticons: settings.spokenEmoticons, smallOrdinals: settings.smallOrdinals, california: settings.californiaMode, misheard: settings.misheard)
+                let inserted = coordinator.composerInsertion(result.text, before: text)
                 text += inserted
+                coordinator.confirmKept(result.requestID, text: inserted)
                 coordinator.learnHandles(from: result.text, renderedText: inserted)
                 Haptics.success()
                 coordinator.acknowledgeActivity(resultWasUsed: true)
@@ -164,25 +209,29 @@ struct Composer: View {
 /// The only view that reads the 20 Hz level stream, so a recording redraws the wave and not
 /// the whole composer around it.
 struct LiveWave: View {
+    var live = true
     @Environment(DictationCoordinator.self) private var coordinator
     @Environment(AppSettings.self) private var settings
     @Environment(\.colorScheme) private var scheme
     var body: some View {
-        Group {
-            // Settings > Appearance > Voice graphic. Mirrored is a keyboard layout; here it is the wave.
-            if settings.meterStyle.isDrawn || settings.meterStyle == .scope {
-                VoiceArt(style: settings.meterStyle, level: coordinator.showsPaused ? 0 : (coordinator.recentLevels.last ?? 0),
-                         live: !coordinator.showsPaused, ink: UIColor(Zone.ink(scheme)), accent: UIColor(Zone.accentGraphic(scheme)))
-            } else if settings.meterStyle == .bars {
-                SignalLevelMeter(levels: coordinator.showsPaused ? [] : coordinator.recentLevels,
-                                 color: UIColor(Zone.accentGraphic(scheme)), shape: .swell)
-            } else {
-                FlowingWave(levels: coordinator.showsPaused ? [] : coordinator.recentLevels,
-                            color: UIColor(Zone.accentGraphic(scheme)), ink: UIColor(Zone.accentText(scheme)))
-            }
-        }
+        RecorderVoiceGraphic(style: settings.meterStyle, levels: coordinator.recentLevels, live: live && !coordinator.showsPaused)
         .opacity(coordinator.showsPaused ? 0.4 : 1)
         .accessibilityHidden(true)
+    }
+}
+
+/// Shared by dictation, note capture, Test the mic and the Personalize sample.
+struct RecorderVoiceGraphic: View {
+    let style: MeterStyle
+    let levels: [Float]
+    var live = true
+    var detail: CGFloat = 1
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        VoiceGraphic(style: style, levels: levels, live: live, ink: UIColor(Zone.ink(scheme)),
+                     accent: UIColor(Zone.accentTone(scheme == .dark ? .light : .dark)),
+                     edgeColor: UIColor(Zone.accentTone(scheme)), isDark: scheme == .dark, detail: detail)
     }
 }
 
@@ -190,15 +239,15 @@ private struct ComposerSurface: ViewModifier {
     @Environment(\.colorScheme) private var scheme
 
     /// Concentric with the 44 pt round button inside it: 22 pt radius plus the 8 pt inset.
-    private let radius: CGFloat = 30
+    static let radius: CGFloat = 30
 
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
-            content.glassEffect(.regular, in: .rect(cornerRadius: radius, style: .continuous))
+            content.glassEffect(.regular, in: .rect(cornerRadius: Self.radius, style: .continuous))
         } else {
             content
-                .background(Zone.field(scheme), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Zone.rule(scheme), lineWidth: 1))
+                .background(Zone.field(scheme), in: RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).strokeBorder(Zone.rule(scheme), lineWidth: 1))
         }
     }
 }

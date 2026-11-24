@@ -48,7 +48,7 @@ public enum SpokenOrdinals {
         pattern: #"(?<![\p{L}\p{N}])(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|\p{L}+(?:th|ieth))(?![\p{L}])"#,
         options: [.caseInsensitive])
 
-    public static func writing(_ text: String, small: Bool = false) -> String {
+    public static func writing(_ text: String, small: Bool = false, numericDates: Bool = false) -> String {
         guard trigger.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil else { return text }
         // Split into words and the space before each, keeping everything else as it was.
         var words: [(gap: String, raw: String)] = []
@@ -123,7 +123,7 @@ public enum SpokenOrdinals {
                 continue
             }
             if number < 10 {
-                guard small else { continue }
+                guard small || (numericDates && before.map(months.contains) == true) else { continue }
                 if let afterWord, notAfterSmall.contains(afterWord) { continue }
                 // "first of all", "first and foremost".
                 if let afterWord, let next = lower(index + 2), afterWord == "of" && next == "all" || afterWord == "and" && next == "foremost" { continue }

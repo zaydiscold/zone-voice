@@ -23,12 +23,15 @@ public enum ModernVocabulary {
         /// Swearing, sexual slang or a slur (rank written with a trailing x): typed and swiped as
         /// written, but never a correction target, so a typo is never turned into one.
         var blocked = false
+        /// Everyday swearing (rank written with a trailing c): typed and swiped as written, and a
+        /// typo's fix only when no other word is as close (`Autocorrector.Candidate.isCoarse`).
+        var coarse = false
         /// False for a short, rare word of the broad list: typing keeps it, swipe never offers it.
         var swipes = true
     }
 
     /// modern-words.txt: typing, swipe and dictation.
-    static let entries: [Entry] = load("modern-words")
+    static let entries: [Entry] = parse(CompiledVocabulary.modern)
 
     /// Each one-word entry's rank by lowercase spelling (the lower when listed twice), so passes that
     /// protect everyday words know these as words, not as unknown spellings free to replace.
@@ -40,7 +43,7 @@ public enum ModernVocabulary {
 
     /// more-words.txt: the broad third pass, for typing and swipe only. Dictation leaves these to
     /// the recognizer, which already writes them, so nothing here rewrites speech.
-    static let moreEntries: [Entry] = load("more-words").map {
+    static let moreEntries: [Entry] = parse(CompiledVocabulary.more).map {
         var entry = $0
         // A short rare word ("GBR", "edf", "tsui") traces like a common one and won human swipes
         // meant for "the", "west" and "two"; typing still keeps it as written.
@@ -61,22 +64,21 @@ public enum ModernVocabulary {
     /// swipe set, where list ranks alone cost 0.19 points top-1).
     static let moreWordsSwipeRank = 40_000
 
-    private static func load(_ resource: String) -> [Entry] {
-        guard let url = Bundle.module.url(forResource: resource, withExtension: "txt"),
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+    private static func parse(_ text: String) -> [Entry] {
         return text.split(separator: "\n").compactMap { line in
             guard !line.hasPrefix("#") else { return nil }
             let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
             let word = fields[0].trimmingCharacters(in: .whitespaces)
             guard !word.isEmpty else { return nil }
             var rankField = fields.count > 1 ? fields[1].trimmingCharacters(in: .whitespaces) : ""
+            let coarse = rankField.hasSuffix("c")
             let blocked = rankField.hasSuffix("x")
-            if blocked { rankField.removeLast() }
+            if blocked || coarse { rankField.removeLast() }
             let rank = Int(rankField) ?? defaultRank
             let heard = fields.count > 2 ? fields[2].split(separator: ",").map {
                 $0.trimmingCharacters(in: .whitespaces).lowercased()
             }.filter { !$0.isEmpty } : []
-            return Entry(word: word, rank: rank, heard: heard, blocked: blocked)
+            return Entry(word: word, rank: rank, heard: heard, blocked: blocked, coarse: coarse)
         }
     }
 
@@ -84,8 +86,7 @@ public enum ModernVocabulary {
 
     /// The dictionary files the word as ordinary lowercase English ("amazon", "google").
     private static func isOrdinaryWord(_ lower: String) -> Bool {
-        guard let entry = WordList.shared?.lookup(lower) else { return false }
-        return entry.display == entry.display.lowercased()
+        CompiledVocabulary.ordinary.contains(lower)
     }
 
     /// One-word entries for the keyboard. A name the dictionary also files as an ordinary word
@@ -134,8 +135,11 @@ public enum ModernVocabulary {
         return keyboardEntries.filter { !$0.blocked && curated.contains($0.word.lowercased()) }.map { ($0.word, $0.rank) }
     }()
 
-    /// Lowercase keys of the swearing, sexual slang and slurs among them: never a typo's fix.
+    /// Lowercase keys of the sexual slang and slurs among them: never a typo's fix.
     public static let blockedWords: Set<String> = Set(keyboardEntries.filter(\.blocked).map { $0.word.lowercased() })
+
+    /// Lowercase keys of the everyday swearing among them.
+    public static let coarseWords: Set<String> = Set(keyboardEntries.filter(\.coarse).map { $0.word.lowercased() })
 
     /// Names of two or three words with a capital ("Micro Center", "Trader Joe's"), keyed by their
     /// words in lowercase without apostrophes, joined by single spaces. Each word alone is often
@@ -167,8 +171,16 @@ public enum ModernVocabulary {
     }()
 
     private static let spokenExpression: NSRegularExpression? = {
-        let alternation = spoken.keys.sorted { $0.count > $1.count }.map {
-            NSRegularExpression.escapedPattern(for: $0).replacingOccurrences(of: " ", with: #"[ \t]+"#)
+        // ICU otherwise tries the entire vocabulary at every eligible position in a long dictation.
+        // Forms sharing an initial retain their longest-first ordering, including a bare initial.
+        let formsByInitial = Dictionary(grouping: spoken.keys, by: { String($0.prefix(1)) })
+        let alternation = formsByInitial.keys.sorted().compactMap { initial -> String? in
+            guard let forms = formsByInitial[initial], !initial.isEmpty else { return nil }
+            let suffixes = forms.sorted { $0.count > $1.count }.map { form in
+                NSRegularExpression.escapedPattern(for: String(form.dropFirst()))
+                    .replacingOccurrences(of: " ", with: #"[ \t]+"#)
+            }
+            return NSRegularExpression.escapedPattern(for: initial) + "(?:" + suffixes.joined(separator: "|") + ")"
         }.joined(separator: "|")
         guard !alternation.isEmpty else { return nil }
         return try? NSRegularExpression(

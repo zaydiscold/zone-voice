@@ -46,6 +46,25 @@ final class KeyboardModel {
     private(set) var hasFullAccess = false
     /// Slots for the suggestion row; empty when no keyed word sits at the cursor or autocorrect is off.
     private(set) var suggestions: [Suggestion] = []
+    private(set) var emojiSuggestions: [EmojiSearchIndex.Match] = []
+    @ObservationIgnored private var emojiCode: (code: EmojiShortcode, session: String)?
+    @ObservationIgnored private var spacedEmojiWord: String?
+    private struct EmojiUndo {
+        let code: EmojiShortcode
+        let session: String
+        let emoji: String
+        let literal: String
+        let replaced: String
+        var predictionWord: String? = nil
+    }
+
+    @ObservationIgnored private var emojiUndo: EmojiUndo?
+    @ObservationIgnored private var emojiUndoDeadline: TimeInterval?
+    @ObservationIgnored private var emojiPending: (emoji: String?, closed: Bool, deadline: TimeInterval)?
+    @ObservationIgnored private var writingEmoji = false
+    private var dictationOwnsStrip = false
+    @ObservationIgnored private var emojiShownQuery: String?
+    @ObservationIgnored private var loadingEmojiSearch = false
     private(set) var preferences = KeyboardPreferences()
     /// Bumped when the accent changes while the keyboard is up, so the SwiftUI strip makes a new
     /// `KeyboardTheme` (its colors are statics SwiftUI cannot observe). `KeyboardRootView` reads
@@ -53,6 +72,11 @@ final class KeyboardModel {
     private(set) var appearanceVersion = 0
     /// The emoji panel has the keys' place (`EmojiPanelView`).
     private(set) var showsEmoji = false
+    /// Where the keys sit: full width, or narrowed toward one thumb (`OneHandedLayout`). Always full
+    /// while Settings has the one-handed keyboard off.
+    private(set) var hand: KeyboardHand = .full
+    /// The keyboard's own memory of `hand`, across apps and relaunches. Tests give it their own suite.
+    @ObservationIgnored var handMemory = LocalKeyboardHand()
 
     @ObservationIgnored private var lastPrefersNumbers: Bool?
     /// When the coalesced host reconciliation should run (`Date` seconds); nil when none is due.
@@ -78,10 +102,10 @@ final class KeyboardModel {
     /// A word was replaced by hand (original, replacement), whether or not it was learned: the
     /// unsure-word check counts the fix (`MicController.wordCorrectedByHand`).
     @ObservationIgnored var onWordCorrected: ((String, String) -> Void)?
-    @ObservationIgnored private var vocabularyWords: [String] = []
+    @ObservationIgnored private var vocabularyWords: [String]?
     @ObservationIgnored private var learnsFromCorrections = false
     @ObservationIgnored private var selectionRefreshRequested = false
-    private static let vocabularyQueue = DispatchQueue(label: "wtf.zayd.zone.vocabulary", qos: .utility)
+    static let vocabularyQueue = DispatchQueue(label: "wtf.zayd.zone.vocabulary", qos: .utility)
     /// Suggestions/host reconciliation can wait briefly; inserting a key never waits for them.
     static let advisoryDelay: TimeInterval = 0.075
     @ObservationIgnored private weak var proxy: TextProxyActions?
@@ -133,8 +157,17 @@ final class KeyboardModel {
     @ObservationIgnored var openURLFallback: ((URL) -> Void)?
 
     @ObservationIgnored private var swipeEngine: SwipeEngine?
+    @ObservationIgnored private var splitSwipeEngine: SwipeEngine?
+    /// The decoder that made the committed word owns later choices and corrections,
+    /// even if the keyboard folds between swiping and choosing the alternative.
+    @ObservationIgnored private weak var lastSwipeEngine: SwipeEngine?
+    @ObservationIgnored var swipeUptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    @ObservationIgnored private var awaitingEcho: SwipeCommit?
+    @ObservationIgnored private var swipeEchoDeadline: TimeInterval = 0
     @ObservationIgnored private var swipeCommit: SwipeCommit?
     @ObservationIgnored private var swipeCorrection = SelectedWordCorrection()
+    /// A whole word removed at this insertion point, available for the next trace only.
+    @ObservationIgnored private var swipeRetry: SwipeCommit?
     @ObservationIgnored private var deletedSwipe: SwipeCommit?
     @ObservationIgnored private var swipeReplacementLeading = ""
     @ObservationIgnored private var swipeReplacementStarted = false
@@ -156,14 +189,14 @@ final class KeyboardModel {
               SwipeLearning.key(word) != nil,
               // "thats" typed over a swipe means "that's": let the separator add the apostrophe.
               corrector?.isBareContraction(word) != true else { return false }
-        swipeEngine?.corrected(original.word, to: word, after: original.previousWord)
+        lastSwipeEngine?.corrected(original.word, to: word, after: original.previousWord)
         // Preserve this deliberate spelling at the boundary, before the worker has saved it.
         return true
     }
     @ObservationIgnored private var swipeAlternatives: [String] = []
     @ObservationIgnored private var swipeGeneration = 0
     @ObservationIgnored private var swipePending = false
-    @ObservationIgnored private var swipePendingContext: (session: String, before: String, after: String)?
+    @ObservationIgnored private var swipePendingContext: (session: String, before: String, after: String, preceding: SwipeCommit?)?
     @ObservationIgnored private var swipeContextEpoch = 0
     @ObservationIgnored private var deleteHeld = false
     @ObservationIgnored private var deleteHoldID = 0
@@ -191,8 +224,11 @@ final class KeyboardModel {
 
     /// Where a swiped word would land: the text around the insertion point and the selection it
     /// would replace. Nil when the host hides both.
-    private func swipeTarget() -> (before: String, after: String, selection: String)? {
+    private func swipeTarget(following preceding: SwipeCommit?, admitted: Bool = false) -> (before: String, after: String, selection: String)? {
         guard let proxy else { return nil }
+        if let preceding, waitingForSwipeEcho(preceding, admitted: admitted) {
+            return (preceding.before + preceding.leading + preceding.word, preceding.after, "")
+        }
         let selection = proxy.selectedText() ?? ""
         if let context = swipeContext() { return (context.before, context.after, selection) }
         // An address bar opens with its whole text selected and reports nothing on either side.
@@ -201,14 +237,14 @@ final class KeyboardModel {
     }
 
     var canSwipe: Bool {
-        preferences.swipeTypingEnabled && layer == .letters && !showsEmoji
+        preferences.swipeTypingEnabled && layer == .letters && !showsEmoji && emojiCode == nil
             && (proxy?.allowsSwipeTyping ?? false) && !UIAccessibility.isVoiceOverRunning
     }
 
     /// Do not capture a gesture that cannot safely produce input in this host field.
     /// Checked at touch-down only, so ordinary grid redraws do not query the host proxy.
     var canBeginSwipe: Bool {
-        canSwipe && proxy?.currentInputSession() != nil && swipeTarget() != nil
+        canSwipe && proxy?.currentInputSession() != nil && swipeTarget(following: swipeCommit) != nil
     }
 
     private func configureSwipe() {
@@ -217,13 +253,19 @@ final class KeyboardModel {
             // A decoder built in an earlier appearance is shared process-wide; swipe off frees it.
             SwipeEngine.releaseShared()
             swipeEngine = nil
+            splitSwipeEngine = nil
             return
         }
         if swipeEngine == nil { swipeEngine = SwipeEngine() }
-        swipeEngine?.configure(learns: preferences.swipeLearningEnabled,
+        configure(swipeEngine)
+        configure(splitSwipeEngine)
+    }
+
+    private func configure(_ engine: SwipeEngine?) {
+        engine?.configure(learns: preferences.swipeLearningEnabled,
             reset: preferences.swipeLearningReset,
-            personalWords: vocabularyWords + (systemLexicon?.swipeWords(keptLowercase: SpellingStore.learnedWords) ?? [])
-                + BuiltInVocabulary.names + SpellingStore.learnedWords.reversed())
+            personalWords: (vocabularyWords ?? []) + (systemLexicon?.swipeWords(keptLowercase: SpellingStore.learnedWords) ?? [])
+                + BuiltInVocabulary.names + SpellingStore.swipeableLearnedWords.reversed())
     }
 
     private func clearSwipeCommit() {
@@ -234,7 +276,9 @@ final class KeyboardModel {
 
     private func cancelSwipeInput() {
         cancelSwipeCorrection()
+        awaitingEcho = nil
         swipeGeneration += 1
+        swipeRetry = nil
         swipeContextEpoch += 1
         swipePending = false
         swipePendingContext = nil
@@ -244,19 +288,31 @@ final class KeyboardModel {
 
     private func ownsSwipe(_ commit: SwipeCommit) -> Bool {
         guard let proxy, let context = swipeContext() else { return false }
-        return commit.owns(session: proxy.currentInputSession(), before: context.before,
-                           after: context.after, selection: proxy.selectedText())
+        let owns = commit.owns(session: proxy.currentInputSession(), before: context.before,
+                               after: context.after, selection: proxy.selectedText())
+        if owns, awaitingEcho == commit { awaitingEcho = nil }
+        return owns
     }
 
-    func handleSwipe(_ points: [SwipePoint], layout: SwipeLayout, token: SwipeInputToken? = nil) {
+    func handleSwipe(_ points: [SwipePoint], layout: SwipeLayout, token: SwipeInputToken? = nil, split: Bool = false) {
         if let token, token != swipeInputToken { return }
         if swipePending {
-            swipeInputs.append { [weak self] in self?.handleSwipe(points, layout: layout, token: token) }
+            swipeInputs.append { [weak self] in self?.handleSwipe(points, layout: layout, token: token, split: split) }
             return
         }
-        guard canSwipe, let proxy, let engine = swipeEngine,
-              let session = proxy.currentInputSession(), let target = swipeTarget() else { return }
+        if split, canSwipe, splitSwipeEngine == nil {
+            splitSwipeEngine = SwipeEngine(split: true)
+            configure(splitSwipeEngine)
+        }
+        let preceding = swipeCommit
+        let delayed = preceding.flatMap { waitingForSwipeEcho($0) ? $0 : nil }
+        guard canSwipe, let proxy, let engine = split ? splitSwipeEngine : swipeEngine,
+              let session = proxy.currentInputSession(), let target = swipeTarget(following: delayed, admitted: true) else { return }
         let before = target.before, after = target.after
+        let retryOf = swipeRetry.flatMap {
+            $0.session == session && $0.before == before && $0.after == after && target.selection.isEmpty ? $0.word : nil
+        }
+        swipeRetry = nil
         cancelSwipeCorrection()
         clearSwipeCommit()
         keyedWord = ""
@@ -276,13 +332,13 @@ final class KeyboardModel {
         swipeGeneration += 1
         let generation = swipeGeneration
         swipePending = true
-        swipePendingContext = (session, before, after)
-        engine.decode(points, layout: layout, previous: previous) { [weak self] candidates in
+        swipePendingContext = (session, before, after, delayed)
+        engine.decode(points, layout: layout, previous: previous, retryOf: retryOf) { [weak self] candidates in
             guard let self, self.swipeGeneration == generation else { return }
             self.swipePending = false
             self.swipePendingContext = nil
             guard self.canSwipe, let proxy = self.proxy, proxy.currentInputSession() == session,
-                  let live = self.swipeTarget(), live == target else {
+                  let live = self.swipeTarget(following: delayed, admitted: true), live == target else {
                 // A host can move the cursor/field before delivering its callback. Pending
                 // actions belong to the original insertion point, never the destination.
                 self.cancelSwipeInput()
@@ -301,6 +357,7 @@ final class KeyboardModel {
                 // The earlier words are rewritten in place; the swipe owns only its own word.
                 var commitBefore = before, commitLeading = leading
                 if !locked, !lowercases, self.preferences.autocorrectEnabled,
+                   delayed.map({ self.waitingForSwipeEcho($0, admitted: true) }) != true,
                    let named = PhraseCasing.name(before: before + leading, word: words[0]),
                    named.prefixLength >= leading.count, named.prefixLength - leading.count <= before.count,
                    let last = named.name.split(separator: " ").last {
@@ -314,8 +371,11 @@ final class KeyboardModel {
                     proxy.insert(leading + words[0])
                 }
                 self.localContextTail = String((commitBefore + commitLeading + words[0]).suffix(64))
+                self.lastSwipeEngine = engine
                 self.swipeCommit = SwipeCommit(session: session, before: commitBefore, after: after,
                     leading: commitLeading, word: words[0], previousWord: previous)
+                self.awaitingEcho = self.swipeCommit.flatMap { self.ownsSwipe($0) ? nil : $0 }
+                self.swipeEchoDeadline = self.swipeUptime() + Self.echoWindow
                 self.swipeAlternatives = words
                 self.hasSwipeAlternatives = true
                 self.suggestions = words.map { Suggestion(text: $0, kind: .completion, autoApplies: false) }
@@ -329,10 +389,25 @@ final class KeyboardModel {
         }
     }
 
+    /// Some hosts echo the text from immediately before a swipe, or briefly expose no
+    /// left context. Keep the space for an insertion only. Replacing and deleting a word
+    /// always require the proxy to show that exact word at the cursor.
+    private func waitingForSwipeEcho(_ commit: SwipeCommit, admitted: Bool = false) -> Bool {
+        guard awaitingEcho == commit, let proxy else { return false }
+        if ownsSwipe(commit) { return false }
+        guard admitted || swipeUptime() < swipeEchoDeadline else { return false }
+        let reported = proxy.contextBefore() ?? ""
+        guard reported.isEmpty || reported == commit.before else { return false }
+        return proxy.currentInputSession() == commit.session && proxy.allowsSwipeTyping
+            && proxy.fieldHasText() && proxy.selectedText()?.isEmpty != false
+            && (proxy.contextAfter() ?? "") == commit.after
+    }
+
     /// Settle the owed space before a real edit; modifier taps leave the swipe available.
     private func settleSwipe(before text: String) {
         defer { clearSwipeCommit() }
-        guard let commit = swipeCommit, ownsSwipe(commit), SwipeSpacing.paysPendingSpace(before: text),
+        guard let commit = swipeCommit, SwipeSpacing.paysPendingSpace(before: text),
+              ownsSwipe(commit) || waitingForSwipeEcho(commit),
               !SwipeSpacing.isInsideToken(commit.before + commit.leading + commit.word), let proxy else { return }
         proxy.insert(" ")
         recordLocalInsertion(" ")
@@ -351,9 +426,9 @@ final class KeyboardModel {
         swipeCommit = commit
         localContextTail = String((commit.before + commit.leading + commit.word).suffix(64))
         if original.lowercased() == suggestion.text.lowercased() {
-            swipeEngine?.chose(suggestion.text, after: commit.previousWord)
+            lastSwipeEngine?.chose(suggestion.text, after: commit.previousWord)
         } else {
-            swipeEngine?.corrected(original, to: suggestion.text, after: commit.previousWord)
+            lastSwipeEngine?.corrected(original, to: suggestion.text, after: commit.previousWord)
         }
         feedback.keyDown()
         afterEdit()
@@ -369,15 +444,26 @@ final class KeyboardModel {
 
     @ObservationIgnored private let systemLexiconStore: SystemLexiconStore?
 
-    init(proxy: TextProxyActions, systemLexiconStore: SystemLexiconStore? = .shared) {
+    @ObservationIgnored private let vocabularyStore: @Sendable () -> PersonalVocabulary?
+
+    init(proxy: TextProxyActions?, systemLexiconStore: SystemLexiconStore? = .shared,
+         vocabulary: @escaping @Sendable () -> PersonalVocabulary? = { .shared }) {
+        self.vocabularyStore = vocabulary
         self.proxy = proxy
         self.systemLexiconStore = systemLexiconStore
         self.feedback = KeyFeedback(proxy: proxy)
     }
 
+    /// Supply only what the read-only Settings grid draws. It needs no host or decoder.
+    func displayPreview(_ preferences: KeyboardPreferences) {
+        self.preferences = preferences
+        hasFullAccess = true
+        shift = preferences.autoCapitalizationEnabled ? .on : .off
+    }
+
     var rows: [[Key]] {
         KeyboardLayout.rows(for: layer, shifted: shift.isActive, needsGlobe: needsGlobe,
-                            pasteKey: preferences.showsPasteKey && hasFullAccess,
+                            pasteKey: preferences.showsPasteKey,
                             emojiKey: preferences.showsEmojiKey, fieldKeys: fieldKeys)
     }
 
@@ -390,6 +476,7 @@ final class KeyboardModel {
             cursorToken = nil
             cancelSwipeInput()
             pendingTouchLesson = nil
+            resetEmojiCode()
             fieldSession = session
             appearanceOutdated = false
             correctionLearning.cancel()
@@ -434,13 +521,19 @@ final class KeyboardModel {
     /// Called from the host's textDidChange. The keyboard's own edits already refreshed the shift
     /// state and suggestions; a host that reports them back on the same turn is not handled twice.
     func hostTextDidChange() {
+        guard !writingEmoji else { return }
         if let token = cursorToken, ownsCursor(token) {
             hostChangedDuringCursor(token)
             return
         }
         // Only an echo of our own edit in the same field is skipped; a Return that moved the host
         // to another field still refreshes the layout and traits.
+        if let commit = swipeCommit, waitingForSwipeEcho(commit) {
+            afterEdit()
+            return
+        }
         if consumeOwnEditEcho() { return }
+        resetEmojiCode()
         pendingTouchLesson = nil
         // Some hosts (including Messages) report selection changes only through textDidChange.
         // Inspect selection on this external host notification, coalesced with context work;
@@ -454,6 +547,7 @@ final class KeyboardModel {
     }
 
     func hostSelectionDidChange() {
+        guard !writingEmoji else { return }
         if let token = cursorToken, ownsCursor(token) {
             hostChangedDuringCursor(token)
             return
@@ -461,7 +555,11 @@ final class KeyboardModel {
         #if DEBUG
         KeyboardLog.typing.info("selection callback pendingOwnEdits=\(self.pendingOwnEdits, privacy: .public)")
         #endif
+        if let last = swipeCommit ?? swipePendingContext?.preceding, !ownsSwipe(last) {
+            cancelSwipeInput()
+        }
         if consumeOwnEditEcho() { return }
+        resetEmojiCode()
         cancelSwipeInput()
         pendingTouchLesson = nil
         lastSmartRewrite = nil
@@ -508,12 +606,18 @@ final class KeyboardModel {
         // Hosts may emit more than one callback for a single insertion or replacement.
         // Fresh ownership, rather than an estimated callback count, preserves swipe state.
         let pendingStillOwned = swipePendingContext.map { snapshot in
+            if let preceding = snapshot.preceding, waitingForSwipeEcho(preceding, admitted: true) { return true }
             guard let proxy, let live = swipeContext() else { return false }
             return proxy.currentInputSession() == snapshot.session
                 && live.before == snapshot.before && live.after == snapshot.after
                 && proxy.selectedText()?.isEmpty != false
         } ?? false
-        if pendingStillOwned || swipeCommit.map({ ownsSwipe($0) }) == true {
+        let retryStillOwned = swipeRetry.map { retry in
+            guard let proxy, let context = swipeContext() else { return false }
+            return proxy.currentInputSession() == retry.session && proxy.selectedText()?.isEmpty != false
+                && context.before == retry.before && context.after == retry.after
+        } ?? false
+        if pendingStillOwned || retryStillOwned || swipeCommit.map({ ownsSwipe($0) }) == true {
             pendingOwnEdits = max(0, pendingOwnEdits - 1)
             selectionRefreshRequested = true
             afterEdit()
@@ -527,6 +631,29 @@ final class KeyboardModel {
         }
         // Swipe ownership and a gesture in progress must be invalidated before lift, even
         // when a cursor change arrives inside the own-edit echo window.
+        if let target = emojiCode, let proxy {
+            let before = proxy.contextBefore(), after = proxy.contextAfter(), selection = proxy.selectedText()
+            let literal = target.code.literal + (emojiPending?.closed == true ? ":" : "")
+            if proxy.currentInputSession() == target.session,
+               target.code.couldBeEcho(of: literal, before: before, after: after, selection: selection) {
+                pendingOwnEdits -= 1
+                afterEdit()
+                return true
+            }
+            pendingOwnEdits = 0
+            return false
+        }
+        if let undo = emojiUndo, let proxy, proxy.currentInputSession() == undo.session {
+            let before = proxy.contextBefore(), after = proxy.contextAfter(), selection = proxy.selectedText()
+            if undo.code.owns(undo.emoji, before: before, after: after, selection: selection)
+                || undo.code.couldBeEcho(of: undo.replaced, before: before, after: after, selection: selection) {
+                pendingOwnEdits -= 1
+                afterEdit()
+                return true
+            }
+            pendingOwnEdits = 0
+            return false
+        }
         if preferences.swipeTypingEnabled, let proxy, let expected = localContextTail {
             let before = proxy.contextBefore()
             let mismatches = before.map { current in
@@ -549,6 +676,21 @@ final class KeyboardModel {
         return true
     }
 
+    private(set) var pasteAccessHint: UUID?
+    static let pasteAccessMessage = "Turn on Full Access to paste."
+
+    func explainPasteAccess() {
+        guard !hasFullAccess else { return }
+        UIAccessibility.post(notification: .announcement, argument: Self.pasteAccessMessage)
+        guard !dictationOwnsStrip else { return }
+        let token = UUID()
+        pasteAccessHint = token
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            if self?.pasteAccessHint == token { self?.pasteAccessHint = nil }
+        }
+    }
+
     /// Full Access can invoke TCC IPC. Refresh only on appearance, not host text echoes or touches.
     func refreshFullAccess(reloadVocabulary: Bool = true) {
         let granted = proxy?.hasOpenAccess ?? false
@@ -556,11 +698,15 @@ final class KeyboardModel {
         set(\.hasFullAccess, granted)
         feedback.hasFullAccess = granted
         guard changed else { return }
+        SpellingStore.refreshSharedLearning(fullAccess: granted, store: vocabularyStore)
         if granted {
+            pasteAccessHint = nil
             persistSystemLexicon()
             // Permission can become reliable only in viewDidAppear, after apply ran.
             if reloadVocabulary { refreshPersonalWordProtection() }
         } else {
+            vocabularyReadPending = false
+            vocabularyGeneration += 1
             correctionLearning.cancel()
             dictatedCorrection.cancel()
             learnsFromCorrections = false
@@ -580,6 +726,7 @@ final class KeyboardModel {
         self.preferences = preferences
         configureSwipe()
         if !preferences.showsEmojiKey { set(\.showsEmoji, false) }
+        set(\.hand, handMemory.resolve(preferences))
         if !preferences.autocorrectEnabled || !preferences.showSuggestions {
             suggestionWord = nil
             suggestionSession = nil
@@ -591,13 +738,18 @@ final class KeyboardModel {
             SpellingStore.load { [weak self] corrector in
                 guard let self else { return }
                 self.corrector = corrector
+                SpellingStore.keptSlipsChanged = { [weak self] in self?.configureSwipe() }
                 if let letters = self.spaceBarLetters { corrector?.spaceBarLetters = letters }
                 if let lexicon = self.systemLexicon {
                     corrector?.setSystemLexicon(names: lexicon.names, replacements: lexicon.replacements)
                 }
-                self.refreshPersonalWordProtection()
+                // The appearance read sets the current corrector when it finishes. If it
+                // already finished, install its words on the newly loaded corrector now.
+                if let words = self.vocabularyWords { corrector?.setPersonalWords(words) }
                 self.afterEdit()
             }
+        } else if preferences.autocorrectEnabled {
+            SpellingStore.retryMissingContext()
         }
         afterEdit()
     }
@@ -640,7 +792,9 @@ final class KeyboardModel {
 
     /// Internal so `viewDidAppear` can read the words again once access has settled.
     func refreshPersonalWordProtection() {
+        SpellingStore.refreshSharedLearning(fullAccess: hasFullAccess, store: vocabularyStore)
         guard hasFullAccess else {
+            vocabularyReadPending = false
             vocabularyGeneration += 1
             correctionLearning.cancel()
             dictatedCorrection.cancel()
@@ -653,12 +807,28 @@ final class KeyboardModel {
         // size cap and a coordinated read on the main thread delayed the keyboard appearing.
         // The same serial queue runs the correction writer, so a read never passes a write;
         // until it lands the corrector keeps the words it already had.
+        // An appearance asks two or three times in a row; they share the read already on its way.
+        // What a shared request is owed is decided when that read lands (`refreshAskedDuringRead`).
+        if vocabularyReadPending {
+            refreshAskedDuringRead = true
+            return
+        }
+        vocabularyReadPending = true
+        refreshAskedDuringRead = false
         vocabularyGeneration += 1
         let generation = vocabularyGeneration
-        Self.vocabularyQueue.async { [weak self] in
+        Self.vocabularyQueue.async { [weak self, vocabularyStore] in
+            let vocabulary = vocabularyStore()
+            // Taken before the read, so a write that lands during it shows as a change afterwards.
+            let stamp = vocabulary.flatMap(Self.vocabularyStamp)
             // A read that fails (container not reachable yet, coordination error) is not an empty
             // dictionary: keep the words already loaded instead of unprotecting every one of them.
-            guard let vocabulary = PersonalVocabulary.shared, let document = try? vocabulary.document() else {
+            guard let vocabulary, let document = try? vocabulary.document() else {
+                DispatchQueue.main.async {
+                    guard let self, self.vocabularyGeneration == generation else { return }
+                    self.vocabularyReadPending = false
+                    if self.refreshAskedDuringRead { self.refreshPersonalWordProtection() }
+                }
                 KeyboardLog.typing.error("personal words unreadable; keeping the loaded ones")
                 return
             }
@@ -667,18 +837,58 @@ final class KeyboardModel {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, self.vocabularyGeneration == generation, self.hasFullAccess else { return }
+                    self.vocabularyReadPending = false
                     self.vocabularyWords = words
                     self.configureSwipe()
                     self.learnsFromCorrections = learns
                     self.corrector?.setPersonalWords(words)
+                    // Someone asked while this read was on its way. It may have read the file
+                    // before a change they knew of (words restored from a backup, a word added in
+                    // Zone), so look at the file again, and decode it again only if it changed.
+                    if self.refreshAskedDuringRead {
+                        self.refreshAskedDuringRead = false
+                        self.rereadVocabularyIfChanged(since: stamp, generation: generation)
+                    }
                 }
             }
         }
     }
 
-    @ObservationIgnored private var vocabularyGeneration = 0
+    /// The dictionary file as it was at one moment: enough to tell that it was written since,
+    /// without reading it. Every save replaces the file, so its number and date both move.
+    private struct VocabularyStamp: Equatable, Sendable {
+        var path: String
+        var file: Int?
+        var modified: Date?
+        var size: Int?
+    }
+
+    private nonisolated static func vocabularyStamp(_ vocabulary: PersonalVocabulary) -> VocabularyStamp? {
+        let url = vocabulary.storeURL
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+        return VocabularyStamp(path: url.path, file: (attributes[.systemFileNumber] as? NSNumber)?.intValue,
+                               modified: attributes[.modificationDate] as? Date, size: (attributes[.size] as? NSNumber)?.intValue)
+    }
+
+    private func rereadVocabularyIfChanged(since stamp: VocabularyStamp?, generation: Int) {
+        Self.vocabularyQueue.async { [weak self, vocabularyStore] in
+            guard vocabularyStore().flatMap(Self.vocabularyStamp) != stamp else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.vocabularyGeneration == generation, !self.vocabularyReadPending else { return }
+                    self.refreshPersonalWordProtection()
+                }
+            }
+        }
+    }
+
+    @ObservationIgnored private var vocabularyReadPending = false
+    /// A refresh was asked for while a read was already on its way.
+    @ObservationIgnored private var refreshAskedDuringRead = false
+    @ObservationIgnored private(set) var vocabularyGeneration = 0
 
     func keyboardWillDisappear() {
+        resetEmojiCode()
         cursorToken = nil
         cancelSwipeInput()
         swipeEngine = nil
@@ -714,7 +924,8 @@ final class KeyboardModel {
         let id = UUID()
         let session: String
     }
-    @ObservationIgnored private var cursorToken: CursorToken? {
+    var movingCursor: Bool { cursorToken != nil }
+    private var cursorToken: CursorToken? {
         didSet { if cursorToken == nil { cursorContext = nil } }
     }
     /// The text around the caret as this drag last knew it, advanced locally after each step so
@@ -814,6 +1025,7 @@ final class KeyboardModel {
     /// Queue behind any word already being decoded. Moving the cursor must not discard it,
     /// or pay its phantom space at the new insertion point.
     func beginCursorControl() -> CursorToken? {
+        resetEmojiCode()
         guard let session = proxy?.currentInputSession() else { return nil }
         let token = CursorToken(session: session)
         performCursorInput { [weak self] in
@@ -1042,24 +1254,45 @@ final class KeyboardModel {
     ///   - touch: where a letter's tap landed on its key (see `KeyTouch`), if known, after the
     ///     learned touch offsets.
     ///   - raw: the same tap before the learned offsets, for learning them.
-    func handleTap(_ key: Key, touch: KeyTouch? = nil, raw: KeyTouch? = nil) {
+    func handleTap(_ key: Key, touch: KeyTouch? = nil, raw: KeyTouch? = nil, trainOffsets: Bool = true) {
         if swipePending {
-            swipeInputs.append { [weak self] in self?.handleTap(key, touch: touch, raw: raw) }
+            swipeInputs.append { [weak self] in self?.handleTap(key, touch: touch, raw: raw, trainOffsets: trainOffsets) }
             return
         }
-        KeyTrace.measure("key") { perform(key, touch: touch, raw: raw) }
+        KeyTrace.measure("key") { perform(key, touch: touch, raw: raw, trainOffsets: trainOffsets) }
     }
 
-    private func perform(_ key: Key, touch: KeyTouch?, raw: KeyTouch? = nil) {
+    private func perform(_ key: Key, touch: KeyTouch?, raw: KeyTouch? = nil, trainOffsets: Bool = true) {
         guard let proxy else { return }
+        swipeRetry = nil
         markOwnEdit()
         lastSmartRewrite = nil
+        switch key {
+        case .shift, .switchLayer:
+            break
+        default:
+            if emojiUndoDeadline != nil { _ = restoreEmojiIfOwned(waitForEcho: false) }
+            emojiUndo = nil
+            if emojiPending != nil {
+                refreshEmojiCode()
+                if emojiPending != nil { resetEmojiCode() }
+                emojiUndo = nil
+            }
+        }
+        if case .character = key { spacedEmojiWord = nil }
         switch key {
         case .character(let drawn):
             // Keys capture their character when drawn; two taps inside one frame after shift changes
             // would type the stale case ("EH"), so the shift state at the moment of the tap decides.
             let keyed = layer == .letters ? (shift.isActive ? drawn.uppercased() : drawn.lowercased()) : drawn
             settleSwipe(before: keyed)
+            if typeEmojiCode(keyed, proxy: proxy) {
+                if shift == .on { shift = .off }
+                manualShiftPending = false
+                applyAutoShift(before: localContextTail)
+                afterEdit()
+                return
+            }
             let smart = smartChange(typing: keyed)
             // A quote that only changes shape takes the ordinary path with the curly character.
             let text = smart.flatMap { $0.deleteCount == 0 ? $0.insert : nil } ?? keyed
@@ -1100,7 +1333,9 @@ final class KeyboardModel {
                     keyedWord += text
                     if lined, text.utf8.count == 1 {
                         keyedTouches.append(touch ?? .center)
-                        keyedRawTouches.append(raw ?? touch ?? .center)
+                        if trainOffsets, keyedRawTouches.count == keyedTouches.count - 1 {
+                            keyedRawTouches.append(raw ?? touch ?? .center)
+                        }
                     }
                 } else {
                     keyedWord = ""
@@ -1113,6 +1348,9 @@ final class KeyboardModel {
             applyAutoShift(before: localContextTail)
             afterEdit()
         case .space:
+            let completed = swipeCommit?.word ?? keyedWord
+            resetEmojiCode()
+            spacedEmojiWord = completed.isEmpty ? nil : completed
             settleSwipe(before: " ")
             let now = Date()
             if let smart = smartChange(typing: " "), smart.deleteCount > 0 {
@@ -1133,6 +1371,7 @@ final class KeyboardModel {
             applyAutoShift(before: localContextTail)
             afterEdit()
         case .newline:
+            resetEmojiCode()
             settleSwipe(before: "\n")
             if let smart = smartChange(typing: "\n"), smart.deleteCount > 0 { applySmartRewrite(smart) }
             else { commitSeparator("\n") }
@@ -1146,18 +1385,65 @@ final class KeyboardModel {
             layer = target
             if target == .letters { applyAutoShift(before: proxy.contextBefore()) }
         case .globe:
+            resetEmojiCode()
             proxy.advanceToNextInputMode()
         case .paste:
-            if let text = UIPasteboard.general.string, !text.isEmpty { insertPasted(text) }
+            // The system paste control owns this action on both faces.
+            break
         case .emoji:
+            resetEmojiCode()
             showsEmoji = true
         case .mic:
             break
         }
     }
 
+    /// Moves the keys (the hold-123 picker, the side panel's buttons, VoiceOver). Does nothing while
+    /// Settings has the one-handed keyboard off, so no gesture can turn it on by accident.
+    func chooseHand(_ hand: KeyboardHand) {
+        guard preferences.oneHandedEnabled, hand != self.hand else { return }
+        handMemory.choose(hand)
+        self.hand = hand
+        KeyboardLog.typing.info("one-handed: \(hand.rawValue, privacy: .public)")
+    }
+
     /// A tap on a suggestion slot. The typed literal is kept and remembered; anything else replaces it.
     func choose(_ suggestion: Suggestion) {
+        if case let .emoji(anchor, word, spaced, session) = suggestion.kind {
+            guard suggestions.contains(suggestion), let proxy, allowsEmojiCode(proxy), preferences.emojiPredictions,
+                  preferences.showSuggestions, proxy.allowsAutocorrection, proxy.currentInputSession() == session else { return }
+            guard spaced ? spacedEmojiWord == word : (swipeCommit?.word ?? keyedWord) == word else { return }
+            let source = spaced ? word + " " : word
+            let before = proxy.contextBefore(), after = proxy.contextAfter()
+            guard anchor.owns(source, before: before, after: after, selection: proxy.selectedText()),
+                  proxy.currentInputSession() == session else { return }
+            let undoAnchor: EmojiShortcode
+            if spaced {
+                guard let appendAnchor = EmojiShortcode(before: before, after: after, selection: nil, hasText: true) else { return }
+                undoAnchor = appendAnchor
+            } else {
+                undoAnchor = anchor
+            }
+            proxy.userTouchedKeyboard()
+            feedback.keyDown()
+            resetEmojiCode()
+            clearSwipeCommit()
+            cancelSwipeCorrection()
+            correctionLearning.cancel()
+            dictatedCorrection.cancel()
+            keyedWord = ""
+            lastCorrection = nil
+            keptAfterRevert = nil
+            lastSpaceAt = nil
+            pendingTouchLesson = nil
+            writeEmojiEdit(deleteCount: spaced ? 0 : word.count, insert: suggestion.text)
+            emojiUndo = EmojiUndo(code: undoAnchor, session: session, emoji: suggestion.text,
+                                  literal: spaced ? "" : word, replaced: spaced ? "" : word, predictionWord: word)
+            EmojiStore.use(suggestion.text)
+            afterEdit()
+            return
+        }
+        resetEmojiCode()
         if chooseSwipe(suggestion) { return }
         cancelSwipeCorrection()
         if let target = selectedWordTarget {
@@ -1197,6 +1483,8 @@ final class KeyboardModel {
         dictatedCorrection.cancel()
         feedback.keyDown()
         if suggestion.kind == .literal, SpellingStore.learn(current) { configureSwipe() }
+        // The everyday word taken over a kept slip ("baby" over a kept "bsby"): the slip goes.
+        if suggestion.kind == .correction, SpellingStore.forgetKeptSlip(current, replacedBy: suggestion.text) { configureSwipe() }
         apply(edit)
         keyedWord = ""
         lastCorrection = nil
@@ -1212,9 +1500,25 @@ final class KeyboardModel {
 
     private func pressDelete() {
         guard let proxy else { return }
+        swipeRetry = nil
         markOwnEdit(echoes: Self.echoesPerDelete)
+        if emojiUndo != nil, restoreEmojiIfOwned(waitForEcho: true) {
+            startDeleteRepeat()
+            return
+        }
+        if emojiPending != nil { resetEmojiCode() }
+        if let target = emojiCode {
+            var code = target.code
+            if code.removeLast() { emojiCode = (code, target.session) }
+            else { resetEmojiCode() }
+            if !emojiSuggestions.isEmpty { emojiSuggestions = [] }
+            // The picker is now empty, so no query is on screen. Without this, `:fi`, Delete, `i`
+            // matched the remembered "fi" and `refreshEmojiCode` left the picker closed.
+            emojiShownQuery = nil
+        }
         if let commit = swipeCommit, ownsSwipe(commit) {
             cancelSwipeCorrection()
+            swipeRetry = commit
             if preferences.swipeLearningEnabled {
                 deletedSwipe = commit
                 swipeReplacementLeading = commit.leading
@@ -1294,6 +1598,8 @@ final class KeyboardModel {
             var repeats = 0
             while !Task.isCancelled {
                 guard let self, let proxy = self.proxy else { return }
+                self.resetEmojiCode()
+                self.swipeRetry = nil
                 self.correctionLearning.cancel()
                 self.cancelSwipeCorrection()
                 // Each repeat is our own edit: without this every echo of a held delete ran a
@@ -1503,13 +1809,14 @@ final class KeyboardModel {
         }
         // The separator must not autocorrect the deliberately authored replacement before
         // its asynchronous vocabulary write finishes. This protection is not a permanent learn.
-        corrector?.setPersonalWords(PersonalVocabulary.normalized([word] + vocabularyWords))
-        Self.vocabularyQueue.async { [weak self] in
+        if let vocabularyWords { corrector?.setPersonalWords(PersonalVocabulary.normalized([word] + vocabularyWords)) }
+        Self.vocabularyQueue.async { [weak self, vocabularyStore] in
             do {
-                guard let vocabulary = PersonalVocabulary.shared else { return }
+                guard let vocabulary = vocabularyStore() else { return }
                 try vocabulary.learnCorrection(word, heard: heard)
                 let words = try vocabulary.document().appliedWords
                 DispatchQueue.main.async {
+                    guard self?.hasFullAccess == true else { return }
                     self?.vocabularyWords = words
                     self?.corrector?.setPersonalWords(words)
                     // Swipe knows the new word at once, as typing does.
@@ -1522,8 +1829,13 @@ final class KeyboardModel {
     /// `before` is the context read once for this edit; the text after the cursor is read only when
     /// a keyed word could be at the cursor, because each read is a round trip to the host.
     private func refreshSuggestions(before: String?) {
+        if emojiCode != nil {
+            if !suggestions.isEmpty { suggestions = [] }
+            return
+        }
         if let commit = swipeCommit, ownsSwipe(commit) {
-            suggestions = swipeAlternatives.map { Suggestion(text: $0, kind: .completion, autoApplies: false) }
+            let words = swipeAlternatives.map { Suggestion(text: $0, kind: .completion, autoApplies: false) }
+            suggestions = withEmoji(words, word: commit.word, before: before, spaced: false)
             return
         }
         clearSwipeCommit()
@@ -1565,7 +1877,29 @@ final class KeyboardModel {
             suggestionSession = proxy?.currentInputSession()
             next = casedPredictions()
         }
+        if !keyedWord.isEmpty {
+            next = withEmoji(next, word: keyedWord, before: before, spaced: false)
+        } else if let spacedEmojiWord {
+            next = withEmoji(next, word: spacedEmojiWord, before: before, spaced: true)
+        }
         if next != suggestions { suggestions = next }
+    }
+
+    /// An exact word owns its emoji only at the caret where it was offered.
+    private func withEmoji(_ words: [Suggestion], word: String, before: String?, spaced: Bool) -> [Suggestion] {
+        guard preferences.emojiPredictions, preferences.showSuggestions,
+              let proxy, proxy.allowsAutocorrection, allowsEmojiCode(proxy), let before, let session = proxy.currentInputSession(),
+              EmojiSearchIndex.mayPredict(word) else { return words }
+        let source = spaced ? word + " " : word
+        guard before.hasSuffix(source),
+              let anchor = EmojiShortcode(before: String(before.dropLast(source.count)), after: proxy.contextAfter(),
+                                          selection: proxy.selectedText(), hasText: true) else { return words }
+        guard let index = EmojiStore.search else { loadEmojiSearchIfNeeded(); return words }
+        guard let hit = index.prediction(word, history: EmojiStore.history) else { return words }
+        var candidates = words
+        let emoji = Suggestion(text: shownEmoji(hit), kind: .emoji(anchor: anchor, word: word, spaced: spaced, session: session))
+        candidates.insert(emoji, at: min(1, candidates.count))
+        return candidates
     }
 
     // MARK: Next-word predictions
@@ -1651,11 +1985,16 @@ final class KeyboardModel {
 
     /// The compact face's Paste key: inserts the clipboard as the keyboard's own edit, ending
     /// any word in progress so autocorrect never rewrites pasted text.
+    /// Clipboard history's part in every paste: bound at the tap, told the text after it is in
+    /// the field (`PasteSaving`).
+    @ObservationIgnored var pasteSaving: PasteSaving?
+
     func insertPasted(_ text: String) {
         if swipePending { swipeInputs.append { [weak self] in self?.insertPasted(text) }; return }
         cancelSwipeCorrection()
         settleSwipe(before: text)
         guard let proxy else { return }
+        resetEmojiCode()
         pendingTouchLesson = nil
         markOwnEdit()
         keyedWord = ""
@@ -1680,6 +2019,7 @@ final class KeyboardModel {
     /// An emoji from the panel. Like a paste, it ends any word in progress, so autocorrect never
     /// rewrites across it.
     func insertEmoji(_ text: String) {
+        resetEmojiCode()
         if swipePending { swipeInputs.append { [weak self] in self?.insertEmoji(text) }; return }
         cancelSwipeCorrection()
         settleSwipe(before: text)
@@ -1736,13 +2076,17 @@ final class KeyboardModel {
     private func reconcileContext() {
         reconcileDeadline = nil
         guard cursorToken == nil else { return }
+        if let commit = swipeCommit, waitingForSwipeEcho(commit) {
+            afterEdit()
+            return
+        }
         KeyTrace.measure("reconcile") {
             let before = proxy?.contextBefore()
             if let before, let expected = localContextTail, !expected.isEmpty,
                !before.hasSuffix(expected), !expected.hasSuffix(before) {
                 cancelSwipeInput()
             }
-            if let before { localContextTail = String(before.suffix(64)) }
+            if let before, emojiCode == nil { localContextTail = String(before.suffix(64)) }
             // The caret moved somewhere the host will not describe: the remembered tail belongs
             // to the old place, and unknown is the honest answer.
             else if selectionRefreshRequested, proxy?.fieldHasText() == true { localContextTail = nil }
@@ -1779,9 +2123,11 @@ final class KeyboardModel {
                 }
             }
             // A host may echo an older edit. Do not relatch Shift while our new word is absent.
-            if keyedWord.isEmpty || before?.hasSuffix(keyedWord) == true {
+            if emojiCode == nil, keyedWord.isEmpty || before?.hasSuffix(keyedWord) == true {
                 applyAutoShift(before: before)
             }
+            if emojiUndoDeadline != nil { _ = restoreEmojiIfOwned(waitForEcho: true) }
+            refreshEmojiCode()
             refreshSuggestions(before: before)
             if let proxy { set(\.returnEnabled, !proxy.dimsReturnWhenEmpty || proxy.fieldHasText()) }
         }
@@ -1833,6 +2179,7 @@ final class KeyboardModel {
     /// A dictation landed: it used a one-shot Shift as a typed letter would, and the next Shift
     /// follows the text it left.
     func dictationInserted(_ text: String) {
+        resetEmojiCode()
         dictatedCorrection.begin(inserted: text, contextBefore: proxy?.contextBefore(), session: proxy?.currentInputSession())
         cancelSwipeInput()
         pendingTouchLesson = nil
@@ -1845,6 +2192,20 @@ final class KeyboardModel {
         lastSpaceAt = nil
         localContextTail = nil
         if shift == .on { shift = .off }
+        manualShiftPending = false
+        applyAutoShift(before: proxy?.contextBefore())
+    }
+
+    /// The mic took a dictation back out (Undo, "Scratch that"). Shift follows the text that is
+    /// left, as it does after a delete key: an emptied field or a finished sentence gets its
+    /// capital again.
+    func dictationRemoved() {
+        resetEmojiCode()
+        dictatedCorrection.cancel()
+        cancelSwipeInput()
+        keyedWord = ""
+        lastCorrection = nil
+        localContextTail = nil
         manualShiftPending = false
         applyAutoShift(before: proxy?.contextBefore())
     }
@@ -1877,7 +2238,10 @@ final class KeyboardModel {
     /// The row's predictions follow Shift the moment it is tapped, as the keys do.
     private func recasePredictions() {
         guard predictionTail != nil, suggestions.contains(where: { $0.kind == .prediction }) else { return }
-        let next = casedPredictions()
+        var next = casedPredictions()
+        if let spacedEmojiWord {
+            next = withEmoji(next, word: spacedEmojiWord, before: localContextTail, spaced: true)
+        }
         if next != suggestions { suggestions = next }
     }
 
@@ -1899,5 +2263,206 @@ final class KeyboardModel {
 
     nonisolated static func startsSentence(after context: String) -> Bool {
         SentenceBoundary.startsSentenceWhileTyping(after: context)
+    }
+}
+
+
+private extension KeyboardModel {
+    func resetEmojiCode() {
+        spacedEmojiWord = nil
+        emojiCode = nil
+        emojiUndo = nil
+        emojiUndoDeadline = nil
+        emojiPending = nil
+        emojiShownQuery = nil
+        if !emojiSuggestions.isEmpty { emojiSuggestions = [] }
+    }
+
+    func allowsEmojiCode(_ proxy: TextProxyActions) -> Bool {
+        proxy.allowsEmojiShortcodes && !showsEmoji && !dictationOwnsStrip
+    }
+
+    /// Only the opening colon reads the host on the typing path. Subsequent taps have the same
+    /// latency as ordinary letters, and lookups run after the burst of keystrokes.
+    func typeEmojiCode(_ key: String, proxy: TextProxyActions) -> Bool {
+        if var target = emojiCode {
+            if key == ":" {
+                if target.code.isSearchable, allowsEmojiCode(proxy),
+                   proxy.currentInputSession() == target.session {
+                    let index = EmojiStore.search
+                    let emoji = index?.exact(target.code.query)
+                    if let emoji, replaceEmojiCode(emoji, closed: false, restoreClosingColon: true) { return true }
+                    if index == nil || emoji != nil { queueEmojiReplacement(emoji, closed: true) }
+                    else { resetEmojiCode() }
+                    proxy.insert(key)
+                    recordLocalInsertion(key)
+                    return true
+                }
+            } else if target.code.append(key) {
+                emojiCode = target
+                if target.code.isSearchable { loadEmojiSearchIfNeeded() }
+                proxy.insert(key)
+                recordLocalInsertion(key)
+                return true
+            }
+            resetEmojiCode()
+        }
+        guard key == ":", allowsEmojiCode(proxy), let session = proxy.currentInputSession(),
+              let code = EmojiShortcode(before: proxy.contextBefore(), after: proxy.contextAfter(),
+                                       selection: proxy.selectedText(), hasText: proxy.fieldHasText())
+        else { return false }
+        flushTouchLesson()
+        cancelSwipeCorrection()
+        correctionLearning.cancel()
+        dictatedCorrection.cancel()
+        keyedWord = ""
+        lastSpaceAt = nil
+        lastCorrection = nil
+        keptAfterRevert = nil
+        selectedWordTarget = nil
+        emojiCode = (code, session)
+        if !suggestions.isEmpty { suggestions = [] }
+        proxy.insert(key)
+        recordLocalInsertion(key)
+        return true
+    }
+
+    func queueEmojiReplacement(_ emoji: String?, closed: Bool) {
+        emojiPending = (emoji, closed, ProcessInfo.processInfo.systemUptime + 0.35)
+        if !emojiSuggestions.isEmpty { emojiSuggestions = [] }
+        afterEdit()
+    }
+
+    func loadEmojiSearchIfNeeded() {
+        guard EmojiStore.search == nil, !loadingEmojiSearch else { return }
+        loadingEmojiSearch = true
+        EmojiStore.loadSearch { [weak self] in
+            guard let self else { return }
+            self.loadingEmojiSearch = false
+            if EmojiStore.search == nil { self.resetEmojiCode() }
+            else { self.afterEdit() }
+        }
+    }
+
+    func refreshEmojiCode() {
+        guard let target = emojiCode, target.code.isSearchable, let proxy else { return }
+        guard allowsEmojiCode(proxy), proxy.currentInputSession() == target.session else {
+            resetEmojiCode()
+            return
+        }
+        guard let search = EmojiStore.search else {
+            loadEmojiSearchIfNeeded()
+            return
+        }
+        if let pending = emojiPending {
+            let base = pending.emoji ?? search.exact(target.code.query)
+            if let base, replaceEmojiCode(base, closed: pending.closed, restoreClosingColon: pending.closed) { return }
+            if base != nil, ProcessInfo.processInfo.systemUptime < pending.deadline {
+                afterEdit()
+            } else {
+                resetEmojiCode()
+            }
+            return
+        }
+        // Keep showing matches while a web editor catches up. The destructive path below
+        // always rechecks live text, selection, and field identity.
+        guard target.code.query != emojiShownQuery else { return }
+        emojiShownQuery = target.code.query
+        let hits = search.matches(target.code.query, history: EmojiStore.history)
+        if emojiSuggestions != hits { emojiSuggestions = hits }
+    }
+
+    /// A delayed proxy may still show the old token on the first Delete. Wait for it to
+    /// acknowledge the replacement within the same field before changing the text again.
+    func restoreEmojiIfOwned(waitForEcho: Bool) -> Bool {
+        defer { if emojiUndoDeadline == nil { emojiUndo = nil } }
+        guard let undo = emojiUndo, let proxy, allowsEmojiCode(proxy),
+              proxy.currentInputSession() == undo.session else {
+            emojiUndoDeadline = nil
+            return false
+        }
+        let before = proxy.contextBefore(), after = proxy.contextAfter(), selection = proxy.selectedText()
+        if undo.code.owns(undo.emoji, before: before, after: after, selection: selection),
+           proxy.currentInputSession() == undo.session {
+            emojiUndoDeadline = nil
+            writeEmojiEdit(deleteCount: undo.emoji.count, insert: undo.literal)
+            if let word = undo.predictionWord {
+                if undo.literal.isEmpty { spacedEmojiWord = word } else { keyedWord = word }
+            } else if undo.literal == undo.code.literal {
+                emojiCode = (undo.code, undo.session)
+            }
+            afterEdit()
+            return true
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        if waitForEcho, now < (emojiUndoDeadline ?? .infinity),
+           undo.code.couldBeEcho(of: undo.replaced, before: before, after: after, selection: selection) {
+            emojiUndoDeadline = emojiUndoDeadline ?? (now + 0.35)
+            afterEdit()
+            return true
+        }
+        emojiUndoDeadline = nil
+        return false
+    }
+
+    func writeEmojiEdit(deleteCount: Int, insert: String) {
+        markOwnEdit(echoes: deleteCount * Self.echoesPerDelete + 1)
+        writingEmoji = true
+        defer { writingEmoji = false }
+        apply(TypingEdits.Edit(deleteCount: deleteCount, insert: insert))
+    }
+
+    @discardableResult
+    func replaceEmojiCode(_ base: String, closed: Bool, restoreClosingColon: Bool) -> Bool {
+        guard let target = emojiCode, let proxy, allowsEmojiCode(proxy),
+              proxy.currentInputSession() == target.session, let emoji = EmojiStore.byBase[base] else { return false }
+        let source = target.code.literal + (closed ? ":" : "")
+        guard target.code.owns(source, before: proxy.contextBefore(), after: proxy.contextAfter(),
+                              selection: proxy.selectedText()), proxy.currentInputSession() == target.session else { return false }
+        let text = EmojiStore.history.shown(emoji)
+        writeEmojiEdit(deleteCount: source.count, insert: text)
+        resetEmojiCode()
+        emojiUndo = EmojiUndo(code: target.code, session: target.session, emoji: text,
+                             literal: target.code.literal + (restoreClosingColon ? ":" : ""), replaced: source)
+        EmojiStore.use(text)
+        afterEdit()
+        return true
+    }
+}
+
+extension KeyboardModel {
+    func setDictationOwnsStrip(_ owns: Bool) {
+        guard dictationOwnsStrip != owns else { return }
+        dictationOwnsStrip = owns
+        if owns {
+            pasteAccessHint = nil
+            resetEmojiCode()
+        }
+    }
+
+    func dismissEmojiPickerForStyles() {
+        if emojiCode != nil { resetEmojiCode() }
+    }
+
+    func stripContent(hasUnsureWords: Bool, allowsWordSuggestions: Bool = true) -> KeyboardStripContent {
+        KeyboardStripContent.resolve(
+            dictationOwnsStrip: dictationOwnsStrip,
+            emojiPickerOpen: !showsEmoji && !emojiSuggestions.isEmpty,
+            hasUnsureWords: hasUnsureWords,
+            suggestions: allowsWordSuggestions && (preferences.showSuggestions || hasSwipeAlternatives) ? suggestions : []
+        )
+    }
+
+    func shownEmoji(_ match: EmojiSearchIndex.Match) -> String {
+        EmojiStore.byBase[match.emoji].map { EmojiStore.history.shown($0) } ?? match.emoji
+    }
+
+    func chooseEmojiSuggestion(_ match: EmojiSearchIndex.Match) {
+        guard emojiShownQuery == emojiCode?.code.query, emojiSuggestions.contains(match), let proxy else { return }
+        proxy.userTouchedKeyboard()
+        feedback.keyDown()
+        if !replaceEmojiCode(match.emoji, closed: false, restoreClosingColon: false) {
+            queueEmojiReplacement(match.emoji, closed: false)
+        }
     }
 }

@@ -7,7 +7,8 @@ final class WhatsNewPolicyTests: XCTestCase {
     private func v(_ text: String) -> AppVersion { AppVersion(text)! }
 
     private func library(_ versions: String...) -> ReleaseNotesLibrary {
-        ReleaseNotesLibrary(versions.map { ReleaseNote(version: v($0), day: nil, summary: "s", features: [], fixes: ["f"]) })
+        ReleaseNotesLibrary(versions.map { ReleaseNote(version: v($0), day: nil, summary: "s",
+                                                    groups: [ReleaseGroup(title: "g", symbol: "mic", items: [ReleaseItem(text: "f")])]) })
     }
 
     private func launch(_ state: WhatsNewState?, _ installed: String?, setup: Bool = true,

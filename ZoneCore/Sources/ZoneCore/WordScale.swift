@@ -45,8 +45,8 @@ public enum WordScale {
     /// Text averages about 6 bytes a word (The Great Gatsby: 286,681 bytes, 48,196 words).
     public static let bytesPerWord = 6.0
 
-    /// The last line of the cycle, true whatever else is set up: recognition is on the phone.
-    public static let closingLine = "Every word recognized right here on this iPhone."
+    /// The last line describes the count regardless of where a recording was transcribed.
+    public static let closingLine = "Your word count is saved on this iPhone."
 
     /// The line under the total: the biggest text already passed, or how far into the first.
     public static func headline(words: Int) -> String? {

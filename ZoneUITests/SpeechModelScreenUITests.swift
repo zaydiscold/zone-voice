@@ -6,7 +6,7 @@ import XCTest
 /// no publisher's benchmark, and the top-down card of every step from speaking to text.
 final class SpeechModelScreenUITests: XCTestCase {
     private var settled: [String] {
-        let version = Bundle(for: Self.self).infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.5"
+        let version = Bundle(for: Self.self).infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.6"
         // The engine is pinned: a simulator keeps whatever an earlier Diagnostics run chose.
         return ["-zone.settings.onboardingDone", "YES", "-zone.tour.seen", "YES", "-zoneWhatsNewAfter", version,
                 "-zone.diagnostics.engine", "fluidMiniCPU"]
@@ -23,7 +23,7 @@ final class SpeechModelScreenUITests: XCTestCase {
         add(shot)
     }
 
-    /// The flow card draws its own dots and line from the accent: check it on cream too.
+    /// The speech model diagram must also be readable in light mode.
     func testFlowCardReadsInLightAppearance() {
         let app = open(appearance: "light")
         let last = app.descendants(matching: .any)["speechModel.step.insert"].firstMatch
@@ -38,6 +38,30 @@ final class SpeechModelScreenUITests: XCTestCase {
         checkScreen(app)
     }
 
+    func testKeyboardRouteMapOpensGPUExplanationWithoutEnablingIt() {
+        let app = open(appearance: "dark")
+        let routes = app.buttons["What changes when I use the keyboard?"]
+        for _ in 0..<8 where !routes.isHittable { app.swipeUp() }
+        XCTAssertTrue(routes.isHittable)
+        routes.tap()
+        let choose = app.buttons["Choose keyboard recognition"]
+        for _ in 0..<4 where !choose.isHittable { app.swipeUp() }
+        choose.tap()
+        let explanation = app.buttons["What is Zone Link GPU?"]
+        XCTAssertTrue(explanation.waitForExistence(timeout: 6))
+        let endpoint = app.textFields["HTTPS transcription endpoint"]
+        // Establish that the field identifies the GPU route even on a reused simulator.
+        // Picker changes stay local to this screen until Save is tapped.
+        app.buttons["Use my computer’s GPU (beta)"].tap()
+        XCTAssertTrue(endpoint.waitForExistence(timeout: 4))
+        app.buttons["Zone default"].tap()
+        XCTAssertTrue(endpoint.waitForNonExistence(timeout: 4))
+        explanation.tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'through Tailscale'")).firstMatch.exists)
+        XCTAssertFalse(endpoint.exists)
+        keepScreenshot("keyboard-route-beta")
+    }
+
     private func open(appearance: String) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = settled + ["-zone.settings.appearance", appearance]
@@ -47,7 +71,8 @@ final class SpeechModelScreenUITests: XCTestCase {
         // A tap while Home is still settling (dictation arming on open) can be dropped.
         for _ in 0..<3 where !app.navigationBars["Settings"].waitForExistence(timeout: 4) { gear.tap() }
         let row = app.descendants(matching: .any)["settings.speechModel"].firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: 10), "the Speech model row")
+        for _ in 0..<12 where !row.isHittable { app.swipeUp(velocity: .slow) }
+        XCTAssertTrue(row.isHittable, "the Speech model row")
         XCTAssertTrue(row.label.contains("Fluid Mini"), "the row names the model, not a size: \(row.label)")
         row.tap()
         XCTAssertTrue(app.navigationBars["Speech model"].waitForExistence(timeout: 10), "the Speech model screen")

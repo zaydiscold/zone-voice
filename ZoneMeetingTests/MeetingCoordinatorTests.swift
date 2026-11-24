@@ -60,12 +60,14 @@ final class MeetingCoordinatorTests: XCTestCase {
         coordinator.labelsSpeakers = false
         let start = Task { await coordinator.startRecording() }
         await fulfillment(of: [entered], timeout: 3)
+        XCTAssertTrue(coordinator.blocksLibraryDeletion)
         for _ in 0..<8 { await coordinator.startRecording() }
         await coordinator.stopRecording()
         await gate.open()
         await start.value
         XCTAssertFalse(coordinator.isRecording)
         XCTAssertFalse(coordinator.isStartingRecording)
+        XCTAssertFalse(coordinator.blocksLibraryDeletion)
         XCTAssertTrue(store.all().isEmpty)
         XCTAssertEqual(captureStarts, 0)
         if coordinator.isRecording { await coordinator.discardRecording() }
@@ -121,11 +123,13 @@ final class MeetingCoordinatorTests: XCTestCase {
         coordinator.labelsSpeakers = false
         await coordinator.startRecording()
         let oldSink = try XCTUnwrap(sink)
+        XCTAssertTrue(coordinator.blocksLibraryDeletion)
         oldSink([Float](repeating: 0.2, count: 32_000))
         let stopTasks = (0..<8).map { _ in Task { await coordinator.stopRecording() } }
         for task in stopTasks { await task.value }
         await coordinator.drainProcessing()
         XCTAssertEqual(stops, 1)
+        XCTAssertFalse(coordinator.blocksLibraryDeletion)
         XCTAssertEqual(store.all().count, 1)
         XCTAssertEqual(store.all().first?.duration, 2)
         await coordinator.startRecording()
@@ -158,6 +162,26 @@ final class MeetingCoordinatorTests: XCTestCase {
             XCTAssertEqual(meeting.segments.first?.text, "Test speech.")
             XCTAssertEqual(meeting.transcribedThrough, 2)
         }
+        XCTAssertEqual(engine.utterances, 2)
+    }
+
+    func testNewAndRepeatedTranscriptionsKeepSpokenCommandsAndWriteClockTimes() async throws {
+        let engine = TestSpeechEngine()
+        engine.transcript = "i said new line at two fifteen."
+        let dictation = makeDictation(engine: engine)
+        let store = makeStore()
+        let coordinator = MeetingCoordinator(dictation: dictation, store: store, recover: { _ in }, requestPermission: { false })
+        coordinator.labelsSpeakers = false
+        await coordinator.startRecording()
+        try await waitForModel(dictation)
+        let id = try await recorded(store)
+        coordinator.enqueue(id)
+        await coordinator.drainProcessing()
+        XCTAssertEqual(try store.meeting(id).segments.map(\.text), ["I said new line at 2:15."])
+        engine.transcript = "i said new line at three thirty."
+        coordinator.retranscribe(id)
+        await coordinator.drainProcessing()
+        XCTAssertEqual(try store.meeting(id).segments.map(\.text), ["I said new line at 3:30."])
         XCTAssertEqual(engine.utterances, 2)
     }
 
@@ -239,26 +263,29 @@ private actor PermissionGate {
     func open() { openState = true; for waiter in waiters { waiter.resume() }; waiters.removeAll() }
 }
 
-private final class TestSpeechEngine: SpeechEngine {
+final class TestSpeechEngine: SpeechEngine {
     let kind: EngineKind = .fluidMiniCPU
     var isReady = true
     var utterances = 0
+    var transcript = "Test speech."
     func assetsPresent() -> Bool { true }
     func bytesOnDisk() -> Int64 { 0 }
     func removeAssets() throws {}
     func downloadAssets(progress: @escaping @Sendable (Double, String) -> Void) async throws {}
     func prepare(progress: @escaping @Sendable (Double, String) -> Void) async throws {}
     func setContextHints(_ text: String) {}
-    func beginUtterance() throws -> UtteranceSession { utterances += 1; return TestUtterance() }
+    func beginUtterance() throws -> UtteranceSession { utterances += 1; return TestUtterance(transcript) }
     func unload() {}
 }
 
 private final class TestUtterance: UtteranceSession {
+    let transcript: String
+    init(_ transcript: String) { self.transcript = transcript }
     var audioSeconds: Double = 0
     var textSoFar = ""
     var failure: Error? { nil }
     var availableAudioSamples: Int { 48 * 16_000 }
     func feed(_ samples: [Float]) { audioSeconds += Double(samples.count) / 16_000 }
-    func finish() async throws -> String { try Task.checkCancellation(); return "Test speech." }
+    func finish() async throws -> String { try Task.checkCancellation(); return transcript }
     func cancel() {}
 }

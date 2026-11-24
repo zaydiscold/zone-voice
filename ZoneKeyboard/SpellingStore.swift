@@ -17,10 +17,61 @@ enum SpellingStore {
     /// Oldest learned words are dropped past this many. A word is a few bytes, so 5,000 is about
     /// 40 KB of defaults: enough that a person's own words are never forgotten in practice.
     private static let learnedLimit = 5_000
+    /// Words kept once, waiting for a second keep (`KeepConfirmation`).
+    private static let pendingKeepsKey = "zone.keyboard.pendingKeeps"
+    /// Kept words that are one slip from an everyday word, each with that word
+    /// (`Autocorrector.keptSlips`), and how many of the kept words have been checked for it.
+    private static let slipsKey = "zone.keyboard.learnedSlips"
+    private static let slipsCheckedKey = "zone.keyboard.learnedSlipsChecked"
+    /// Called on the main thread when the kept slips change, so swipe drops or regains a word.
+    static var keptSlipsChanged: (() -> Void)?
+
+    private static let mirroredKey = "zone.keyboard.mirroredTypedWords"
+    private static var sharedStore: (@Sendable () -> PersonalVocabulary?)?
+    private static var exchangeRunning = false
+    private static var exchangeRequested = false
+
+    static func refreshSharedLearning(fullAccess: Bool, store: @escaping @Sendable () -> PersonalVocabulary?) {
+        sharedStore = fullAccess ? store : nil
+        if fullAccess { exchange() }
+    }
+
+    /// The extension owns its defaults even without Full Access. Reconcile off the typing
+    /// thread. A local edit during I/O starts another pass before applying the result.
+    static func exchange() {
+        guard let sharedStore else { return }
+        if exchangeRunning { exchangeRequested = true; return }
+        exchangeRunning = true
+        let typed = learnedWords
+        let choices = DoubtStore.memory
+        let previous = UserDefaults.standard.stringArray(forKey: mirroredKey) ?? []
+        Task {
+            let snapshot = await Task.detached(priority: .utility) {
+                try? sharedStore()?.exchangeKeyboard(typed: typed, previously: previous, choices: choices)
+            }.value
+            exchangeRunning = false
+            if let snapshot, Self.sharedStore != nil {
+                // This pass published the captured local words, even when an edit overtook it.
+                if previous != typed { UserDefaults.standard.set(typed, forKey: mirroredKey) }
+                if learnedWords == typed, DoubtStore.memory == choices {
+                    if typed != snapshot.typedWords {
+                        UserDefaults.standard.set(snapshot.typedWords, forKey: learnedKey)
+                        UserDefaults.standard.set(snapshot.typedWords, forKey: mirroredKey)
+                        for word in snapshot.typedWords.dropFirst(typed.count) { corrector?.learn(word) }
+                        checkKeptWords()
+                        keptSlipsChanged?()
+                    }
+                    if choices != snapshot.correctionChoices { DoubtStore.memory = snapshot.correctionChoices }
+                } else { exchangeRequested = true }
+            }
+            if exchangeRequested { exchangeRequested = false; exchange() }
+        }
+    }
 
     /// Calls `completion` on the main thread with the shared corrector, loading it on first use.
     static func load(_ completion: @escaping (Autocorrector?) -> Void) {
         if let corrector {
+            retryMissingContext()
             completion(corrector)
             return
         }
@@ -48,9 +99,11 @@ enum SpellingStore {
                     } else {
                         KeyboardLog.typing.error("word list missing from the bundle; autocorrect is off")
                     }
+                    corrector?.setKeptSlips(keptSlips)
                     let pending = waiters
                     waiters = []
                     pending.forEach { $0(corrector) }
+                    checkKeptWords()
                 }
             }
         }
@@ -58,6 +111,17 @@ enum SpellingStore {
 
     /// Tests run outside the keyboard's bundle, where `WordPairs.shared` finds no table.
     private static var pairsOverride: WordPairs?
+    private static var readingContext = false
+    static func retryMissingContext() {
+        guard let corrector, corrector.context == nil, !readingContext else { return }
+        readingContext = true
+        Task {
+            let pairs = await Task.detached(priority: .utility) { WordPairs.shared }.value
+            corrector.context = pairsOverride ?? pairs
+            readingContext = false
+        }
+    }
+
     static func useWordPairs(_ pairs: WordPairs?) {
         pairsOverride = pairs
         corrector?.context = pairs ?? WordPairs.shared
@@ -68,6 +132,68 @@ enum SpellingStore {
 
     /// Words the user kept, oldest first. Swipe offers them like personal words.
     static var learnedWords: [String] { UserDefaults.standard.stringArray(forKey: learnedKey) ?? [] }
+
+    /// Kept words that are a slip for an everyday word, by lowercase spelling.
+    static var keptSlips: [String: String] { UserDefaults.standard.dictionary(forKey: slipsKey) as? [String: String] ?? [:] }
+
+    /// The kept words swipe may write: all but the slips, which trace like the everyday word they
+    /// sit beside and would take its swipes ("bsby" for every "baby").
+    static var swipeableLearnedWords: [String] {
+        let slips = keptSlips
+        return slips.isEmpty ? learnedWords : learnedWords.filter { slips[$0.lowercased()] == nil }
+    }
+
+    /// Words kept before this check existed are looked at once, a few per turn of the main
+    /// thread (each costs one evaluation, about a millisecond), oldest first.
+    static func checkKeptWords() {
+        guard let corrector else { return }
+        let defaults = UserDefaults.standard
+        let stored = learnedWords
+        var checked = min(defaults.integer(forKey: slipsCheckedKey), stored.count)
+        guard checked < stored.count else { return }
+        var slips = keptSlips
+        var found = false
+        for word in stored[checked..<min(checked + 8, stored.count)] {
+            if let fix = corrector.everydayWordBehindKept(word) {
+                slips[word] = fix
+                found = true
+            }
+            checked += 1
+        }
+        defaults.set(checked, forKey: slipsCheckedKey)
+        if found {
+            defaults.set(slips, forKey: slipsKey)
+            corrector.setKeptSlips(slips)
+            keptSlipsChanged?()
+        }
+        if checked < stored.count {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { checkKeptWords() } }
+        }
+    }
+
+    /// The person took the everyday word the row offered for a kept slip: the slip is forgotten.
+    /// Returns true when `word` was one.
+    @discardableResult
+    static func forgetKeptSlip(_ word: String, replacedBy fix: String) -> Bool {
+        guard let corrector else { return false }
+        let key = word.lowercased()
+        var slips = keptSlips
+        guard let known = slips[key], known.lowercased() == fix.lowercased() else { return false }
+        corrector.forget(word)
+        slips[key] = nil
+        let defaults = UserDefaults.standard
+        let stored = learnedWords
+        let kept = stored.filter { $0.lowercased() != key }
+        // The count of checked words follows the list, so a later word is not skipped.
+        let checkedBefore = min(defaults.integer(forKey: slipsCheckedKey), stored.count)
+        let removedChecked = stored.prefix(checkedBefore).filter { $0.lowercased() == key }.count
+        defaults.set(kept, forKey: learnedKey)
+        defaults.set(checkedBefore - removedChecked, forKey: slipsCheckedKey)
+        defaults.set(slips, forKey: slipsKey)
+        exchange()
+        KeyboardLog.typing.info("forgot a kept slip (\(kept.count) kept)")
+        return true
+    }
 
     /// How a kept word is saved. Swipe writes kept words as saved, so a word with capitals inside
     /// it ("OpenRouter", "iPhone") keeps them. Anything else is saved in lowercase: a capital on
@@ -81,18 +207,45 @@ enum SpellingStore {
 
     /// Remembers a word the user kept, so it is never corrected again on this phone.
     /// Returns true when the word was new.
+    /// The first keep only protects the word until this process ends; the second keep learns it
+    /// (`KeepConfirmation`). Returns false for a first keep, so swipe does not offer it yet.
     @discardableResult
     static func learn(_ word: String) -> Bool {
         guard let corrector else { return false }
-        let before = corrector.learnedWords.count
+        let defaults = UserDefaults.standard
+        var stored = defaults.stringArray(forKey: learnedKey) ?? []
+        let key = word.lowercased()
+        guard !stored.contains(where: { $0.lowercased() == key }) else { return false }
+        var gate = KeepConfirmation(pending: defaults.stringArray(forKey: pendingKeepsKey) ?? [])
+        let confirmed = gate.keep(word)
+        defaults.set(gate.pending, forKey: pendingKeepsKey)
+        // Protected now either way, so the separator that follows does not undo the person's choice.
         corrector.learn(word)
-        guard corrector.learnedWords.count != before else { return false }
-        var stored = UserDefaults.standard.stringArray(forKey: learnedKey) ?? []
-        stored.append(storedForm(of: word))
-        if stored.count > learnedLimit {
-            stored.removeFirst(stored.count - learnedLimit)
+        guard confirmed else {
+            KeyboardLog.typing.info("kept a word once; learned after a second keep")
+            return false
         }
-        UserDefaults.standard.set(stored, forKey: learnedKey)
+        var checked = min(defaults.integer(forKey: slipsCheckedKey), stored.count)
+        let form = storedForm(of: word)
+        stored.append(form)
+        // Checked now when every earlier word already is; otherwise the pass under way reaches it.
+        if checked == stored.count - 1 {
+            checked += 1
+            if let fix = corrector.everydayWordBehindKept(form) {
+                var slips = keptSlips
+                slips[form] = fix
+                defaults.set(slips, forKey: slipsKey)
+                corrector.setKeptSlips(slips)
+            }
+        }
+        if stored.count > learnedLimit {
+            let dropped = stored.count - learnedLimit
+            stored.removeFirst(dropped)
+            checked = max(0, checked - dropped)
+        }
+        defaults.set(checked, forKey: slipsCheckedKey)
+        defaults.set(stored, forKey: learnedKey)
+        exchange()
         KeyboardLog.typing.info("learned a word (\(stored.count) kept)")
         return true
     }
@@ -218,7 +371,7 @@ enum DoubtStore {
     }
 
     static var memory: DoubtMemory = load(memoryKey) ?? DoubtMemory() {
-        didSet { save(memory, memoryKey) }
+        didSet { save(memory, memoryKey); SpellingStore.exchange() }
     }
 
     private static func load<T: Decodable>(_ key: String) -> T? {

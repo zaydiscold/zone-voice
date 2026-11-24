@@ -60,6 +60,41 @@ final class RollingRecognitionSessionTests: XCTestCase {
         XCTAssertTrue(sizes.allSatisfy { $0 <= 24 * rate })
     }
 
+    func testRollingDecodeNeverResubmitsAudioWhenRecordingEnds() async throws {
+        actor Windows {
+            var offsets: [Range<Int>] = []
+            var repeats = 0
+
+            func record(_ samples: [Float]) {
+                let start = Int(samples[0] * 1_048_576)
+                let range = start..<(start + samples.count)
+                XCTAssertEqual(Int(samples.last! * 1_048_576), range.upperBound - 1)
+                if offsets.contains(where: { $0.overlaps(range) }) { repeats += 1 }
+                offsets.append(range)
+            }
+        }
+        // Encode each sample's position exactly in its amplitude so even a partial replay counts.
+        let rate = RollingSegmenter.sampleRate
+        let count = 47 * rate
+        for packetSize in [3_200, count] {
+            let windows = Windows()
+            let session = RollingRecognitionSession { samples in
+                await windows.record(samples)
+                return "word"
+            }
+            for index in stride(from: 0, to: count, by: packetSize) {
+                session.feed((index..<min(index + packetSize, count)).map { Float($0) / 1_048_576 })
+            }
+            _ = try await session.finish()
+            let offsets = await windows.offsets
+            let repeats = await windows.repeats
+            XCTAssertEqual(offsets.count, 3)
+            XCTAssertEqual(repeats, 0)
+            XCTAssertEqual(offsets.map(\.lowerBound), [0] + offsets.dropLast().map(\.upperBound))
+            XCTAssertEqual(offsets.last?.upperBound, count)
+        }
+    }
+
     func testRecordingCanExceedTwoMinutesWithoutDurationCutoff() async throws {
         let session = RollingRecognitionSession(segmenter: segmenter, maxQueuedSeconds: 140) { _ in "word" }
         for _ in 0..<130 { session.feed(second) }

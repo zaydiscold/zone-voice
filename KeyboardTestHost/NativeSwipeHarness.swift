@@ -1,5 +1,6 @@
 // by zayd/cold @ zayd.wtf
 
+import SwiftUI
 import UIKit
 import ZoneCore
 
@@ -14,13 +15,22 @@ import ZoneCore
     private var readyForCursorReplacement = false
     override func viewDidLoad() {
         super.viewDidLoad()
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("--dark") { overrideUserInterfaceStyle = .dark }
         view.backgroundColor = .systemBackground
         field.accessibilityIdentifier = "native-field"
         field.font = .systemFont(ofSize: 24)
+        if PromoCapture.enabled {
+            view.backgroundColor = PromoCapture.paper
+            field.backgroundColor = .clear
+            field.textColor = PromoCapture.ink
+            field.tintColor = UIColor(KeyboardTheme.accent)
+            field.font = .systemFont(ofSize: 33, weight: .medium)
+            caret.isHidden = true
+        }
         field.autocorrectionType = .no
         field.autocapitalizationType = .none
         field.delegate = self
-        let args = ProcessInfo.processInfo.arguments
         // Launch arguments end at a newline, so tests write line breaks as a literal "\\n".
         if let i = args.firstIndex(of: "--text"), args.indices.contains(i + 1) {
             field.text = args[i + 1].replacingOccurrences(of: "\\n", with: "\n")
@@ -50,7 +60,7 @@ import ZoneCore
     }
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        field.frame = CGRect(x: 20, y: 100, width: view.bounds.width - 40, height: 180)
+        field.frame = CGRect(x: 20, y: PromoCapture.enabled ? view.bounds.height - 425 : 100, width: view.bounds.width - 40, height: 180)
         caret.frame = CGRect(x: 20, y: 290, width: view.bounds.width - 40, height: 40)
         selectWord.frame = CGRect(x: 20, y: 56, width: 120, height: 40)
         cursorAudit.frame = CGRect(x: 20, y: 330, width: view.bounds.width - 40, height: 40)
@@ -103,7 +113,9 @@ import ZoneCore
     /// harness hosts the key grid without Zone's strip.
     private let suggestionRow = UIStackView()
     private var shownSuggestions: [Suggestion] = []
-    private var showsSuggestions: Bool { ProcessInfo.processInfo.arguments.contains("--suggestions") }
+    private var showsEmojiPredictions: Bool { ProcessInfo.processInfo.arguments.contains("--emoji-predictions") }
+    private var showsEmojiShortcodes: Bool { ProcessInfo.processInfo.arguments.contains("--emoji-shortcodes") }
+    private var showsSuggestions: Bool { ProcessInfo.processInfo.arguments.contains("--suggestions") || showsEmojiShortcodes || showsEmojiPredictions }
     override func loadView() {
         let input = UIInputView(frame: CGRect(x: 0, y: 0, width: 402, height: showsSuggestions ? 294 : 250), inputViewStyle: .keyboard)
         input.allowsSelfSizing = true
@@ -115,10 +127,12 @@ import ZoneCore
         model = KeyboardModel(proxy: self)
         model.apply(KeyboardPreferences(autocorrectEnabled: ProcessInfo.processInfo.arguments.contains("--autocorrect"),
             showSuggestions: showsSuggestions,
-            swipeTypingEnabled: !ProcessInfo.processInfo.arguments.contains("--no-swipe"), swipeLearningEnabled: false,
+            swipeTypingEnabled: !ProcessInfo.processInfo.arguments.contains("--no-swipe"), swipeLearningEnabled: PromoCapture.enabled,
             smartPunctuation: ProcessInfo.processInfo.arguments.contains("--smart-punctuation")))
         let grid = KeyGridView(model: model, mic: mic, controller: self)
-        grid.backgroundColor = .systemGray5
+        let dark = ProcessInfo.processInfo.arguments.contains("--dark")
+        model.setSystemDark(dark)
+        grid.backgroundColor = showsEmojiShortcodes || showsEmojiPredictions || PromoCapture.enabled ? UIColor(KeyboardTheme(isDark: dark).background) : .systemGray5
         grid.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(grid)
         NSLayoutConstraint.activate([
@@ -132,6 +146,33 @@ import ZoneCore
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         model.refreshTraits()
+        if PromoCapture.enabled {
+            guard children.isEmpty else { return }
+            let theme = KeyboardTheme(isDark: ProcessInfo.processInfo.arguments.contains("--dark"))
+            let row = UIHostingController(rootView: PromoSuggestionRow(model: model, theme: theme))
+            addChild(row)
+            row.view.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 44)
+            row.view.autoresizingMask = .flexibleWidth
+            view.addSubview(row.view)
+            row.didMove(toParent: self)
+            let touches = PromoTouchIndicator()
+            touches.cancelsTouchesInView = false
+            touches.delaysTouchesEnded = false
+            view.addGestureRecognizer(touches)
+            return
+        }
+        if showsEmojiShortcodes || showsEmojiPredictions {
+            guard children.isEmpty else { return }
+            let theme = KeyboardTheme(isDark: ProcessInfo.processInfo.arguments.contains("--dark"))
+            let row = UIHostingController(rootView: NativeEmojiRow(model: model, theme: theme, words: showsEmojiPredictions)
+                .padding(.horizontal, 75).frame(height: 44).background(theme.background))
+            addChild(row)
+            row.view.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 44)
+            row.view.autoresizingMask = .flexibleWidth
+            view.addSubview(row.view)
+            row.didMove(toParent: self)
+            return
+        }
         guard showsSuggestions, suggestionRow.superview == nil else { return }
         suggestionRow.distribution = .fillEqually
         suggestionRow.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 44)
@@ -220,5 +261,19 @@ import ZoneCore
     }
     private static func render() {
         label?.text = "\(before),\(after),\(pending.count),\(replaced ? "replaced" : "waiting")"
+    }
+}
+
+private struct NativeEmojiRow: View {
+    let model: KeyboardModel
+    let theme: KeyboardTheme
+    let words: Bool
+
+    var body: some View {
+        if words {
+            SuggestionBar(suggestions: model.suggestions, theme: theme, onChoose: model.choose)
+        } else {
+            EmojiSuggestionBar(model: model, theme: theme)
+        }
     }
 }

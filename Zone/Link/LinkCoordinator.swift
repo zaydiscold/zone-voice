@@ -1,5 +1,6 @@
 // by zayd/cold @ zayd.wtf
 
+import CryptoKit
 import Foundation
 import Observation
 import UIKit
@@ -77,7 +78,7 @@ final class LinkCoordinator {
     nonisolated static func makeStore() -> LinkStore {
         let support = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                     appropriateFor: nil, create: true)) ?? FileManager.default.temporaryDirectory
-        return LinkStore(directory: support.appendingPathComponent("Link", isDirectory: true))
+        return LinkStore(directory: support.appendingPathComponent("Link", isDirectory: true), defaults: .standard)
     }
 
     init(notes: NotesStore, meetings: MeetingCoordinator) {
@@ -101,13 +102,53 @@ final class LinkCoordinator {
 
     // MARK: Pairing
 
-    /// Every way in comes through here: the scanner, a pasted link, a `zone://pair` URL opened
-    /// from outside, and the debug launch argument. A good link becomes a question; it pairs
-    /// nothing by itself.
-    func offerPairing(_ text: String) {
+    private var inputDeadline: ContinuousClock.Instant?
+
+    private var confirmDeadline: ContinuousClock.Instant?
+    static let usedCodeKey = "zone.link.usedPairingCodeHashes"
+
+    private func fingerprint(_ link: LinkPairingLink) -> String {
+        Data(SHA256.hash(data: Data(link.secret.utf8))).base64EncodedString()
+    }
+
+    private func wasUsed(_ link: LinkPairingLink) -> Bool {
+        UserDefaults.standard.stringArray(forKey: Self.usedCodeKey)?.contains(fingerprint(link)) == true
+    }
+
+    func beginPairingInput(now: ContinuousClock.Instant = .now) {
+        declinePairing()
+        inputDeadline = now + .seconds(300)
+    }
+
+    func endPairingInput() {
+        inputDeadline = nil
+        declinePairing()
+    }
+
+    func offerPairing(_ text: String, now: ContinuousClock.Instant = .now, wallTime: Date = Date()) {
+        let deadline = inputDeadline
+        inputDeadline = nil
+        guard let deadline, now < deadline else {
+            notice = "Tap Pair a computer or Paste link to start again."
+            return
+        }
         do {
             let link = try LinkPairingLink.parse(text)
             guard LinkTransport.isEndpointID(link.endpointID) else { throw LinkPairingLink.Failure.badEndpoint }
+            guard !wasUsed(link) else {
+                notice = "This code was already used. Get a new code on your computer."
+                return
+            }
+            var effectiveDeadline = deadline
+            if let expiry = link.expiresAt {
+                let remaining = expiry.timeIntervalSince(wallTime)
+                guard remaining > 0 else {
+                    notice = "This code expired. Get a new code on your computer."
+                    return
+                }
+                effectiveDeadline = min(deadline, now + .seconds(min(300, remaining)))
+            }
+            confirmDeadline = effectiveDeadline
             pendingPairing = link
         } catch LinkPairingLink.Failure.unsupportedVersion {
             notice = "This pairing link is from a newer Zone. Update Zone on this iPhone and try again."
@@ -123,14 +164,21 @@ final class LinkCoordinator {
     }
 
     /// The person said yes. Saves the computer and sends everything.
-    func confirmPairing() {
+    func confirmPairing(now: ContinuousClock.Instant = .now, wallTime: Date = Date()) {
         guard let link = pendingPairing else { return }
         pendingPairing = nil
+        guard let deadline = confirmDeadline, now < deadline, link.expiresAt.map({ wallTime < $0 }) ?? true, !wasUsed(link) else {
+            notice = "Start pairing again with a new code from your computer."
+            return
+        }
         let id = link.endpointID
         guard secrets.setSecret(Data(link.secret.utf8), for: LinkSecretName.pairing(id)) else {
             notice = "Zone could not save the pairing code. Unlock this iPhone and try again."
             return
         }
+        var used = UserDefaults.standard.stringArray(forKey: Self.usedCodeKey) ?? []
+        used.append(fingerprint(link))
+        UserDefaults.standard.set(used, forKey: Self.usedCodeKey)
         // Kept for Flash (sending by QR code with no network), which shares this pairing. It is
         // derived from the pairing secret and outlives it: the secret is dropped once the
         // computer accepts it over the network, and this key stays until the computer is
@@ -220,8 +268,8 @@ final class LinkCoordinator {
         // The last one: back to holding nothing at all, the phone's own key included.
         detach()
         deletions.clear()
-        store.clips.clear()
-        clips = []
+        store.clips.removeAll()
+        clips = store.clips.all()
         secrets.setSecret(nil, for: LinkSecretName.phoneKey)
         let transport = transport
         Task.detached(priority: .utility) { await transport.shutdown() }
@@ -238,11 +286,13 @@ final class LinkCoordinator {
     }
 
     /// Queues a piece of text for every computer whose sending is on and syncs with each of
-    /// them at once, with no waiting. Returns as soon as it is queued; `clipSettled` waits for
-    /// the answer. Throws `LinkClipFailure` for empty text, too much text, or no computer to send to.
+    /// them at once, with no waiting. Returns as soon as it is saved in the outbox (nothing is
+    /// on a computer yet: say "Sending", never "Sent"); `clipSettled` waits for each computer's
+    /// answer. Throws `LinkClipFailure` for empty text, too much text, no computer to send to,
+    /// or an outbox that could not be written (then nothing is queued or sent).
     @discardableResult
-    func sendClip(_ text: String, source: LinkClipSource) throws -> LinkClip {
-        let targets = clipTargets.map(\.endpointID)
+    func sendClip(_ text: String, source: LinkClipSource, to selected: String? = nil) throws -> LinkClip {
+        let targets = clipTargets.map(\.endpointID).filter { selected == nil || $0 == selected }
         let clip = try store.clips.add(text, source: source, to: targets)
         clips = store.clips.all()
         flashRevision += 1
@@ -251,7 +301,8 @@ final class LinkCoordinator {
     }
 
     /// The clip once every sync that could carry it has ended, or after `seconds`: sent, or
-    /// still waiting for a computer that could not be reached. Nil when it was removed meanwhile.
+    /// still waiting for a computer that could not be reached. Nil when it was removed
+    /// meanwhile (a removed row, Delete everything): say `LinkClipCopy.removed`.
     func clipSettled(_ id: UUID, within seconds: TimeInterval) async -> LinkClip? {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
@@ -268,6 +319,18 @@ final class LinkCoordinator {
         store.clips.remove(id)
         clips = store.clips.all()
         flashRevision += 1
+    }
+
+    /// Delete everything: takes every clip off the phone, waiting ones and the Sent list. A
+    /// running sync leaves a withdrawn clip out of every frame it has not written yet
+    /// (`LinkComputerSync.stillToSend`). Nothing is told to any computer: one that already
+    /// acknowledged a clip keeps it, and one that is mid-frame may still store it.
+    @discardableResult
+    func deleteAllClips() -> LinkClipRemoval {
+        let removal = store.clips.removeAll()
+        clips = store.clips.all()
+        flashRevision += 1
+        return removal
     }
 
     /// Clears the sent clips from the list. Waiting ones stay.
@@ -556,11 +619,14 @@ final class LinkCoordinator {
         let deletions = deletions
         // Through the store, which spares the computers that keep what the person deletes.
         let store = store
-        TranscriptHistory.shared?.explicitDeletionSink = { ids, date in
-            store.recordDeletion(ids, kind: .dictation, at: date, in: deletions)
+        let record: @Sendable ([UUID], LinkKind, Date) -> Void = { [weak self] ids, kind, date in
+            if !store.recordDeletion(ids, kind: kind, at: date, in: deletions) {
+                Task { @MainActor in self?.notice = "Zone could not save the computer deletion requests. Unlock your iPhone and reopen Zone to try again." }
+            }
         }
-        notes.onDelete = { ids in store.recordDeletion(ids, kind: .note, in: deletions) }
-        meetings.onDelete = { id in store.recordDeletion([id], kind: .meeting, in: deletions) }
+        TranscriptHistory.shared?.explicitDeletionSink = { ids, date in record(ids, .dictation, date) }
+        notes.onDelete = { ids in record(ids, .note, Date()) }
+        meetings.onDelete = { id in record([id], .meeting, Date()) }
         // No queue: the post returns at once and the hop to the main actor happens after, so a
         // store that posts while holding a lock never waits on the main thread.
         for name in [Notification.Name("ZoneLibraryDidChange"), MeetingStore.finishedMeetingDidChange] {

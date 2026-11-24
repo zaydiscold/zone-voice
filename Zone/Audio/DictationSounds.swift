@@ -1,9 +1,10 @@
 // by zayd/cold @ zayd.wtf
 
 import AVFoundation
+import os
+import ZoneCore
 
-/// Zone's dictation cues, one start/stop pair per set (Chime by default; Water drop, Kalimba,
-/// Glass, Wood in Settings). Synthesized by `scripts/make-sounds.py`, no third-party audio. They play on the
+/// Zone's dictation cues, one start/stop pair per set (Wood, Chime and Kalimba). Synthesized by `scripts/make-sounds.py`, no third-party audio. They play on the
 /// app's own audio session, which is active whenever a dictation can start, so they are heard
 /// while Zone sits in the background behind Messages.
 @MainActor
@@ -12,17 +13,15 @@ final class DictationSounds {
     /// them: early words matter.
     /// The quiet cue can still reach the microphone; device testing assesses that tradeoff.
     /// Below full scale so the cue sits under speech and media rather than over it.
-    nonisolated static let volume: Float = 0.55
+    nonisolated static let volume = KeyboardPreferences.cueVolume
 
     enum Set: String, CaseIterable, Identifiable, Sendable {
-        case chime, drop, kalimba, glass, wood
+        case wood, chime, kalimba
         var id: String { rawValue }
         var label: String {
             switch self {
             case .chime: return "Chime"
-            case .drop: return "Water drop"
             case .kalimba: return "Kalimba"
-            case .glass: return "Glass"
             case .wood: return "Wood"
             }
         }
@@ -34,12 +33,16 @@ final class DictationSounds {
     /// the audio daemons. The first `play()` of an unprepared player set up its audio queue
     /// with a synchronous XPC, 140 to 190 ms on the main thread in the hang reports.
     private let players = CuePlayers()
+    private let startWindow = OSAllocatedUnfairLock<ClosedRange<TimeInterval>?>(initialState: nil)
+
+    /// Playback is queued off the main actor. Date the cue where the player actually starts.
+    var startCueWindow: ClosedRange<TimeInterval>? { startWindow.withLock { $0 } }
     /// True while capture holds an active session. Only then may a cue be prepared:
     /// `prepareToPlay` activates the session, and nothing at app initialization may touch
     /// audio hardware or interrupt media before the user records or previews.
     private var sessionIsArmed = false
 
-    init(bundle: Bundle = .main, set: Set = .chime) {
+    init(bundle: Bundle = .main, set: Set = .wood) {
         self.bundle = bundle
         self.set = set
         load()
@@ -104,6 +107,7 @@ final class DictationSounds {
     private func play(start: Bool) {
         let players = self.players
         let name = start ? "start" : "stop"
+        let startWindow = self.startWindow
         AudioHardwareQueue.async {
             guard let player = start ? players.startCue : players.stopCue else {
                 ZoneLog.audio.error("dictation \(name, privacy: .public) sound missing from the bundle")
@@ -120,7 +124,13 @@ final class DictationSounds {
                 }
             }
             player.currentTime = 0
+            let began = ProcessInfo.processInfo.systemUptime
+            if start { startWindow.withLock { $0 = began...TimeInterval.infinity } }
             let started = player.play()
+            if start {
+                let end = ProcessInfo.processInfo.systemUptime + max(0, player.duration - player.currentTime)
+                startWindow.withLock { $0 = started ? began...end : nil }
+            }
             ZoneLog.audio.info("dictation \(name, privacy: .public) sound played=\(started)")
         }
     }

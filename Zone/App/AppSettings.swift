@@ -2,6 +2,8 @@
 
 import Foundation
 import Observation
+import UIKit
+import WidgetKit
 import ZoneCore
 
 /// User preferences for the app process. The few the keyboard must honor (autocorrect, haptics,
@@ -22,10 +24,18 @@ final class AppSettings {
         static let islandLook = "zone.settings.islandLook"
         static let islandWhileReady = "zone.settings.islandWhileReady"
         static let islandControls = "zone.settings.islandControls"
+        static let islandTimes = "zone.settings.islandTimes"
+        static let islandPalette = "zone.settings.islandPalette"
+        static let islandLostNotice = "zone.settings.islandLostNotice"
         static let notesFirst = "zone.settings.notesFirst"
         static let soundSet = "zone.settings.soundSet"
         static let meterStyle = "zone.settings.meterStyle"
+        static let micLightStyle = "zone.settings.micLightStyle"
         static let pasteKey = "zone.settings.pasteKey"
+        static let emojiPredictions = "zone.settings.emojiPredictions"
+        static let clipboardHistory = "zone.settings.clipboardHistory"
+        static let clipboardAutomatic = "zone.settings.clipboardAutomatic"
+        static let clipboardSkipsSecrets = "zone.settings.clipboardSkipsSecrets"
         static let emojiKey = "zone.settings.emojiKey"
         static let hideHomeButton = "zone.settings.hideHomeButton"
         static let personalWords = "zone.settings.personalWords"
@@ -41,11 +51,20 @@ final class AppSettings {
         static let spokenCorrections = "zone.settings.spokenCorrections"
         static let capsLockDropsPunctuation = "zone.settings.capsLockDropsPunctuation"
         static let checksDoubtfulWords = "zone.settings.checksDoubtfulWords"
+        static let dictatesInKeyboard = "zone.settings.dictatesInKeyboard"
+        static let neverAppleSpeech = "zone.settings.neverAppleSpeech"
         static let spokenEmoticons = "zone.settings.spokenEmoticons"
+        static let fasterDictation = "zone.settings.fasterDictation"
+        static let numbers = "zone.settings.numbers"
         static let smallOrdinals = "zone.settings.smallOrdinals"
         static let californiaMode = "zone.settings.californiaMode"
         static let smartPunctuation = "zone.settings.smartPunctuation"
+        static let swipeTrailStyle = "zone.settings.swipeTrailStyle"
+        static let oneHanded = "zone.settings.oneHanded"
+        static let oneHandedSide = "zone.settings.oneHandedSide"
+        static let oneHandedWidth = "zone.settings.oneHandedWidth"
         static let spaceHold = "zone.settings.spaceHold"
+        static let spaceBar = "zone.settings.spaceBar"
         static let sounds = "zone.settings.sounds"
         static let defaultStyle = "zone.settings.defaultStyle"
         static let wordsDictated = "zone.stats.words"
@@ -56,10 +75,30 @@ final class AppSettings {
         static let speakingSeconds = "zone.stats.speakingSeconds"
         static let longestSeconds = "zone.stats.longestSeconds"
         static let longestWords = "zone.stats.longestWords"
+        static let cachedTotals = "zone.stats.cachedTotals"
+        static let cachedWords = "zone.stats.cachedWords"
+        static let cachedSeconds = "zone.stats.cachedSeconds"
+        static let statsMigrated = "zone.stats.migrated"
+        static let receiptLongest = "zone.stats.receiptLongest"
+        static let minutesSaved = "zone.stats.minutesSaved"
         static let longestDate = "zone.stats.longestDate"
-        static let longestBackfilled = "zone.stats.longestBackfilled"
         static let milestoneAcknowledged = "zone.milestone.acknowledged"
     }
+
+    @ObservationIgnored private var reconcilingQuickSettings = false
+    @ObservationIgnored private var quickSettingStamps: [String: QuickSettingRequest.Stamp]
+    @ObservationIgnored private var quickSettingObservation: DarwinObservation?
+    // The winning values and their IDs are one recoverable app-owned commit. Older IDs
+    // past the receipt window remain covered by the per-setting timestamp watermark.
+    struct QuickSettingLedger: Codable {
+        var winners: [String: QuickSettingRequest] = [:]
+        var appliedIDs: [UUID] = []
+        var generation: QuickSettingRequest.Stamp?
+        var resetStamps: [String: QuickSettingRequest.Stamp]?
+    }
+    @ObservationIgnored private(set) var quickSettingLedger: QuickSettingLedger
+    private static let ledgerKey = "zone.settings.quickSettingLedger"
+    @ObservationIgnored private var pendingPublication: Task<Void, Never>?
 
     private let defaults: UserDefaults
     private let store: SharedStore
@@ -76,46 +115,55 @@ final class AppSettings {
     /// Finish a dictation by itself once it has been quiet for `finishWhenQuietWait`. Off unless
     /// the person turns it on: a pause to think is part of dictating (`SilenceFinish`).
     var finishWhenQuiet: Bool {
-        didSet { defaults.set(finishWhenQuiet, forKey: Key.finishWhenQuiet) }
+        didSet {
+            defaults.set(finishWhenQuiet, forKey: Key.finishWhenQuiet)
+            quickSettingEdited(.quiet)
+        }
     }
+    private var savedQuietWait: TimeInterval
     var finishWhenQuietWait: TimeInterval {
-        didSet { defaults.set(finishWhenQuietWait, forKey: Key.finishWhenQuietWait) }
+        get { savedQuietWait }
+        set {
+            savedQuietWait = SilenceFinish.nearestChoice(newValue)
+            defaults.set(savedQuietWait, forKey: Key.finishWhenQuietWait)
+            quickSettingEdited(.quiet)
+        }
     }
     /// Haptics in the app and on the keyboard's keys (the keyboard also needs Full Access).
     var hapticsEnabled: Bool {
         didSet {
             defaults.set(hapticsEnabled, forKey: Key.haptics)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
     /// Automatic corrections in the keyboard.
     var autocorrectEnabled: Bool {
         didSet {
             defaults.set(autocorrectEnabled, forKey: Key.autocorrect)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
     var swipeTypingEnabled: Bool {
-        didSet { defaults.set(swipeTypingEnabled, forKey: Key.swipeTyping); publishKeyboardPreferences() }
+        didSet { defaults.set(swipeTypingEnabled, forKey: Key.swipeTyping); publishSnapshot() }
     }
     var swipeLearningEnabled: Bool {
-        didSet { defaults.set(swipeLearningEnabled, forKey: Key.swipeLearning); publishKeyboardPreferences() }
+        didSet { defaults.set(swipeLearningEnabled, forKey: Key.swipeLearning); publishSnapshot() }
     }
     var swipeLearningReset: String {
-        didSet { defaults.set(swipeLearningReset, forKey: Key.swipeReset); publishKeyboardPreferences() }
+        didSet { defaults.set(swipeLearningReset, forKey: Key.swipeReset); publishSnapshot() }
     }
     func resetSwipeLearning() { swipeLearningReset = UUID().uuidString }
 
     var autoCapitalizationEnabled: Bool {
         didSet {
             defaults.set(autoCapitalizationEnabled, forKey: Key.autoCapitalization)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
     var showSuggestions: Bool {
         didSet {
             defaults.set(showSuggestions, forKey: Key.showSuggestions)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
     /// A keyboard dictation starts lowercase when Shift shows lowercase, and with a capital when
@@ -123,34 +171,64 @@ final class AppSettings {
     var dictationFollowsShift: Bool {
         didSet {
             defaults.set(dictationFollowsShift, forKey: Key.dictationFollowsShift)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
-    /// Experimental: a spoken "at Kevin" is written "@kevin", a handle for tagging someone.
+    /// Smart @ (Settings > Say “at” to tag names): a spoken "at Kevin" is written "@kevin", a handle for tagging someone.
     var handleRecognition: Bool {
         didSet {
             defaults.set(handleRecognition, forKey: Key.handleRecognition)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
     /// Beta, off by default: "scratch that" and "no wait" take back words while dictating.
     var spokenCorrections: Bool {
         didSet {
             defaults.set(spokenCorrections, forKey: Key.spokenCorrections)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
     /// Beta, off by default: a caps-lock dictation also leaves out commas, periods and apostrophes.
     var capsLockDropsPunctuation: Bool {
         didSet {
             defaults.set(capsLockDropsPunctuation, forKey: Key.capsLockDropsPunctuation)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
     /// Beta, off by default: the keyboard offers the dictated words the engine was least sure of.
     var checksDoubtfulWords: Bool {
         didSet {
             defaults.set(checksDoubtfulWords, forKey: Key.checksDoubtfulWords)
+            publishSnapshot()
+        }
+    }
+    @MainActor
+    func refreshKeyboardSpeechInForeground(downloadRequested: Bool = false) async {
+        guard hasCompletedOnboarding, dictatesInKeyboard else { return }
+        await KeyboardSpeechAssets.refresh(store: store, downloadRequested: downloadRequested) {
+            KeyboardSpeechAssets.shouldFetch(setupDone: self.hasCompletedOnboarding, enabled: self.dictatesInKeyboard,
+                                             fullAccess: self.store.keyboardPresence?.hasFullAccess == true,
+                                             active: UIApplication.shared.applicationState == .active,
+                                             unlocked: UIApplication.shared.isProtectedDataAvailable)
+        }
+    }
+
+    /// On by default. With standby off, record in the keyboard using Zone's speech model, with
+    /// Apple's model as a fallback.
+    var dictatesInKeyboard: Bool {
+        didSet {
+            defaults.set(dictatesInKeyboard, forKey: Key.dictatesInKeyboard)
+            publishSnapshot()
+            // Reading availability needs no download. Installing the fallback has its own button.
+            if dictatesInKeyboard { Task { @MainActor in await refreshKeyboardSpeechInForeground() } }
+            else if oldValue { Task { await WorkerCacheClient.clear() } }
+        }
+    }
+    /// Off by default. On, a recording the keyboard makes by itself is never handed to the
+    /// iPhone's own speech model: where Zone's model cannot hear it there, the mic opens Zone.
+    var neverAppleSpeech: Bool {
+        didSet {
+            defaults.set(neverAppleSpeech, forKey: Key.neverAppleSpeech)
             publishKeyboardPreferences()
         }
     }
@@ -158,14 +236,23 @@ final class AppSettings {
     var spokenEmoticons: Bool {
         didSet {
             defaults.set(spokenEmoticons, forKey: Key.spokenEmoticons)
+            publishSnapshot()
+        }
+    }
+    var fasterDictation: Bool { didSet { defaults.set(fasterDictation, forKey: Key.fasterDictation) } }
+
+    /// Settings > Dictation options, off by default: "second place" is "2nd place" in every style.
+    var numbers: NumberPreferences {
+        didSet {
+            defaults.set(try? JSONEncoder().encode(numbers), forKey: Key.numbers)
             publishKeyboardPreferences()
         }
     }
-    /// Experimental, off by default: "second place" is "2nd place" in every style.
+
     var smallOrdinals: Bool {
         didSet {
             defaults.set(smallOrdinals, forKey: Key.smallOrdinals)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
     /// Beta, off by default: California Mode takes the filler "like" out of dictation, lightly or
@@ -173,28 +260,51 @@ final class AppSettings {
     var californiaMode: CaliforniaMode {
         didSet {
             defaults.set(californiaMode.rawValue, forKey: Key.californiaMode)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
     /// Off by default: curly quotes, long dashes and the ellipsis as they are typed.
     var smartPunctuation: Bool {
         didSet {
             defaults.set(smartPunctuation, forKey: Key.smartPunctuation)
-            publishKeyboardPreferences()
+            publishSnapshot()
+        }
+    }
+    /// Accent by default; Rainbow Road turns the trail's hue as the finger travels.
+    var swipeTrailStyle: SwipeTrailStyle {
+        didSet {
+            defaults.set(swipeTrailStyle.rawValue, forKey: Key.swipeTrailStyle)
+            publishSnapshot()
         }
     }
     /// What holding space does on the keyboard: move the cursor (the default), or talk (Beta).
     var spaceHold: SpaceHold {
         didSet {
             defaults.set(spaceHold.rawValue, forKey: Key.spaceHold)
-            publishKeyboardPreferences()
+            quickSettingEdited(.hold)
         }
     }
-    /// The accent color for the app and the keyboard, stored in the App Group.
+    /// What the space bar shows on the keyboard: a line (the default), a voice mark, the word, or nothing.
+    var spaceBar: SpaceBarLabel {
+        didSet {
+            defaults.set(spaceBar.rawValue, forKey: Key.spaceBar)
+            publishSnapshot()
+        }
+    }
+    /// The accent shared with extensions through the App Group and mirrored to the Watch.
     var accent: AccentChoice {
         didSet {
+            guard accent != oldValue else { return }
             AccentChoice.current = accent
             AccentStore.shared.choice = accent
+            PhoneNoteBridge.shared.publishAccent(accent)
+            WidgetCenter.shared.reloadTimelines(ofKind: CarWidgetState.widgetKind)
+            if #available(iOS 18.0, *) {
+                for kind in [CarWidgetState.noteControlKind, CarWidgetState.dictateControlKind,
+                             StandbyControlState.controlKind, StandbyControlState.islandControlKind] {
+                    ControlCenter.shared.reloadControls(ofKind: kind)
+                }
+            }
         }
     }
     /// A Paste key: between space and a narrower Return on the full keyboard, and in the top row of
@@ -202,36 +312,96 @@ final class AppSettings {
     var showsPasteKey: Bool {
         didSet {
             defaults.set(showsPasteKey, forKey: Key.pasteKey)
-            publishKeyboardPreferences()
+            publishSnapshot()
+        }
+    }
+    /// Enables clipboard history and its manual save routes.
+    var clipboardHistoryEnabled: Bool {
+        didSet {
+            if !clipboardHistoryEnabled { clipboardAutomatic = false }
+            defaults.set(clipboardHistoryEnabled, forKey: Key.clipboardHistory)
+            publishSnapshot()
+        }
+    }
+    /// Separate consent for reading the current clipboard while Zone is visible.
+    var clipboardAutomatic: Bool {
+        didSet {
+            defaults.set(clipboardAutomatic, forKey: Key.clipboardAutomatic)
+            publishSnapshot()
+        }
+    }
+    var clipboardSkipsSecrets: Bool {
+        didSet {
+            defaults.set(clipboardSkipsSecrets, forKey: Key.clipboardSkipsSecrets)
+            publishSnapshot()
+        }
+    }
+    /// Off by default: the keys can be narrowed toward one thumb. Hold 123 on the keyboard to
+    /// choose left, full width or right.
+    var oneHandedEnabled: Bool {
+        didSet {
+            defaults.set(oneHandedEnabled, forKey: Key.oneHanded)
+            publishSnapshot()
+        }
+    }
+    /// The thumb the keys start toward when the mode is turned on or this changes.
+    var oneHandedSide: OneHandedSide {
+        didSet {
+            defaults.set(oneHandedSide.rawValue, forKey: Key.oneHandedSide)
+            publishSnapshot()
+        }
+    }
+    /// The keys' share of the keyboard's width in one-handed mode.
+    var oneHandedWidth: Double {
+        didSet {
+            let clamped = OneHandedLayout.clamped(oneHandedWidth)
+            if clamped != oneHandedWidth { oneHandedWidth = clamped; return }
+            defaults.set(oneHandedWidth, forKey: Key.oneHandedWidth)
+            publishSnapshot()
+        }
+    }
+    var emojiPredictions: Bool {
+        didSet {
+            defaults.set(emojiPredictions, forKey: Key.emojiPredictions)
+            publishSnapshot()
         }
     }
     /// An emoji key left of space that opens the keyboard's own emoji panel.
     var showsEmojiKey: Bool {
         didSet {
             defaults.set(showsEmojiKey, forKey: Key.emojiKey)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
     var hideHomeButton: Bool {
         didSet {
             defaults.set(hideHomeButton, forKey: Key.hideHomeButton)
-            publishKeyboardPreferences()
+            publishSnapshot()
         }
     }
     /// The voice graphic: the keyboard's while recording, and the app composer's (Wave or Bars).
     var meterStyle: MeterStyle {
         didSet {
             defaults.set(meterStyle.rawValue, forKey: Key.meterStyle)
-            publishKeyboardPreferences()
+            quickSettingEdited(.graphic)
         }
+    }
+    var micLightStyle: MicLightStyle {
+        didSet { defaults.set(micLightStyle.rawValue, forKey: Key.micLightStyle) }
     }
     /// The start and stop cues around a dictation.
     var soundsEnabled: Bool {
-        didSet { defaults.set(soundsEnabled, forKey: Key.sounds) }
+        didSet {
+            defaults.set(soundsEnabled, forKey: Key.sounds)
+            quickSettingEdited(.sounds)
+        }
     }
     /// Which pair of cues plays (scripts/make-sounds.py writes every set).
     var soundSet: DictationSounds.Set {
-        didSet { defaults.set(soundSet.rawValue, forKey: Key.soundSet) }
+        didSet {
+            defaults.set(soundSet.rawValue, forKey: Key.soundSet)
+            publishSnapshot()
+        }
     }
     /// The style dictations use. The keyboard's Z changes it too, and the latest choice wins
     /// (`TextStylePolicy`); `adoptKeyboardStyle()` folds a keyboard pick in here.
@@ -266,14 +436,43 @@ final class AppSettings {
     var islandLook: IslandLook {
         didSet { defaults.set(islandLook.rawValue, forKey: Key.islandLook) }
     }
-    /// Keep a small Zone island while the microphone waits for the keyboard. Without it iOS
-    /// shows its own, much wider microphone pill for as long as Zone is ready.
+    /// Zone in the Dynamic Island, the switch at the top of Settings > Dynamic Island. On (the
+    /// default) Zone keeps a small island while the microphone waits for the keyboard. Off, iOS
+    /// shows its own, much wider microphone pill for as long as Zone is ready, and the island
+    /// Zone must still show while recording is the plain one (`islandStyle`).
     var islandWhileReady: Bool {
         didSet { defaults.set(islandWhileReady, forKey: Key.islandWhileReady) }
     }
     /// Stop, Pause, Dictate and Note buttons on the island and the Lock Screen card.
     var islandControls: Bool {
         didSet { defaults.set(islandControls, forKey: Key.islandControls) }
+    }
+    /// Standby's start and end on the island and Lock Screen: clock times or running spans.
+    var islandTimes: IslandTimes {
+        didSet { defaults.set(islandTimes.rawValue, forKey: Key.islandTimes) }
+    }
+
+    /// Old beta color key, kept to restore the saved look.
+    var islandPalette: IslandPalette {
+        didSet { defaults.set(islandPalette.rawValue, forKey: Key.islandPalette) }
+    }
+
+    static let showsIslandGallery = IslandLook.developmentGallery
+
+    /// What the island actually draws. The switch at the top governs the rest: with Zone out
+    /// of the island, a recording (which iOS still requires an island for) is the plain Ghost
+    /// dot in the accent, with its buttons, whatever the hidden choices below it say.
+    var islandStyle: (look: IslandLook, palette: IslandPalette, controls: Bool) {
+        guard islandWhileReady else { return (.ghost, .accent, true) }
+        if Self.showsIslandGallery { return (.restored(islandLook, palette: islandPalette), .accent, islandControls) }
+        // Only these looks could have been chosen in 1.0.5, which had no color picker.
+        let legacy = IslandLook.classic.contains(islandLook) && islandPalette == .accent
+        return (legacy ? islandLook : .halo, .accent, islandControls)
+    }
+    /// A notification when iOS ends Zone's island while the microphone is still on in the
+    /// background, where Zone cannot make it again (`IslandLostNotice`).
+    var islandLostNotice: Bool {
+        didSet { defaults.set(islandLostNotice, forKey: Key.islandLostNotice) }
     }
 
     var notesFirst: Bool {
@@ -324,6 +523,11 @@ final class AppSettings {
         guard let vocabulary else { throw CocoaError(.fileNoSuchFile) }
         vocabularyReads += 1
         handles = try vocabulary.removeHandles(removed)
+    }
+
+    func renameHandle(_ handle: String, to name: String) throws {
+        guard let vocabulary else { throw CocoaError(.fileNoSuchFile) }
+        handles = try vocabulary.renameHandle(handle, to: name)
     }
 
     @ObservationIgnored private let systemLexicon: SystemLexiconStore?
@@ -380,6 +584,21 @@ final class AppSettings {
         cachedSystemSpeechWords = systemWords
     }
 
+    func exportWordList() async throws -> String {
+        guard let vocabulary else { throw CocoaError(.fileReadNoPermission) }
+        return try await Task.detached(priority: .userInitiated) {
+            WordListCSV.write(try vocabulary.document())
+        }.value
+    }
+
+    func importWordList(_ text: String) async throws {
+        guard let vocabulary else { throw CocoaError(.fileWriteNoPermission) }
+        try await Task.detached(priority: .userInitiated) {
+            try vocabulary.restore(WordListCSV.read(text))
+        }.value
+        await refreshVocabularyCache()
+    }
+
     func savePersonalWords(_ words: [String], replacing original: [String]) throws {
         guard let vocabulary else { throw CocoaError(.fileNoSuchFile) }
         try migrateLegacyVocabulary()
@@ -404,58 +623,79 @@ final class AppSettings {
         learnsFromCorrections = enabled
     }
 
-    /// `sessionTimeout` of 0 means a session that only ends when the user ends it.
-    /// Running totals, kept on the phone only.
+    var legacyWords: Int { defaults.bool(forKey: Key.statsMigrated) ? 0 : defaults.integer(forKey: Key.wordsDictated) }
+    var legacySeconds: Double { defaults.bool(forKey: Key.statsMigrated) ? 0 : defaults.double(forKey: Key.secondsDictated) }
+    var transferTotals: DictationTotals? {
+        guard defaults.bool(forKey: Key.statsMigrated) else { return nil }
+        if let data = defaults.data(forKey: Key.cachedTotals),
+           let cached = try? JSONDecoder().decode(DictationTotals.self, from: data) { return cached }
+        // Older builds saved the rounded estimate but neither of its two inputs.
+        guard [Key.cachedWords, Key.cachedSeconds, Key.receiptLongest, Key.minutesSaved]
+            .contains(where: { defaults.object(forKey: $0) != nil }) else { return nil }
+        var cached = DictationTotals()
+        cached.words = wordsDictated
+        cached.seconds = secondsDictated
+        cached.longest = longestDictation
+        cached.legacySavedMinutes = estimatedMinutesSaved
+        return cached
+    }
+    private var measured: DictationTotals?
+    private(set) var islandGarden = IslandGardenProgress()
+    func applyGarden(_ garden: IslandGardenProgress) {
+        var updated = garden
+        let previous = defaults.integer(forKey: "zone.island.accessory")
+        let earned = max(previous, Int(garden.accessory))
+        if earned > previous { defaults.set(earned, forKey: "zone.island.accessory") }
+        updated.earnedAccessory = UInt8(clamping: min(3, earned))
+        if islandGarden != updated { islandGarden = updated }
+    }
     private(set) var wordsDictated: Int
-    /// Times the share card actually went out (the share sheet reported completion). Installs
-    /// from a share cannot be attributed without a server, so this counts what Zone can see.
+    private(set) var secondsDictated: Double
+    private(set) var longestDictation: LongestDictation?
+    var wordsPerMinute: Int { DictationStats.wordsPerMinute(words: wordsDictated, recordingSeconds: secondsDictated) }
+    private(set) var estimatedMinutesSaved: Int
+    func applyStats(_ totals: DictationTotals) {
+        guard measured != totals else { return }
+        measured = totals
+        defaults.set(try? JSONEncoder().encode(totals), forKey: Key.cachedTotals)
+        let minutes = totals.minutesSaved
+        if estimatedMinutesSaved != minutes {
+            estimatedMinutesSaved = minutes
+            defaults.set(minutes, forKey: Key.minutesSaved)
+        }
+        if longestDictation != totals.longest {
+            longestDictation = totals.longest
+            defaults.set(totals.longest.flatMap { try? JSONEncoder().encode($0) }, forKey: Key.receiptLongest)
+        }
+        // Only a successfully read or committed archive reaches applyStats. This second
+        // marker travels with defaults even if a phone transfer omits the History directory.
+        if !defaults.bool(forKey: Key.statsMigrated) { defaults.set(true, forKey: Key.statsMigrated) }
+        if wordsDictated != totals.words || defaults.object(forKey: Key.cachedWords) == nil {
+            wordsDictated = totals.words
+            defaults.set(totals.words, forKey: Key.cachedWords)
+        }
+        if secondsDictated != totals.seconds || defaults.object(forKey: Key.cachedSeconds) == nil {
+            secondsDictated = totals.seconds
+            defaults.set(totals.seconds, forKey: Key.cachedSeconds)
+        }
+    }
+
     private(set) var sharesCompleted: Int
 
-    /// Settings > Your data: start the word count, speed, share totals and longest dictation over.
-    func resetStats() {
+    func didResetStats() {
+        islandGarden = IslandGardenProgress()
+        defaults.removeObject(forKey: "zone.island.accessory")
+        measured = .init()
+        estimatedMinutesSaved = 0
+        longestDictation = nil
         wordsDictated = 0
         secondsDictated = 0
-        wordsTimed = 0
-        speakingSeconds = 0
+        defaults.set(true, forKey: Key.statsMigrated)
         sharesCompleted = 0
-        longestDictation = nil
-        for key in [Key.wordsDictated, Key.secondsDictated, Key.wordsTimed, Key.speakingSeconds,
+        for key in [Key.cachedTotals, Key.cachedWords, Key.cachedSeconds, Key.minutesSaved, Key.receiptLongest, Key.wordsDictated, Key.secondsDictated, Key.wordsTimed, Key.speakingSeconds,
                     Key.sharesCompleted, Key.firstShare, Key.longestSeconds, Key.longestWords, Key.longestDate] {
             defaults.removeObject(forKey: key)
         }
-        // A reset stays reset: the history backfill must never bring the old record back, even
-        // one that had not run yet.
-        defaults.set(true, forKey: Key.longestBackfilled)
-    }
-
-    /// The longest single dictation, the personal record on Home. Nil until one has words.
-    private(set) var longestDictation: LongestDictation?
-
-    /// True until the one-time history backfill has run, so launch reads history only once ever.
-    var needsLongestBackfill: Bool { !defaults.bool(forKey: Key.longestBackfilled) }
-
-    /// Dictations from before the record existed: keep whichever is longer, the history's or
-    /// what was recorded since, and never look again. Takes the result, not the records, so the
-    /// caller can work it out off the main actor and hand over one small value.
-    func backfillLongest(historyLongest: LongestDictation?) {
-        guard needsLongestBackfill else { return }
-        if let found = historyLongest {
-            storeLongest(DictationStats.longest(longestDictation, after: found.seconds, words: found.words, at: found.date))
-        }
-        defaults.set(true, forKey: Key.longestBackfilled)
-    }
-
-    func backfillLongest(from records: [TranscriptRecord]) {
-        backfillLongest(historyLongest: DictationStats.longest(in: records))
-    }
-
-    private func storeLongest(_ record: LongestDictation?) {
-        guard record != longestDictation else { return }
-        longestDictation = record
-        guard let record else { return }
-        defaults.set(record.seconds, forKey: Key.longestSeconds)
-        defaults.set(record.words, forKey: Key.longestWords)
-        defaults.set(record.date, forKey: Key.longestDate)
     }
 
     /// The highest word milestone whose note came up on Home. Recorded the moment it appears,
@@ -481,38 +721,26 @@ final class AppSettings {
         sharesCompleted += 1
         defaults.set(sharesCompleted, forKey: Key.sharesCompleted)
     }
-    /// Whole recordings, pauses included: what dictating cost, for the time saved.
-    private(set) var secondsDictated: Double
-    /// Words from dictations whose speaking time was measured, and that time (`SpeakingTime`).
-    /// Dictations from before 1.0.5 have no speaking time, so they stay out of these two.
-    private(set) var wordsTimed: Int
-    private(set) var speakingSeconds: Double
-
-    /// Speaking speed, as Wispr Flow measures it: words over time spent speaking. Until a minute
-    /// of speech has been measured, the older words over whole recordings, so an update never
-    /// blanks the number.
-    var wordsPerMinute: Int {
-        if speakingSeconds >= 60 { return DictationStats.wordsPerMinute(words: wordsTimed, speakingSeconds: speakingSeconds) }
-        return DictationStats.wordsPerMinute(words: wordsDictated, speakingSeconds: secondsDictated)
-    }
-
-    func record(words: Int, seconds: Double, speakingSeconds speaking: Double? = nil, at date: Date = Date()) {
-        wordsDictated += words
-        secondsDictated += seconds
-        defaults.set(wordsDictated, forKey: Key.wordsDictated)
-        defaults.set(secondsDictated, forKey: Key.secondsDictated)
-        storeLongest(DictationStats.longest(longestDictation, after: seconds, words: words, at: date))
-        guard let speaking, speaking > 0 else { return }
-        wordsTimed += words
-        speakingSeconds += speaking
-        defaults.set(wordsTimed, forKey: Key.wordsTimed)
-        defaults.set(speakingSeconds, forKey: Key.speakingSeconds)
-    }
-
     var inactivityPolicy: InactivityPolicy { InactivityPolicy(timeout: sessionTimeout == 0 ? .infinity : sessionTimeout) }
 
     init(defaults: UserDefaults = .standard, store: SharedStore = UserDefaultsSharedStore(), vocabulary: PersonalVocabulary? = .shared,
          systemLexicon: SystemLexiconStore? = .shared) {
+        var ledger = defaults.data(forKey: Self.ledgerKey).flatMap {
+            try? JSONDecoder().decode(QuickSettingLedger.self, from: $0)
+        } ?? QuickSettingLedger()
+        let published = store.keyboardPreferences
+        let priorStamps = published.quickSettingStamps
+        let freshLedger = defaults.data(forKey: Self.ledgerKey) == nil
+        if ledger.generation == nil {
+            ledger.generation = .init(after: published.quickSettingGeneration)
+            if freshLedger && (published.quickSettingGeneration != nil || !priorStamps.isEmpty) {
+                ledger.resetStamps = Dictionary(uniqueKeysWithValues: QuickSetting.Key.allCases.map {
+                    ($0.rawValue, QuickSettingRequest.Stamp(after: priorStamps[$0.rawValue]))
+                })
+            }
+        }
+        self.quickSettingLedger = ledger
+        self.quickSettingStamps = ledger.resetStamps ?? [:]
         self.defaults = defaults
         self.store = store
         self.vocabulary = vocabulary
@@ -521,8 +749,11 @@ final class AppSettings {
         sessionTimeout = defaults.object(forKey: Key.sessionTimeout) == nil ? InactivityPolicy().timeout : storedTimeout
         hiddenKeyboardGrace = defaults.object(forKey: Key.hiddenKeyboardGrace) as? Double ?? DictationLimits.defaultHiddenKeyboardGrace
         finishWhenQuiet = defaults.bool(forKey: Key.finishWhenQuiet)
-        let storedQuietWait = defaults.object(forKey: Key.finishWhenQuietWait) as? Double ?? SilenceFinish.defaultWait
-        finishWhenQuietWait = SilenceFinish.waitChoices.contains(storedQuietWait) ? storedQuietWait : SilenceFinish.defaultWait
+        // `double(forKey:)` also reads the wait given as text, as a launch argument gives it
+        // (`-zone.settings.finishWhenQuietWait 30`); unreadable text is 0, which becomes the default.
+        let storedQuietWait = defaults.object(forKey: Key.finishWhenQuietWait) == nil
+            ? SilenceFinish.defaultWait : defaults.double(forKey: Key.finishWhenQuietWait)
+        savedQuietWait = SilenceFinish.nearestChoice(storedQuietWait)
         swipeTypingEnabled = defaults.bool(forKey: Key.swipeTyping)
         swipeLearningEnabled = defaults.object(forKey: Key.swipeLearning) as? Bool ?? true
         swipeLearningReset = defaults.string(forKey: Key.swipeReset) ?? ""
@@ -535,18 +766,32 @@ final class AppSettings {
         spokenCorrections = defaults.bool(forKey: Key.spokenCorrections)
         capsLockDropsPunctuation = defaults.bool(forKey: Key.capsLockDropsPunctuation)
         checksDoubtfulWords = defaults.bool(forKey: Key.checksDoubtfulWords)
+        dictatesInKeyboard = defaults.object(forKey: Key.dictatesInKeyboard) as? Bool ?? true
+        neverAppleSpeech = defaults.bool(forKey: Key.neverAppleSpeech)
         spokenEmoticons = defaults.object(forKey: Key.spokenEmoticons) as? Bool ?? true
+        fasterDictation = defaults.bool(forKey: Key.fasterDictation)
+        numbers = defaults.data(forKey: Key.numbers).flatMap { try? JSONDecoder().decode(NumberPreferences.self, from: $0) } ?? .init()
         smallOrdinals = defaults.bool(forKey: Key.smallOrdinals)
         californiaMode = CaliforniaMode(rawValue: defaults.string(forKey: Key.californiaMode) ?? "") ?? .off
         smartPunctuation = defaults.bool(forKey: Key.smartPunctuation)
+        swipeTrailStyle = SwipeTrailStyle(rawValue: defaults.string(forKey: Key.swipeTrailStyle) ?? "") ?? .accent
         spaceHold = SpaceHold(rawValue: defaults.string(forKey: Key.spaceHold) ?? "") ?? .moveCursor
+        spaceBar = SpaceBarLabel(rawValue: defaults.string(forKey: Key.spaceBar) ?? "") ?? .default
         soundsEnabled = defaults.object(forKey: Key.sounds) as? Bool ?? true
         accent = AccentChoice.current
         showsPasteKey = defaults.bool(forKey: Key.pasteKey)
+        emojiPredictions = defaults.object(forKey: Key.emojiPredictions) as? Bool ?? true
+        clipboardAutomatic = defaults.bool(forKey: Key.clipboardAutomatic)
+        clipboardHistoryEnabled = defaults.bool(forKey: Key.clipboardHistory)
+        clipboardSkipsSecrets = defaults.object(forKey: Key.clipboardSkipsSecrets) as? Bool ?? false
         showsEmojiKey = defaults.bool(forKey: Key.emojiKey)
+        oneHandedEnabled = defaults.bool(forKey: Key.oneHanded)
+        oneHandedSide = OneHandedSide(rawValue: defaults.string(forKey: Key.oneHandedSide) ?? "") ?? .right
+        oneHandedWidth = OneHandedLayout.clamped(defaults.object(forKey: Key.oneHandedWidth) as? Double ?? OneHandedLayout.defaultWidth)
         hideHomeButton = defaults.object(forKey: Key.hideHomeButton) as? Bool ?? false
         meterStyle = MeterStyle(rawValue: defaults.string(forKey: Key.meterStyle) ?? "") ?? .wave
-        soundSet = DictationSounds.Set(rawValue: defaults.string(forKey: Key.soundSet) ?? "") ?? .chime
+        micLightStyle = defaults.string(forKey: Key.micLightStyle).flatMap(MicLightStyle.init(rawValue:)) ?? .glow
+        soundSet = DictationSounds.Set(rawValue: defaults.string(forKey: Key.soundSet) ?? "") ?? .wood
         defaultTextStyle = defaults.string(forKey: Key.defaultStyle).flatMap(TextStyle.init(rawValue:)) ?? .casual
         hasCompletedOnboarding = defaults.bool(forKey: Key.onboardingDone)
         usesTypedTextAsHints = defaults.object(forKey: Key.typedHints) as? Bool ?? true
@@ -555,6 +800,9 @@ final class AppSettings {
         islandLook = IslandLook(rawValue: defaults.string(forKey: Key.islandLook) ?? "") ?? .halo
         islandWhileReady = defaults.object(forKey: Key.islandWhileReady) as? Bool ?? true
         islandControls = defaults.object(forKey: Key.islandControls) as? Bool ?? true
+        islandTimes = IslandTimes(rawValue: defaults.string(forKey: Key.islandTimes) ?? "") ?? .clock
+        islandPalette = IslandPalette(rawValue: defaults.string(forKey: Key.islandPalette) ?? "") ?? .accent
+        islandLostNotice = defaults.object(forKey: Key.islandLostNotice) as? Bool ?? true
         notesFirst = defaults.object(forKey: Key.notesFirst) as? Bool ?? true
         let legacyWords = defaults.stringArray(forKey: Key.personalWords) ?? []
         personalWords = legacyWords
@@ -576,28 +824,157 @@ final class AppSettings {
             learnedWords = Set(document.learned)
             }
         }
-        wordsDictated = defaults.integer(forKey: Key.wordsDictated)
+        estimatedMinutesSaved = defaults.integer(forKey: Key.minutesSaved)
+        longestDictation = defaults.data(forKey: Key.receiptLongest).flatMap { try? JSONDecoder().decode(LongestDictation.self, from: $0) }
+        // Pre-release receipt builds reused the migration inputs as live counters.
+        // Their display-only keys identify transferred defaults from those builds.
+        if defaults.object(forKey: Key.receiptLongest) != nil || defaults.object(forKey: Key.minutesSaved) != nil {
+            defaults.set(true, forKey: Key.statsMigrated)
+        }
+        wordsDictated = defaults.integer(forKey: defaults.object(forKey: Key.cachedWords) == nil ? Key.wordsDictated : Key.cachedWords)
+        secondsDictated = defaults.double(forKey: defaults.object(forKey: Key.cachedSeconds) == nil ? Key.secondsDictated : Key.cachedSeconds)
         milestoneAcknowledged = defaults.integer(forKey: Key.milestoneAcknowledged)
         sharesCompleted = defaults.integer(forKey: Key.sharesCompleted)
-        secondsDictated = defaults.double(forKey: Key.secondsDictated)
-        wordsTimed = defaults.integer(forKey: Key.wordsTimed)
-        speakingSeconds = defaults.double(forKey: Key.speakingSeconds)
-        if let date = defaults.object(forKey: Key.longestDate) as? Date {
-            longestDictation = LongestDictation(seconds: defaults.double(forKey: Key.longestSeconds),
-                                                words: defaults.integer(forKey: Key.longestWords), date: date)
+        reconcilingQuickSettings = true
+        let pending = (try? store.quickSettingInbox?.read()) ?? []
+        let arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        for winner in quickSettingLedger.winners.values {
+            let key = winner.value.key
+            let argumentKeys: [String] = switch key {
+            case .quiet: [Key.finishWhenQuiet, Key.finishWhenQuietWait]
+            case .sounds: [Key.sounds]
+            case .graphic: [Key.meterStyle]
+            case .hold: [Key.spaceHold]
+            }
+            quickSettingStamps[key.rawValue] = max(winner.stamp, priorStamps[key.rawValue] ?? winner.stamp)
+            // A consumed ID still on disk with no corresponding publication indicates
+            // the previous drain stopped between the private commit and publication.
+            if pending.contains(winner), winner.isNewer(than: priorStamps),
+               !argumentKeys.contains(where: { arguments[$0] != nil }) {
+                applyQuickSetting(winner.value)
+            }
+        }
+        reconcilingQuickSettings = false
+        if freshLedger || published.quickSettingGeneration == nil { _ = saveQuickSettingLedger() }
+        if let inbox = store.quickSettingInbox {
+            quickSettingObservation = DarwinNotifier.observe(.quickSettingChanged) { [weak self] in
+                self?.schedulePublication(inbox)
+            }
         }
         // The keyboard reads these on every appearance; keep the store in step from first launch.
-        publishKeyboardPreferences()
+        publishKeyboardPreferences(pending: pending)
         store.defaultTextStyle = defaultTextStyle
     }
 
-    private func publishKeyboardPreferences() {
-        store.keyboardPreferences = KeyboardPreferences(autocorrectEnabled: autocorrectEnabled, hapticsEnabled: hapticsEnabled, showSuggestions: showSuggestions, meterStyle: meterStyle, showsPasteKey: showsPasteKey,
-            showsEmojiKey: showsEmojiKey, dictationFollowsShift: dictationFollowsShift, handleRecognition: handleRecognition,
+    private func schedulePublication(_ inbox: QuickSettingInbox) {
+        pendingPublication?.cancel()
+        pendingPublication = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(35))
+            guard !Task.isCancelled else { return }
+            let pending = await Task.detached { (try? inbox.read()) ?? [] }.value
+            guard !Task.isCancelled else { return }
+            self?.publishKeyboardPreferences(pending: pending)
+        }
+    }
+
+    private func quickSettingEdited(_ key: QuickSetting.Key) {
+        guard !reconcilingQuickSettings else { return }
+        let value: QuickSetting
+        switch key {
+        case .quiet: value = .quiet(enabled: finishWhenQuiet, wait: finishWhenQuietWait)
+        case .sounds: value = .sounds(soundsEnabled)
+        case .graphic: value = .graphic(meterStyle)
+        case .hold: value = .hold(spaceHold)
+        }
+        let pending = (try? store.quickSettingInbox?.read()) ?? []
+        let pendingStamp = pending.filter { $0.value.key == key }.map(\.stamp).max()
+        let previous = [pendingStamp, quickSettingStamps[key.rawValue]].compactMap { $0 }.max()
+        rememberWinner(QuickSettingRequest(value, after: previous, generation: quickSettingLedger.generation))
+        _ = saveQuickSettingLedger()
+        publishKeyboardPreferences(pending: pending)
+    }
+
+    private func rememberWinner(_ request: QuickSettingRequest) {
+        let key = request.value.key.rawValue
+        quickSettingStamps[key] = request.stamp
+        quickSettingLedger.winners[key] = request
+    }
+
+    private func saveQuickSettingLedger() -> Bool {
+        guard let data = try? JSONEncoder().encode(quickSettingLedger) else { return false }
+        defaults.set(data, forKey: Self.ledgerKey)
+        return true
+    }
+
+    private func applyQuickSetting(_ value: QuickSetting) {
+        switch value {
+        case let .quiet(enabled, wait):
+            finishWhenQuiet = enabled
+            finishWhenQuietWait = SilenceFinish.nearestChoice(wait)
+        case let .sounds(enabled): soundsEnabled = enabled
+        case let .graphic(style): meterStyle = style
+        case let .hold(action): spaceHold = action
+        }
+    }
+
+    func publishKeyboardPreferences() {
+        publishKeyboardPreferences(pending: (try? store.quickSettingInbox?.read()) ?? [])
+    }
+
+    func drainBeforeRecording() async {
+        guard let inbox = store.quickSettingInbox else { return }
+        let pending = await Task.detached { (try? inbox.read()) ?? [] }.value
+        publishKeyboardPreferences(pending: pending)
+    }
+
+    func publishKeyboardPreferences(pending: [QuickSettingRequest]) {
+        reconcilingQuickSettings = true
+        defer { reconcilingQuickSettings = false }
+        let inbox = store.quickSettingInbox
+        let previousIDs = Set(quickSettingLedger.appliedIDs)
+        for request in pending where request.isNewer(than: quickSettingStamps) {
+            guard request.generation == nil || request.generation == quickSettingLedger.generation,
+                  !previousIDs.contains(request.stamp.id) else { continue }
+            applyQuickSetting(request.value)
+            rememberWinner(request)
+            quickSettingLedger.appliedIDs.append(request.stamp.id)
+        }
+        if quickSettingLedger.appliedIDs.count > 128 {
+            quickSettingLedger.appliedIDs = Array(quickSettingLedger.appliedIDs.suffix(128))
+        }
+        // Flush the private commit before destroying its recovery records.
+        let durable = !pending.isEmpty && saveQuickSettingLedger() && defaults.synchronize()
+        let snapshot = publishSnapshot()
+        if durable, store.confirmKeyboardPreferences(snapshot) {
+            inbox?.prune(pending)
+        }
+    }
+
+    @discardableResult
+    private func publishSnapshot() -> KeyboardPreferences {
+        let snapshot = keyboardPreferences
+        store.keyboardPreferences = snapshot
+        return snapshot
+    }
+
+    var keyboardPreferences: KeyboardPreferences {
+        var snapshot = KeyboardPreferences(autocorrectEnabled: autocorrectEnabled, hapticsEnabled: hapticsEnabled, showSuggestions: showSuggestions, meterStyle: meterStyle, showsPasteKey: showsPasteKey,
+            showsEmojiKey: showsEmojiKey, emojiPredictions: emojiPredictions, dictationFollowsShift: dictationFollowsShift, handleRecognition: handleRecognition,
             swipeTypingEnabled: swipeTypingEnabled, swipeLearningEnabled: swipeLearningEnabled, swipeLearningReset: swipeLearningReset, autoCapitalizationEnabled: autoCapitalizationEnabled,
             hideHomeButton: hideHomeButton, spokenCorrections: spokenCorrections,
             capsLockDropsPunctuation: capsLockDropsPunctuation, spokenEmoticons: spokenEmoticons,
-            smallOrdinals: smallOrdinals, californiaMode: californiaMode, checksDoubtfulWords: checksDoubtfulWords,
-            smartPunctuation: smartPunctuation, spaceHold: spaceHold)
+            smallOrdinals: smallOrdinals, numbers: numbers, californiaMode: californiaMode, checksDoubtfulWords: checksDoubtfulWords,
+            smartPunctuation: smartPunctuation, spaceHold: spaceHold, spaceBar: spaceBar,
+            oneHandedEnabled: oneHandedEnabled, oneHandedSide: oneHandedSide, oneHandedWidth: oneHandedWidth,
+            clipboardHistoryEnabled: clipboardHistoryEnabled, clipboardSkipsSecrets: clipboardSkipsSecrets, clipboardAutomatic: clipboardAutomatic,
+            dictatesInKeyboard: dictatesInKeyboard, neverAppleSpeech: neverAppleSpeech)
+        snapshot.swipeTrailStyle = swipeTrailStyle
+        snapshot.soundSet = soundSet.rawValue
+        snapshot.soundsEnabled = soundsEnabled
+        snapshot.finishWhenQuiet = finishWhenQuiet
+        snapshot.quietWait = finishWhenQuietWait
+        snapshot.quickSettingStamps = quickSettingStamps
+        snapshot.quickSettingGeneration = quickSettingLedger.generation
+        return snapshot
     }
 }

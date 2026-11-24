@@ -27,6 +27,7 @@ final class InkPainter: VoicePainter {
 
     private var random: ArtRandom
     private var points: [Point] = []
+    var pointCount: Int { points.count }
     private var pen: CGFloat = 0
     private var phase: CGFloat = 0
     private var reachUp: CGFloat = 1
@@ -44,7 +45,7 @@ final class InkPainter: VoicePainter {
         let h = size.height
         let unit = h * 0.27
         level = CGFloat(voice.level)
-        let voiced = voice.quiet < 0.2 && voice.level > 0.05
+        let voiced = voice.quiet == 0
         if voiced {
             if !writing {
                 writing = true
@@ -77,7 +78,9 @@ final class InkPainter: VoicePainter {
             // A nib: the stroke thins on the way up and swells on the way down.
             let nib = 0.6 + 0.55 * max(0, -cos(phase))
             let width = max(0.7, h / 48 * (1.0 + 2.6 * level) * nib)
-            points.append(Point(x: x, y: y, width: width, down: points.last.map { _ in !startsWord } ?? false))
+            if startsWord || points.last.map({ hypot(x - $0.x, y - $0.y) >= 0.65 }) ?? true {
+                points.append(Point(x: x, y: y, width: width, down: points.last.map { _ in !startsWord } ?? false))
+            }
             startsWord = false
             tip = CGPoint(x: x, y: y)
         } else if writing, voice.quiet > 0.2 {
@@ -114,7 +117,8 @@ final class InkPainter: VoicePainter {
         if points.isEmpty {
             context.dot(at: CGPoint(x: left, y: h * 0.62 - h * 0.13), radius: h * 0.04)
         } else if writing {
-            // Wet ink pooling under the nib.
+            // The wet edge catches the accent just before it dries into the ink stroke.
+            context.fill(palette.ink.mixed(with: palette.accent, 0.55))
             context.dot(at: CGPoint(x: tip.x - scroll + left, y: tip.y), radius: h / 48 * (1.1 + 1.6 * level))
         }
         fadeLeftEdge(in: context, size: size)
@@ -137,6 +141,7 @@ final class GlyphPainter: VoicePainter {
 
     private var random: ArtRandom
     private var glyphs: [Glyph] = []
+    var glyphCount: Int { glyphs.count }
     private var cursor: CGFloat = 0
     private var scroll: CGFloat = 0
     private var time: Double = 0
@@ -158,7 +163,7 @@ final class GlyphPainter: VoicePainter {
             owesSpace = true
         }
         // A held vowel keeps writing: a syllable detector alone would stall on one long sound.
-        let sustained = voice.level > 0.2 && sinceGlyph > 0.34
+        let sustained = voice.quiet == 0 && voice.level > 0.2 && sinceGlyph > 0.34
         if voice.onset > 0 || sustained {
             if owesSpace {
                 cursor += advance * 0.55

@@ -5,7 +5,7 @@ import SwiftUI
 import UIKit
 
 /// The note card lives in a window of its own, just above Zone's. When the Action Button
-/// starts a note, Zone may be showing a sheet (a note being edited, Cleanup, What's New), a
+/// starts a note, Zone may be showing a sheet (a note being edited, What's New), a
 /// pushed screen or the Note saved page; a card drawn inside Zone's window would sit under a
 /// sheet, and a cover presented for it could fail to present at all. This window is on top of
 /// all of them and takes touches only on the card, so everything around it keeps working.
@@ -178,7 +178,8 @@ private struct NoteCardLayer: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(.spring(response: 0.36, dampingFraction: 0.86), value: coordinator.noteCard?.kind)
-        .tint(Zone.accentText(settings.appearance.colorScheme ?? systemScheme))
+        .tint(Zone.inlineInk(settings.appearance.colorScheme ?? systemScheme))
+        .toggleStyle(SwitchToggleStyle(tint: Zone.accentTone(settings.appearance.colorScheme ?? systemScheme)))
         .preferredColorScheme(settings.appearance.colorScheme)
     }
 }

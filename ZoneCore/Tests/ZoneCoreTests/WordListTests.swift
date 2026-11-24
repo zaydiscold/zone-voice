@@ -16,6 +16,21 @@ final class WordListTests: XCTestCase {
         XCTAssertEqual(list.lookup("THE")?.display, "the")
     }
 
+    func testFailedResourceReadRetriesAndSuccessfulReadIsShared() throws {
+        var reads = 0
+        let cache = RetryingResource<WordList> {
+            reads += 1
+            return reads == 1 ? nil : WordList.loadBundled()
+        }
+        XCTAssertNil(cache.value())
+        let words = try XCTUnwrap(cache.value())
+        XCTAssertTrue(words === cache.value())
+        XCTAssertEqual(reads, 2)
+        XCTAssertTrue(TextStyle.givenNames.contains("grace"))
+        XCTAssertTrue(ModernVocabulary.entries.contains { $0.word == "OpenAI" })
+        XCTAssertTrue(ModernVocabulary.moreEntries.contains { $0.word == "Aarhus" })
+    }
+
     func testLookupIsCaseInsensitiveAndKeepsDictionaryCasing() {
         let list = Self.list
         XCTAssertEqual(list.lookup("monday")?.display, "Monday")

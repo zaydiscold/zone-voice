@@ -4,8 +4,6 @@ import XCTest
 import ZoneCore
 @testable import Zone
 
-/// Home's words per minute: speaking time once enough is measured, the old whole-recording
-/// figure until then, and time saved always against the whole recording.
 @MainActor
 final class SpeakingStatsTests: XCTestCase {
     private var suites: [String] = []
@@ -16,76 +14,137 @@ final class SpeakingStatsTests: XCTestCase {
         super.tearDown()
     }
 
-    private func settings() -> AppSettings {
-        let suite = "speaking-stats-test-" + UUID().uuidString
+    func testKeyboardReceiptRefreshesCoordinatorSettingsThroughStatsChanged() async throws {
+        let suite = "speaking-stats-notification-" + UUID().uuidString
         suites.append(suite)
-        return AppSettings(defaults: UserDefaults(suiteName: suite)!, store: UserDefaultsSharedStore(suiteName: suite),
-                           vocabulary: nil, systemLexicon: nil)
-    }
-
-    func testOlderDictationsKeepTheOldSpeedUntilAMinuteIsMeasured() {
-        let settings = settings()
-        settings.record(words: 1_000, seconds: 600) // before 1.0.5: no speaking time
-        XCTAssertEqual(settings.wordsPerMinute, 100)
-        // 1,100 words over 660 s of recording is still 100 a minute; switching would read 133.
-        settings.record(words: 100, seconds: 60, speakingSeconds: 45)
-        XCTAssertEqual(settings.wordsPerMinute, 100, "45 s of measured speech is not enough to switch")
-        settings.record(words: 50, seconds: 25, speakingSeconds: 20)
-        XCTAssertEqual(settings.wordsPerMinute, 138, "150 words over 65 s of speech")
-    }
-
-    func testTimeSavedStillCountsTheWholeRecording() {
-        let settings = settings()
-        settings.record(words: 362, seconds: 300, speakingSeconds: 150)
-        XCTAssertEqual(DictationStats.minutesSaved(words: settings.wordsDictated, secondsSpoken: settings.secondsDictated), 5)
-    }
-
-    func testResetClearsSpeakingTimeToo() {
-        let settings = settings()
-        settings.record(words: 300, seconds: 160, speakingSeconds: 140)
-        settings.resetStats()
-        XCTAssertEqual(settings.wordsTimed, 0)
-        XCTAssertEqual(settings.speakingSeconds, 0)
-        XCTAssertEqual(settings.wordsPerMinute, 0)
-    }
-    // MARK: Longest dictation
-
-    func testRecordKeepsTheLongestAndAResetClearsIt() {
-        let settings = settings()
-        XCTAssertNil(settings.longestDictation)
-        let first = Date(timeIntervalSince1970: 1_790_000_000)
-        settings.record(words: 1_381, seconds: 537, speakingSeconds: 420, at: first)
-        settings.record(words: 30, seconds: 12, at: first.addingTimeInterval(60))
-        XCTAssertEqual(settings.longestDictation, LongestDictation(seconds: 537, words: 1_381, date: first))
-        settings.resetStats()
-        XCTAssertNil(settings.longestDictation)
-        XCTAssertFalse(settings.needsLongestBackfill, "a reset never lets the history backfill bring it back")
-        settings.backfillLongest(historyLongest: LongestDictation(seconds: 900, words: 2_000, date: first))
-        XCTAssertNil(settings.longestDictation)
-    }
-
-    func testBackfillRunsOnceAndKeepsTheLonger() {
-        let settings = settings()
-        let day = Date(timeIntervalSince1970: 1_790_000_000)
-        XCTAssertTrue(settings.needsLongestBackfill)
-        settings.record(words: 200, seconds: 90, at: day) // recorded before the backfill finished
-        settings.backfillLongest(historyLongest: LongestDictation(seconds: 60, words: 150, date: day.addingTimeInterval(-86_400)))
-        XCTAssertEqual(settings.longestDictation?.seconds, 90, "the shorter history record does not replace it")
-        XCTAssertFalse(settings.needsLongestBackfill)
-        settings.backfillLongest(historyLongest: LongestDictation(seconds: 900, words: 2_000, date: day))
-        XCTAssertEqual(settings.longestDictation?.seconds, 90, "the backfill runs once ever")
-    }
-
-    func testTheRecordSurvivesARelaunch() {
-        let suite = "speaking-stats-test-" + UUID().uuidString
-        suites.append(suite)
-        func open() -> AppSettings {
-            AppSettings(defaults: UserDefaults(suiteName: suite)!, store: UserDefaultsSharedStore(suiteName: suite),
-                        vocabulary: nil, systemLexicon: nil)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let store = InMemorySharedStore()
+        let settings = AppSettings(defaults: defaults, store: store, vocabulary: nil, systemLexicon: nil)
+        let history = try XCTUnwrap(TranscriptHistory.shared)
+        let before = try XCTUnwrap(history.stats(legacyWords: 0, legacySeconds: 0, since: nil)).0
+        let coordinator = DictationCoordinator(settings: settings, store: store)
+        let id = UUID()
+        defer {
+            history.cancel(id: id)
+            withExtendedLifetime(coordinator) {}
         }
-        let day = Date(timeIntervalSince1970: 1_790_000_000)
-        open().record(words: 1_381, seconds: 537.1, at: day)
-        let reopened = open()
-        XCTAssertEqual(reopened.longestDictation, LongestDictation(seconds: 537.1, words: 1_381, date: day))
+        let keyboard = TranscriptHistory(directory: history.directory, keepsDecodedFile: false)
+        keyboard.finish(id: id, text: "from the keyboard", audioSeconds: 12, source: .keyboard, statsStartedAt: Date())
+        let deadline = ContinuousClock.now + .seconds(5)
+        while settings.wordsDictated != before.words + 3 && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(settings.wordsDictated, before.words + 3)
+        // The ledger can sum earlier durations in a different order after adding this receipt.
+        XCTAssertEqual(settings.secondsDictated, before.seconds + 12, accuracy: 0.5 / 16_000)
+    }
+
+    func testTransferFromReceiptTestBuildIgnoresItsLiveCounters() throws {
+        let suite = "speaking-stats-preview-" + UUID().uuidString
+        suites.append(suite)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.set(120, forKey: "zone.stats.words")
+        defaults.set(30, forKey: "zone.stats.seconds")
+        defaults.set(2, forKey: "zone.stats.minutesSaved")
+        let settings = AppSettings(defaults: defaults, store: InMemorySharedStore(), vocabulary: nil, systemLexicon: nil)
+        XCTAssertEqual(settings.wordsDictated, 120)
+        XCTAssertEqual(settings.legacyWords, 0)
+        XCTAssertEqual(settings.legacySeconds, 0)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = TranscriptHistory(directory: directory)
+        func refresh() throws {
+            let snapshot = try XCTUnwrap(destination.stats(legacyWords: settings.legacyWords, legacySeconds: settings.legacySeconds,
+                                                           since: nil, transferred: settings.transferTotals))
+            settings.applyStats(snapshot.0)
+        }
+        try refresh()
+        XCTAssertEqual(settings.wordsDictated, 120)
+        XCTAssertEqual(settings.secondsDictated, 30)
+        XCTAssertEqual(settings.estimatedMinutesSaved, 2)
+        let backup = TranscriptHistory(directory: directory.appendingPathComponent("old-phone"))
+        let id = UUID()
+        XCTAssertTrue(backup.finish(id: id, text: Array(repeating: "word", count: 120).joined(separator: " "),
+                                    audioSeconds: 30, statsStartedAt: Date()))
+        backup.confirmKept(id: id, words: 90)
+        try destination.importBackupData(backup.backupData())
+        try refresh()
+        XCTAssertEqual(settings.wordsDictated, 120)
+        XCTAssertEqual(settings.estimatedMinutesSaved, 2)
+        XCTAssertEqual(settings.transferTotals?.legacySavedMinutes, 0)
+    }
+
+    func testHomeUsesFreshSnapshotsAndPreservesTotalsWhileLoading() throws {
+        let suite = "speaking-stats-test-" + UUID().uuidString
+        suites.append(suite)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.set(100, forKey: "zone.stats.words")
+        defaults.set(50.0, forKey: "zone.stats.seconds")
+        let settings = AppSettings(defaults: defaults, store: UserDefaultsSharedStore(suiteName: suite), vocabulary: nil, systemLexicon: nil)
+        XCTAssertEqual(settings.wordsDictated, 100)
+        XCTAssertEqual(settings.wordsPerMinute, 120)
+        XCTAssertEqual(settings.estimatedMinutesSaved, 0)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let history = TranscriptHistory(directory: directory), id = UUID()
+        func reload() throws {
+            let snapshot = try XCTUnwrap(history.stats(legacyWords: settings.legacyWords, legacySeconds: settings.legacySeconds, since: nil))
+            settings.applyStats(snapshot.0)
+        }
+        try reload()
+        history.finish(id: id, text: Array(repeating: "word", count: 100).joined(separator: " "), audioSeconds: 30, statsStartedAt: Date())
+        try reload()
+        XCTAssertEqual(settings.wordsPerMinute, 150)
+        XCTAssertEqual(settings.estimatedMinutesSaved, 0)
+        history.confirmKept(id: id, words: 100)
+        try reload()
+        XCTAssertEqual(settings.estimatedMinutesSaved, 2)
+        XCTAssertEqual(settings.longestDictation?.words, 100)
+        let newSuite = suite + "-transferred"
+        suites.append(newSuite)
+        let copied = try XCTUnwrap(UserDefaults(suiteName: newSuite))
+        copied.setPersistentDomain(try XCTUnwrap(defaults.persistentDomain(forName: suite)), forName: newSuite)
+        let reopened = AppSettings(defaults: copied, store: UserDefaultsSharedStore(suiteName: newSuite), vocabulary: nil, systemLexicon: nil)
+        XCTAssertEqual(reopened.longestDictation, settings.longestDictation)
+        XCTAssertEqual(reopened.estimatedMinutesSaved, 2)
+        XCTAssertEqual(reopened.wordsDictated, 200)
+        XCTAssertEqual(reopened.secondsDictated, 80)
+        XCTAssertEqual(defaults.integer(forKey: "zone.stats.words"), 100)
+        XCTAssertEqual(defaults.double(forKey: "zone.stats.seconds"), 50)
+        // Quick Start copied defaults. The new phone launches before importing its archive.
+        let destination = TranscriptHistory(directory: directory.appendingPathComponent("new-phone"))
+        func refreshDestination() throws {
+            let snapshot = try XCTUnwrap(destination.stats(legacyWords: reopened.legacyWords,
+                                                           legacySeconds: reopened.legacySeconds, since: nil,
+                                                           transferred: reopened.transferTotals))
+            reopened.applyStats(snapshot.0)
+        }
+        try refreshDestination()
+        XCTAssertEqual(reopened.wordsDictated, 200)
+        XCTAssertEqual(reopened.secondsDictated, 80)
+        XCTAssertEqual(reopened.estimatedMinutesSaved, 2)
+        XCTAssertEqual(reopened.longestDictation, settings.longestDictation)
+        let backup = try history.backupData()
+        for _ in 0..<2 {
+            _ = try destination.importBackupData(backup)
+            try refreshDestination()
+            XCTAssertEqual(reopened.wordsDictated, 200)
+            XCTAssertEqual(reopened.secondsDictated, 80)
+            XCTAssertEqual(reopened.estimatedMinutesSaved, 2)
+            XCTAssertEqual(reopened.transferTotals, settings.transferTotals)
+        }
+        XCTAssertTrue(history.delete(id: id))
+        try reload()
+        XCTAssertEqual(settings.longestDictation?.words, 100)
+        XCTAssertEqual(settings.wordsDictated, 200)
+        XCTAssertTrue(history.resetStats())
+        settings.didResetStats()
+        try reload()
+        XCTAssertEqual(settings.wordsDictated, 0)
+        let resetTransfer = TranscriptHistory(directory: directory.appendingPathComponent("after-reset"))
+        XCTAssertEqual(resetTransfer.stats(legacyWords: settings.legacyWords, legacySeconds: settings.legacySeconds,
+                                           since: nil, transferred: settings.transferTotals)?.0, DictationTotals())
+        XCTAssertEqual(settings.wordsPerMinute, 0)
+        XCTAssertEqual(settings.estimatedMinutesSaved, 0)
     }
 }

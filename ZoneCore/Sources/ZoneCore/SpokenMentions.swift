@@ -362,7 +362,10 @@ enum SpokenMentions {
         for (alias, handle) in known where alias.hasPrefix("~") && alias.count == heard.count + 2 {
             let saved = Array(alias.dropFirst())
             let isCollapse = (1..<saved.count).contains { at in
-                saved[at] == saved[at - 1] && String(saved[..<at] + saved[(at + 1)...]) == heard
+                guard saved[at] == saved[at - 1] else { return false }
+                var candidate = saved
+                candidate.remove(at: at)
+                return String(candidate) == heard
             }
             guard isCollapse else { continue }
             if let found, found != handle { return nil }
@@ -696,13 +699,6 @@ enum SpokenMentions {
     private static let nonHandles: Set<String> = [
         "may", "june", "april", "august", "march", "summer", "winter", "autumn", "dawn",
     ]
-
-    /// About 11,000 first names from US Social Security records (`scripts/make-first-names.py`).
-    static let firstNames: Set<String> = {
-        guard let url = Bundle.module.url(forResource: "first-names", withExtension: "txt"),
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        return Set(text.split(separator: "\n").map(String.init))
-    }()
 
     /// Levenshtein distance; names are short, so one row is enough.
     private static func editDistance(_ a: String, _ b: String) -> Int {

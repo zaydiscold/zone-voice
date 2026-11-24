@@ -36,11 +36,25 @@ public enum MeetingChunkPlanner {
                             mergeGap: Double = 0.8, padding: Double = 0.15, silenceLevel: Float = 0.004) -> [MeetingChunk] {
         guard to > from else { return [] }
         let source = turns.isEmpty ? [MeetingTurn(start: from, end: to, speaker: nil)] : turns
-        // Clip, pad and order.
-        var clipped: [MeetingChunk] = source
-            .map { MeetingChunk(start: max(from, $0.start - padding), end: min(to, $0.end + padding), speaker: $0.speaker) }
-            .filter { $0.end - $0.start > 0.05 }
-            .sorted { $0.start < $1.start }
+        // Clip, pad and order. Toward a neighbouring turn of another voice, padding stops at the
+        // middle of the pause between them (or at the turn's edge when they touch): padding
+        // across made the two chunks overlap, so a word at the change of speaker could be
+        // transcribed twice, once under each name.
+        let ordered = source.sorted { $0.start < $1.start }
+        var clipped: [MeetingChunk] = ordered.indices.map { index in
+            let turn = ordered[index]
+            var start = turn.start - padding, end = turn.end + padding
+            if index > 0, ordered[index - 1].speaker != turn.speaker {
+                let previous = ordered[index - 1].end
+                start = previous > turn.start ? turn.start : max(start, (previous + turn.start) / 2)
+            }
+            if index + 1 < ordered.count, ordered[index + 1].speaker != turn.speaker {
+                let following = ordered[index + 1].start
+                end = following < turn.end ? turn.end : min(end, (turn.end + following) / 2)
+            }
+            return MeetingChunk(start: max(from, start), end: min(to, end), speaker: turn.speaker)
+        }
+        .filter { $0.end - $0.start > 0.05 }
         // Merge neighbours from the same voice while they fit in one chunk.
         var merged: [MeetingChunk] = []
         for chunk in clipped {
@@ -117,11 +131,16 @@ public enum MeetingChunkPlanner {
 }
 
 /// Diarizer labels ("0", "SPEAKER_01", anything) become this app's stable "S1", "S2" ids in
-/// order of first appearance, numbered after the speakers a meeting already has.
+/// order of first appearance, numbered after the speakers a meeting already has. A voice that
+/// matches an existing speaker's voice print (`MeetingVoices`) keeps that speaker's id, so a
+/// resumed stretch does not turn a named person back into "Speaker 3".
 public enum MeetingSpeakerLabels {
-    public static func normalize(_ turns: [MeetingTurn], existing: [MeetingSpeaker]) -> (turns: [MeetingTurn], speakers: [MeetingSpeaker]) {
+    public static func normalize(_ turns: [MeetingTurn], existing: [MeetingSpeaker],
+                                 voices: [String: [Float]] = [:]) -> (turns: [MeetingTurn], speakers: [MeetingSpeaker]) {
         var next = (existing.compactMap { Int($0.id.dropFirst()) }.max() ?? 0) + 1
-        var mapping: [String: String] = [:]
+        let known = Dictionary(existing.compactMap { speaker in speaker.voice.map { (speaker.id, $0) } },
+                               uniquingKeysWith: { first, _ in first })
+        var mapping = MeetingVoices.match(voices, to: known)
         var added: [MeetingSpeaker] = []
         let relabeled = turns.sorted { $0.start < $1.start }.map { turn -> MeetingTurn in
             guard let raw = turn.speaker else { return turn }
@@ -129,7 +148,7 @@ public enum MeetingSpeakerLabels {
                 let id = "S\(next)"
                 next += 1
                 mapping[raw] = id
-                added.append(MeetingSpeaker(id: id))
+                added.append(MeetingSpeaker(id: id, voice: voices[raw]))
             }
             return MeetingTurn(start: turn.start, end: turn.end, speaker: mapping[raw])
         }
@@ -141,6 +160,7 @@ public enum MeetingSpeakerLabels {
 /// paragraph per change of speaker with its start time.
 /// One block of the transcript: consecutive segments from the same voice.
 public struct MeetingParagraph: Equatable, Identifiable, Sendable {
+    /// The person speaking (`Meeting.person`), not the raw voice a line was labeled with.
     public var speaker: String?
     public var start: Double
     public var text: String
@@ -160,6 +180,7 @@ public struct MeetingParagraph: Equatable, Identifiable, Sendable {
 public enum MeetingExport {
     /// Consecutive segments from one speaker joined into a paragraph, in time order.
     public static func paragraphs(_ meeting: Meeting) -> [MeetingParagraph] {
+        let distinct = Set(meeting.speakers.filter { $0.sharesName == true }.map(\.id))
         var out: [MeetingParagraph] = []
         var pending = (meeting.gaps ?? []).sorted { $0.at < $1.at }
         for segment in meeting.segments.sorted(by: { $0.start < $1.start }) {
@@ -170,13 +191,15 @@ public enum MeetingExport {
                 pending.removeFirst()
             }
             // A gap starts a fresh paragraph, even when the same person keeps speaking.
+            // A paragraph belongs to a person: a voice joined to someone continues their paragraph.
+            let person = meeting.person(segment.speaker)
             if let last = out.last, !last.isGap,
-               last.speaker == segment.speaker
-                || (last.speaker != nil && segment.speaker != nil
-                    && meeting.speakerName(last.speaker) == meeting.speakerName(segment.speaker)) {
+               last.speaker == person || (last.speaker.map { !distinct.contains($0) } == true
+                    && person.map { !distinct.contains($0) } == true
+                    && meeting.speakerName(last.speaker) == meeting.speakerName(person)) {
                 out[out.count - 1].text += " " + text
             } else {
-                out.append(MeetingParagraph(speaker: segment.speaker, start: segment.start, text: text))
+                out.append(MeetingParagraph(speaker: person, start: segment.start, text: text))
             }
         }
         for gap in pending {

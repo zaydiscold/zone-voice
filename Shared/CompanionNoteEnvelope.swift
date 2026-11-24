@@ -93,6 +93,10 @@ final class WatchNoteLedger {
         try commit([WatchSavedNote(note: note)] + notes)
     }
 
+    func erase(through date: Date) throws {
+        try commit(notes.filter { $0.note.createdAt > date })
+    }
+
     func mark(_ id: UUID, delivery: WatchSavedNote.Delivery) throws {
         guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
         // A late transfer completion must not downgrade a persisted phone receipt.
@@ -119,6 +123,8 @@ struct CompanionShareItem: Codable, Identifiable, Equatable {
 
 /// A local convenience snapshot for Messages, never the backup or authoritative library.
 struct CompanionShareCache: Codable {
+    private static let group = Bundle.main.object(forInfoDictionaryKey: "ZoneAppGroup") as? String ?? "group.wtf.zayd.zone"
+    static let clearedNotification = group + ".messages-cache-cleared"
     static let maximumBytes = 2_000_000
     static let maximumItems = 80
     var schemaVersion = 1
@@ -127,13 +133,39 @@ struct CompanionShareCache: Codable {
     let omittedCount: Int
     static var url: URL? {
         #if os(iOS)
-        let group = Bundle.main.object(forInfoDictionaryKey: "ZoneAppGroup") as? String ?? "group.wtf.zayd.zone"
         return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)?
             .appendingPathComponent("Library/Application Support/messages-notes.json")
         #else
         return nil
         #endif
     }
+    /// Also called on launch, even if the notes library cannot be read to refresh the cache.
+    static func excludeFromBackup(at url: URL) throws {
+        var file = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try file.setResourceValues(values)
+    }
+
+    func write(to url: URL) throws {
+        let data = try JSONEncoder().encode(self)
+        guard data.count <= Self.maximumBytes else { throw CompanionNoteError.tooLarge }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // A crash between publishing a replacement and setting its flag would leave eligible text.
+        // Stage on the destination volume and publish the already-excluded inode in one rename.
+        let manager = FileManager.default
+        let staging = try manager.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                                      appropriateFor: url, create: true)
+        defer { try? manager.removeItem(at: staging) }
+        try Self.excludeFromBackup(at: staging)
+        let file = staging.appendingPathComponent(url.lastPathComponent)
+        try data.write(to: file, options: .completeFileProtectionUntilFirstUserAuthentication)
+        try Self.excludeFromBackup(at: file)
+        guard rename(file.path, url.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
     static func read(from url: URL) throws -> Self {
         let data = try Data(contentsOf: url)
         guard data.count <= maximumBytes else { throw CompanionNoteError.tooLarge }

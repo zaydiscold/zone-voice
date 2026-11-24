@@ -15,6 +15,9 @@ enum EmojiStore {
     /// Base emoji text to the emoji, for the tones of a recent.
     private(set) static var byBase: [String: Emoji] = [:]
     private(set) static var history = loadHistory()
+    private(set) static var search: EmojiSearchIndex?
+    private static var searchLoading = false
+    private static var searchWaiters: [() -> Void] = []
     private static var isLoading = false
     private static var waiters: [() -> Void] = []
     private static let historyKey = "zone.keyboard.emojiHistory"
@@ -51,12 +54,41 @@ enum EmojiStore {
         }
     }
 
+    static func loadSearch(_ completion: @escaping () -> Void) {
+        if search != nil { completion(); return }
+        searchWaiters.append(completion)
+        guard !searchLoading else { return }
+        searchLoading = true
+        load {
+            let available = Set(byBase.keys)
+            DispatchQueue.global(qos: .userInitiated).async {
+                let start = MemoryFootprint.current()
+                let index = EmojiSearchIndex.loadBundled(available: available)
+                let end = MemoryFootprint.current()
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        search = index
+                        searchLoading = false
+                        if let start, let end {
+                            let delta = Int64(end) - Int64(start)
+                            KeyboardLog.typing.info("emoji search loaded: \(index?.count ?? 0) entries, \(delta) footprint bytes")
+                        }
+                        let pending = searchWaiters
+                        searchWaiters = []
+                        pending.forEach { $0() }
+                    }
+                }
+            }
+        }
+    }
+
     /// Drops the parsed catalog and its indexes, which `load` rebuilds when the panel next opens.
     /// Only while the panel is closed: an open panel reads `baseIndex` to remember skin tones.
     /// Recents stay. Returns true when something was dropped.
     @discardableResult
     static func purge() -> Bool {
-        guard catalog != nil, !isLoading else { return false }
+        guard catalog != nil, !isLoading, !searchLoading else { return false }
+        search = nil
         catalog = nil
         baseIndex = [:]
         byBase = [:]

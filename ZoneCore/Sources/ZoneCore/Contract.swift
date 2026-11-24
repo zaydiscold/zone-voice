@@ -30,7 +30,18 @@ public enum ZoneContract {
     }
 
     /// `zone://home`: just opens the app (the keyboard's wordmark uses it).
-    public static var homeURL: URL { URL(string: "\(urlScheme)://home")! }
+    public static var homeURL: URL { Destination.home.url }
+
+    public enum Destination: String, Hashable, Sendable {
+        case home, notes, settings
+
+        public var url: URL { URL(string: "\(ZoneContract.urlScheme)://\(rawValue)")! }
+
+        public init?(url: URL) {
+            guard url.scheme == ZoneContract.urlScheme, let host = url.host else { return nil }
+            self.init(rawValue: host)
+        }
+    }
 
     /// The request id carried by a dictate URL, or nil for any other URL.
     public static func requestID(from url: URL) -> UUID? {
@@ -55,11 +66,22 @@ public enum DarwinName: String, CaseIterable, Sendable {
     case resultReady
     /// Keyboard inserted or dismissed a result; app clears its temporary text receipt.
     case payloadConsumed
+    /// The app or keyboard committed a dictation stats receipt.
+    case statsChanged
     /// App wrote a `SessionState` (armed, ended, model ready).
     case sessionChanged
     /// The keyboard came on screen. The app warms the speech model if it has sat idle, so a
     /// dictation started a moment later does not wait behind the warm-up.
     case keyboardShown
+    /// Presence only. No field text crosses between processes.
+    case queryEmojiStrip, emojiStripVisible, emojiStripHidden
+    case quickSettingsPublished
+    case quickSettingChanged
+    /// Settings requested removal of the keyboard worker cache.
+    case workerCacheRemoval
+    #if DEBUG && targetEnvironment(simulator)
+    case debugKeyboardInterrupt, debugKeyboardResume
+    #endif
 
     public var cfName: CFString {
         (ZoneContract.darwinPrefix + rawValue) as CFString

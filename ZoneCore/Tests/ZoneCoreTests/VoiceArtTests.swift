@@ -116,7 +116,10 @@ final class VoiceArtTests: XCTestCase {
         for style in Self.drawn {
             XCTAssertEqual(picture(style, seed: 3), picture(style, seed: 3), style.rawValue)
             // Lanes is a score: the same voice plays the same notes.
-            if style == .lanes { continue }
+            if style == .lanes {
+                XCTAssertEqual(picture(style, seed: 3), picture(style, seed: 4))
+                continue
+            }
             XCTAssertNotEqual(picture(style, seed: 3), picture(style, seed: 4), "\(style.rawValue) repeats itself")
         }
     }

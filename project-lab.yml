@@ -1,0 +1,32 @@
+# Lab only. Never used for a build that goes to testers or the App Store.
+#
+# `xcodegen generate --spec project-lab.yml` writes Zone.xcodeproj with one more extension, an
+# audio unit that only measures memory (Lab/ZoneLabUnit). Build and install as usual, run the
+# hidden lab (docs/research/2026-11-22-own-model-phone-limits.md), then put the project back with
+# `xcodegen generate`. The lab unit needs its own App ID with the App Group, so a first build
+# needs `-allowProvisioningUpdates`.
+include:
+  - project.yml
+
+targets:
+  ZoneLabUnit:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - Lab/ZoneLabUnit
+    dependencies:
+      - package: ZoneCore
+        product: ZoneCore
+    settings:
+      base:
+        PRODUCT_NAME: ZoneLabUnit
+        PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_BUNDLE_PREFIX).zone.labunit
+        INFOPLIST_FILE: Lab/ZoneLabUnit/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ZoneKeyboard/ZoneKeyboard.entitlements
+        SKIP_INSTALL: YES
+        TARGETED_DEVICE_FAMILY: "1"
+  Zone:
+    dependencies:
+      - target: ZoneLabUnit
+        embed: true

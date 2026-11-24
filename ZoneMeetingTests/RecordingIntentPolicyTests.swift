@@ -25,6 +25,10 @@ final class RecordingIntentPolicyTests: XCTestCase {
         settings = AppSettings(defaults: UserDefaults(suiteName: suite)!, store: store)
         settings.soundsEnabled = false
         settings.startsSessionOnOpen = false
+        // Most of this file pins the release path: the microphone off and the indicator ended
+        // before a press returns. That is what every press does with no standby card to keep the
+        // microphone under (`StandbyAfterPress`). The cases that keep standby turn the card on.
+        settings.islandWhileReady = false
         engine = PolicySpeechEngine()
         coordinator = DictationCoordinator(settings: settings, store: store, engine: engine, reviews: reviews,
                                            requestSessionPermission: { true })
@@ -50,6 +54,7 @@ final class RecordingIntentPolicyTests: XCTestCase {
         for text in ["A policy regression note.", "", "   "] {
             engine.text = text
             try await startNote()
+            XCTAssertNil(coordinator.lastSetupIntentNote, "An in-app note cannot confirm the button")
             await coordinator.stopDictation(reason: "shortcut")
             XCTAssertTrue(coordinator.isArmed, "Reproduces the unsafe pre-fix standby state")
             try await coordinator.settleRecordingShortcut()
@@ -101,10 +106,36 @@ final class RecordingIntentPolicyTests: XCTestCase {
         for noteMode in [true, false] {
             var intent = SetZoneRecordingIntent(noteMode: noteMode)
             intent.value = false
-            _ = try await intent.perform()
+            let reply = try await intent.perform()
+            XCTAssertNotNil((reply as? IntentResultContainer<Never, Never, Never, IntentDialog>)?.dialog)
             XCTAssertFalse(coordinator.isArmed)
             XCTAssertEqual(engine.starts, 0)
         }
+    }
+
+    func testOnlyTheSystemControlGetsTheSecondPressHint() async throws {
+        let indicator = RecordingLiveActivity()
+        coordinator = DictationCoordinator(settings: settings, store: UserDefaultsSharedStore(suiteName: suite),
+            engine: engine, reviews: reviews, requestSessionPermission: { true }, recordingLiveActivity: indicator)
+        try await startNote()
+        XCTAssertEqual(indicator.latestState?.recordingHint, "Tap Stop to finish")
+        do {
+            try await coordinator.performIslandAction(.dictate)
+            XCTFail("The island must not replace the note")
+        } catch {
+            XCTAssertEqual(indicator.latestState?.pressNotice, RecordingRefusal.note)
+            XCTAssertEqual(indicator.latestState?.phase, .recording)
+        }
+        await coordinator.stopDictation(reason: "app")
+        _ = try await DictateNoteIntent().perform()
+        XCTAssertEqual(indicator.latestState?.recordingHint, "Tap Stop to finish")
+        _ = try await DictateNoteIntent().perform()
+        var control = SetZoneRecordingIntent(noteMode: true)
+        control.value = true
+        _ = try await control.perform()
+        XCTAssertEqual(indicator.latestState?.recordingHint, "Press again to stop")
+        control.value = false
+        _ = try await control.perform()
     }
 
     func testOnOnOffOffForBothModes() async throws {
@@ -113,7 +144,8 @@ final class RecordingIntentPolicyTests: XCTestCase {
             var intent = SetZoneRecordingIntent(noteMode: noteMode)
             intent.value = true
             _ = try await intent.perform()
-            guard case .recording = coordinator.activity else { return XCTFail("On did not record") }
+            guard case .recording(let id, _) = coordinator.activity else { return XCTFail("On did not record") }
+            XCTAssertEqual(coordinator.lastSetupIntentNote == id, noteMode)
             let first = coordinator.activity
             _ = try await intent.perform()
             XCTAssertEqual(coordinator.activity, first, "Repeated On must not stop or replace recording")
@@ -263,12 +295,111 @@ final class RecordingIntentPolicyTests: XCTestCase {
             _ = try await DictateIntent().perform()
             XCTFail("A press that cannot start must say why")
         } catch let error as DictationCoordinator.ShortcutFailure {
-            XCTAssertTrue(error.message.contains("already recording"), error.message)
+            XCTAssertEqual(error.message, RecordingRefusal.note)
+            XCTAssertEqual(coordinator.composerRefusal, error.message)
+            for action in [IslandAction.dictate, .note] {
+                do { try await coordinator.performIslandAction(action); XCTFail("Started twice") }
+                catch { XCTAssertEqual(error.localizedDescription, RecordingRefusal.note) }
+            }
         }
         XCTAssertEqual(coordinator.activity, before, "The independent note must keep recording")
         XCTAssertEqual(engine.starts, 1)
         coordinator.cancelDictation()
         try await coordinator.settleRecordingShortcut()
+    }
+
+    // MARK: A control that still shows On after its recording ended by itself
+
+    private func pressNoteControl(_ on: Bool) async throws {
+        var intent = SetZoneRecordingIntent(noteMode: true)
+        intent.value = on
+        _ = try await intent.perform()
+    }
+
+    private var isRecording: Bool {
+        if case .recording = coordinator.activity { return true }
+        return false
+    }
+
+    /// Zayd's phone, 2026-11-20: a note from the Action Button ended outside its control.
+    /// Two seconds later he pressed again; iOS had not redrawn the control, so the press came
+    /// as Off, found nothing to stop, and did nothing. It starts the next note now.
+    func testAPressAfterANoteEndedByItselfStartsTheNextNote() async throws {
+        await coordinator.prepareModelAndWait()
+        engine.text = "The first note stopped from the island."
+        try await pressNoteControl(true)
+        XCTAssertTrue(isRecording)
+        await coordinator.stopDictation(reason: "islandStop")
+        let first = try XCTUnwrap(coordinator.lastSavedNote)
+
+        engine.text = "The second note."
+        try await pressNoteControl(false)
+        XCTAssertTrue(isRecording, "The press after a note that ended by itself was dropped: \(coordinator.activity)")
+        try await waitUntil(engine.starts == 2)
+        XCTAssertEqual(engine.starts, 2)
+
+        try await pressNoteControl(false)
+        XCTAssertFalse(isRecording)
+        let second = try XCTUnwrap(coordinator.lastSavedNote)
+        XCTAssertNotEqual(second.id, first.id)
+        XCTAssertTrue(second.text.contains("second note"))
+        coordinator.notes.delete(first)
+    }
+
+    /// The same press after the island's Stop, which is not the control's press either.
+    func testAPressAfterTheIslandsStopStartsTheNextNote() async throws {
+        await coordinator.prepareModelAndWait()
+        engine.text = "Stopped from the island."
+        try await pressNoteControl(true)
+        try await coordinator.performIslandAction(.stop)
+        let first = try XCTUnwrap(coordinator.lastSavedNote)
+        try await pressNoteControl(false)
+        XCTAssertTrue(isRecording)
+        coordinator.cancelDictation(playsSound: false)
+        coordinator.notes.delete(first)
+    }
+
+    /// Only one press is owed. Off after the control's own Off, a second Off after the one that
+    /// started, and the other control's Off all stay what they were: nothing.
+    func testOnlyTheFirstPressAfterThatEndingStarts() async throws {
+        await coordinator.prepareModelAndWait()
+        engine.text = "Stopped by its own control."
+        try await pressNoteControl(true)
+        try await pressNoteControl(false)
+        let own = try XCTUnwrap(coordinator.lastSavedNote)
+        try await pressNoteControl(false)
+        XCTAssertFalse(isRecording, "Off after the control's own Off must not start")
+        XCTAssertEqual(engine.starts, 1)
+
+        engine.text = "Stopped from the island."
+        try await pressNoteControl(true)
+        await coordinator.stopDictation(reason: "islandStop")
+        let quiet = try XCTUnwrap(coordinator.lastSavedNote)
+        var dictate = SetZoneRecordingIntent(noteMode: false)
+        dictate.value = false
+        _ = try await dictate.perform()
+        XCTAssertFalse(isRecording, "Dictate and copy was never showing On")
+        XCTAssertEqual(engine.starts, 2)
+        coordinator.notes.delete(own)
+        coordinator.notes.delete(quiet)
+    }
+
+    /// An On press uses the owed press up too: the Off after it stops, and the one after that
+    /// does nothing.
+    func testAnOnPressAfterThatEndingLeavesNothingOwed() async throws {
+        await coordinator.prepareModelAndWait()
+        engine.text = "Stopped from the island, then pressed On."
+        try await pressNoteControl(true)
+        await coordinator.stopDictation(reason: "islandStop")
+        let first = try XCTUnwrap(coordinator.lastSavedNote)
+        try await pressNoteControl(true)
+        XCTAssertTrue(isRecording)
+        try await pressNoteControl(false)
+        XCTAssertFalse(isRecording)
+        try await pressNoteControl(false)
+        XCTAssertFalse(isRecording)
+        XCTAssertEqual(engine.starts, 2)
+        coordinator.notes.delete(first)
     }
 
     func testCancelThenOffReleasesStandbyAndDoesNotCreateNote() async throws {
@@ -298,6 +429,7 @@ final class RecordingIntentPolicyTests: XCTestCase {
         await coordinator.dictateNote()
         guard case .failed = coordinator.activity else { return XCTFail("Expected start failure") }
         guard case .failed = coordinator.noteCard else { return XCTFail("The note card must say the note failed") }
+        XCTAssertNil(coordinator.lastSetupIntentNote)
         try await coordinator.settleRecordingShortcut()
         XCTAssertFalse(coordinator.isArmed)
     }
@@ -390,7 +522,69 @@ final class RecordingIntentPolicyTests: XCTestCase {
         XCTAssertEqual(engine.starts, 1)
     }
 
+    func testColdKeyboardOpensWithMiniWhenDeveloperSelectedApple() async throws {
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        let selectedApple = PolicySpeechEngine()
+        selectedApple.kind = .appleSpeech
+        let mini = try XCTUnwrap(engine)
+        let priorChoice = EngineKind.selected
+        coordinator = DictationCoordinator(settings: settings, store: store,
+            engine: selectedApple, reviews: reviews, modelEngineFactory: { requested in
+                XCTAssertEqual(requested, .fluidSpeechMini)
+                return mini
+            }, requestSessionPermission: { true }, captureHardware: FakeCaptureHardware())
+        let request = DictationRequest(id: UUID(), generation: 1, createdAt: Date(), inputSession: "field", contextBefore: nil)
+        store.request = request
+        store.status = DictationStatus(requestID: request.id, generation: 1, phase: .requested, updatedAt: Date(), message: nil)
+        coordinator.handle(url: ZoneContract.dictateURL(requestID: request.id))
+        try await waitUntil(mini.starts == 1, seconds: 5)
+        XCTAssertEqual(mini.starts, 1)
+        XCTAssertEqual(store.status?.phase, .recording)
+        XCTAssertEqual(store.status?.requestID, request.id)
+        XCTAssertEqual(selectedApple.starts, 0)
+        XCTAssertEqual(EngineKind.selected, priorChoice)
+        coordinator.cancelDictation(playsSound: false)
+    }
+
+    func testHandedOffAudioFinishesOnceAndOffersWordsOnReturn() async throws {
+        let storage = AudioRecoveryStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: storage.directory) }
+        let inbox = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let id = UUID()
+        defer { try? storage.discard(id); try? FileManager.default.removeItem(at: inbox) }
+        let selectedApple = PolicySpeechEngine()
+        selectedApple.kind = .appleSpeech
+        let mini = try XCTUnwrap(engine)
+        coordinator = DictationCoordinator(settings: settings, store: UserDefaultsSharedStore(suiteName: suite),
+            engine: selectedApple, reviews: reviews, recoveryStore: storage, modelEngineFactory: { requested in
+                XCTAssertEqual(requested, .fluidSpeechMini)
+                return mini
+            }, requestSessionPermission: { true })
+        let wav = inbox.appendingPathComponent(KeyboardCapture.handoffName(id))
+        var writer: KeyboardAudioFile? = try KeyboardAudioFile(url: wav, sampleRate: 16_000)
+        writer?.append(PCM16.encode([Float](repeating: 0.2, count: 4096)))
+        _ = writer?.finish()
+        writer = nil
+        try storage.importKeyboardAudio(from: inbox)
+        settings.neverAppleSpeech = true
+        coordinator.setForeground(true)
+        await coordinator.prepareModelAndWait()
+        await coordinator.refreshAudioRecovery()
+        try await waitUntil(coordinator.lastResult?.requestID == id)
+        await coordinator.refreshAudioRecovery()
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        XCTAssertEqual(store.result?.requestID, id)
+        XCTAssertEqual(store.result?.text, engine.text)
+        XCTAssertEqual(store.result?.inputSession, "audio-recovery")
+        XCTAssertEqual(engine.starts, 1)
+        XCTAssertEqual(selectedApple.starts, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: storage.audioURL(id).path))
+    }
+
     func testKeyboardRequestDuringRecoveryKeepsTheRetryAndItsAudio() async throws {
+        settings.defaultTextStyle = .casual
+        settings.numbers.mode = .words
+        engine.text = "I saw 7 birds"
         let support = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                    appropriateFor: nil, create: true)
         let storage = AudioRecoveryStore(directory: support.appendingPathComponent("AudioRecovery"))
@@ -421,6 +615,7 @@ final class RecordingIntentPolicyTests: XCTestCase {
         for _ in 0..<100 where coordinator.retryingAudioID != nil { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertEqual(coordinator.lastResult?.requestID, id)
         XCTAssertEqual(coordinator.lastResult?.text, engine.text)
+        XCTAssertEqual(coordinator.textForRecoveryCopy(try XCTUnwrap(coordinator.lastResult).text), "I saw seven birds")
     }
 
     func testStoppingAnInterruptedMeetingClearsUnavailableStandby() async throws {
@@ -475,6 +670,116 @@ final class RecordingIntentPolicyTests: XCTestCase {
         while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
     }
 
+    // MARK: A press keeps standby (StandbyAfterPress)
+
+    private func pressNoteTwice() async throws {
+        _ = try await DictateNoteIntent().perform()
+        guard case .recording = coordinator.activity else {
+            XCTFail("The press did not record: \(coordinator.activity)")
+            throw PolicyFailure.failed
+        }
+        _ = try await DictateNoteIntent().perform()
+    }
+
+    /// Zayd, November 19: with standby on, a note from the Action Button turned it off. The
+    /// island went back to the system's, and the keyboard's next mic tap had to open Zone.
+    func testNotesFromThePressKeepAStandbyThatWasOn() async throws {
+        let (indicator, requests, setBackground) = try await standbyWithIsland()
+        let made = requests()
+        setBackground(true)
+        coordinator.scenePhaseChanged(.background)
+        for round in 1...4 {
+            engine.text = "Standby stays, note \(round)."
+            try await pressNoteTwice()
+            XCTAssertTrue(coordinator.isArmed, "Note \(round) turned standby off")
+            XCTAssertTrue(indicator.showsStandby, "Note \(round) left no standby card")
+            XCTAssertTrue(StandbyStoppedNotice.isScheduled, "Note \(round) left a ready Zone without its \"Zone is off\" notice")
+            let saved = try XCTUnwrap(coordinator.lastSavedNote)
+            XCTAssertTrue(saved.text.contains("note \(round)"))
+            coordinator.notes.delete(saved)
+        }
+        XCTAssertEqual(requests(), made, "The one card throughout: iOS grants none from the background")
+    }
+
+    /// Standby off, Zone allowed to turn itself on: the press leaves the microphone ready, so
+    /// the next press starts at once and the keyboard's mic works where it is.
+    func testAPressFromOffLeavesStandbyOnForSomeoneWhoLetsZoneTurnOn() async throws {
+        settings.startsSessionOnOpen = true
+        settings.islandWhileReady = true
+        let indicator = RecordingLiveActivity()
+        coordinator = DictationCoordinator(settings: settings, store: UserDefaultsSharedStore(suiteName: suite), engine: engine,
+            reviews: reviews, requestSessionPermission: { true }, recordingLiveActivity: indicator)
+        await coordinator.prepareModelAndWait()
+        XCTAssertFalse(coordinator.isArmed)
+        for round in 1...3 {
+            engine.text = "From off, note \(round)."
+            try await pressNoteTwice()
+            XCTAssertTrue(coordinator.isArmed, "Round \(round)")
+            XCTAssertTrue(indicator.showsStandby, "Round \(round): audio is live, so the card must be up")
+            if let saved = coordinator.lastSavedNote { coordinator.notes.delete(saved) }
+        }
+    }
+
+    /// "Keep microphone ready" at its shortest: ready after the note, off when the time runs
+    /// out, and the next press warms up, records and leaves it ready again. Round after round,
+    /// never stuck on and never refusing to start.
+    func testKeepReadyTimeRunsOutBetweenPressesAndTheNextPressStartsOver() async throws {
+        settings.startsSessionOnOpen = true
+        settings.islandWhileReady = true
+        settings.sessionTimeout = 0.4
+        let indicator = RecordingLiveActivity()
+        coordinator = DictationCoordinator(settings: settings, store: UserDefaultsSharedStore(suiteName: suite), engine: engine,
+            reviews: reviews, requestSessionPermission: { true }, recordingLiveActivity: indicator)
+        await coordinator.prepareModelAndWait()
+        for round in 1...3 {
+            engine.text = "Timed out between, note \(round)."
+            try await pressNoteTwice()
+            XCTAssertTrue(coordinator.isArmed, "Round \(round): ready after the note")
+            let saved = try XCTUnwrap(coordinator.lastSavedNote, "Round \(round) saved nothing")
+            XCTAssertTrue(saved.text.contains("note \(round)"))
+            coordinator.notes.delete(saved)
+            try await waitUntil(!coordinator.isArmed)
+            XCTAssertFalse(coordinator.isArmed, "Round \(round): the time ran out and the microphone went off")
+            XCTAssertFalse(indicator.showsStandby, "Round \(round): no standby card without standby")
+        }
+    }
+
+    /// Someone who turned Zone off gets the microphone back off after the press, and opening
+    /// Zone afterwards does not turn it on: the press was not them turning it on.
+    func testAPressAfterThePersonTurnedZoneOffGivesTheMicrophoneBack() async throws {
+        settings.startsSessionOnOpen = true
+        settings.islandWhileReady = true
+        let indicator = RecordingLiveActivity()
+        coordinator = DictationCoordinator(settings: settings, store: UserDefaultsSharedStore(suiteName: suite), engine: engine,
+            reviews: reviews, requestSessionPermission: { true }, recordingLiveActivity: indicator)
+        await coordinator.prepareModelAndWait()
+        try await coordinator.armSession()
+        coordinator.endSession(reason: .user)
+        engine.text = "Borrowed microphone."
+        try await pressNoteTwice()
+        XCTAssertFalse(coordinator.isArmed)
+        XCTAssertFalse(indicator.isActive, "No audio, no card")
+        coordinator.scenePhaseChanged(.active)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(coordinator.isArmed, "Opening Zone must not undo the person's Off")
+    }
+
+    /// No standby card (Settings > Dynamic Island), no Live Activity to keep audio under:
+    /// every press releases the microphone, even from a standby that was on.
+    func testWithoutTheStandbyCardEveryPressReleasesTheMicrophone() async throws {
+        settings.islandWhileReady = false
+        let indicator = RecordingLiveActivity()
+        coordinator = DictationCoordinator(settings: settings, store: UserDefaultsSharedStore(suiteName: suite), engine: engine,
+            reviews: reviews, requestSessionPermission: { true }, recordingLiveActivity: indicator)
+        await coordinator.prepareModelAndWait()
+        try await coordinator.armSession()
+        engine.text = "No card."
+        try await pressNoteTwice()
+        XCTAssertFalse(coordinator.isArmed)
+        XCTAssertFalse(indicator.isActive)
+        XCTAssertFalse(StandbyStoppedNotice.isScheduled, "The microphone was given back: nothing to warn about")
+    }
+
     /// Zayd's phone, November 9 to 18: 213 interruptions (Siri, a call, another app's audio) ended
     /// with Zone in the background, and each time standby took the microphone back with no island
     /// card. Zone ended the card when the interruption began, and iOS grants no new card to an app
@@ -508,7 +813,14 @@ final class RecordingIntentPolicyTests: XCTestCase {
         try await waitUntil(coordinator.islandSession?.dictations == 1)
         XCTAssertEqual(coordinator.islandSession?.words, 4)
         XCTAssertEqual(indicator.latestState?.session?.dictations, 1, "The card carries the count")
-        if let note = coordinator.lastSavedNote { coordinator.notes.delete(note) }
+        let note = try XCTUnwrap(coordinator.lastSavedNote)
+        XCTAssertTrue(coordinator.notes.update(note, text: "Edited note"))
+        await DictationCoordinator.historyAndWait { history in
+            let session = history.stats(legacyWords: 0, legacySeconds: 0, since: since)?.1
+            XCTAssertEqual(session?.words, 4)
+            XCTAssertEqual(session?.kept, 4)
+        }
+        XCTAssertTrue(coordinator.notes.delete(note))
         postInterruption(began: true)
         try await waitUntil(!coordinator.isArmed)
         postInterruption(began: false, shouldResume: true)
@@ -535,18 +847,311 @@ final class RecordingIntentPolicyTests: XCTestCase {
         indicator.end()
     }
 
-    func testClearedStandbyCardComesBackWhenZoneIsInFront() async throws {
-        let (indicator, requests, _) = try await standbyWithIsland()
+    /// Clearing the card from the Lock Screen turns standby off (Zayd, 2026-11-20). Before, it
+    /// stayed on with iOS's orange pill until Zone was opened. (In front, a card that goes is
+    /// made again at once: `IslandUpkeep`, IslandUpkeepFlowTests.)
+    func testClearedStandbyCardTurnsStandbyOff() async throws {
+        let (indicator, requests, setBackground) = try await standbyWithIsland()
+        var notices = 0
+        coordinator.postClearedCardNotice = { notices += 1 }
         let made = requests()
+        setBackground(true)
+        coordinator.scenePhaseChanged(.background)
         for activity in Activity<RecordingActivityAttributes>.activities {
             await activity.end(nil, dismissalPolicy: .immediate)
         }
-        try await waitUntil(!indicator.isActive)
+        try await waitUntil(!coordinator.isArmed)
         XCTAssertFalse(indicator.isActive, "Zone sees its card go")
-        XCTAssertTrue(coordinator.isArmed, "Clearing the card does not turn standby off")
-        coordinator.scenePhaseChanged(.active)
-        XCTAssertTrue(indicator.showsStandby, "In front, standby takes the island back")
-        XCTAssertEqual(requests(), made + 1)
+        XCTAssertFalse(coordinator.isArmed, "Clearing the card turns standby off")
+        XCTAssertEqual(notices, 1)
+        XCTAssertEqual(requests(), made, "No card is asked for from the background")
+    }
+
+    /// The phone's log, November 12 to 20: 12 of 41 presses with Zone off were refused when
+    /// the engine would not start from the background (`what`), and a second press 2 to 13
+    /// seconds later started every time on the phone's own microphone. The press now tries
+    /// again itself.
+    private func pressHardware(rate: Double = 16_000, recoveryStore: AudioRecoveryStore? = nil) -> (FakeCaptureHardware, RecordingLiveActivity, UserDefaultsSharedStore) {
+        let hardware = FakeCaptureHardware(sampleRate: rate)
+        let card = RecordingLiveActivity()
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        store.defaultTextStyle = .formal
+        coordinator = DictationCoordinator(settings: settings, store: store, engine: engine, recoveryStore: recoveryStore,
+            requestSessionPermission: { true }, captureHardware: hardware, recordingLiveActivity: card)
+        return (hardware, card, store)
+    }
+
+    private func pressNote(_ on: Bool) async throws {
+        var intent = SetZoneRecordingIntent(noteMode: true)
+        intent.value = on
+        _ = try await intent.perform()
+    }
+
+    private func recoveryURL(_ id: UUID) throws -> URL {
+        let support = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                  appropriateFor: nil, create: false)
+        return AudioRecoveryStore(directory: support.appendingPathComponent("AudioRecovery")).audioURL(id)
+    }
+
+    func testSecondControlPressStopsBeforeModelIsReady() async throws {
+        let gate = PolicyFinishGate()
+        engine.prepareGate = gate
+        let (hardware, card, store) = pressHardware(rate: 48_000)
+        try await pressNote(true)
+        guard case .recording(let id, _) = coordinator.activity else { return XCTFail("Missing recording") }
+        XCTAssertEqual(card.latestState?.phase, .recording)
+        XCTAssertEqual(card.latestState?.modelLoading, true)
+        XCTAssertEqual(CarWidgetState.read().phase, .recording)
+        XCTAssertEqual(store.session?.recording, true)
+        XCTAssertThrowsError(try coordinator.turnStandbyOffFromControl())
+        let url = try recoveryURL(id)
+        for _ in 0..<47 { hardware.deliverBuffer(value: 0.25) }
+        AudioHardwareQueue.sync {}
+        try await waitUntil(((try? Data(contentsOf: url).count) ?? 0) > 63_000)
+        let data = try Data(contentsOf: url)
+        let off = Task { try await pressNote(false) }
+        try await waitUntil(card.latestState?.phase == .processing)
+        XCTAssertEqual(card.latestState?.modelLoading, true)
+        XCTAssertFalse(hardware.snapshot.running)
+        await gate.open()
+        try await off.value
+        XCTAssertTrue(PCM16.encode(engine.heard.withLock { $0 }) == data)
+        XCTAssertEqual(coordinator.lastSavedNote?.text, engine.text)
+    }
+
+    func testAnAdmittedPressSkipsTheSilentLoadRunOnce() {
+        let engine = ParakeetEngine(model: .fluidSpeechMini, useNeuralEngine: false)
+        engine.skipPendingLoadWarmUp(reason: "launch")
+        engine.skipPendingLoadWarmUp()
+        XCTAssertEqual(engine.takeLoadWarmUpSkipReason(), "pressDuringLoad")
+        XCTAssertNil(engine.takeLoadWarmUpSkipReason())
+    }
+
+    func testWarmModelWithStandbyOffSavesBufferInsideHardwareStart() async throws {
+        let (hardware, _, _) = pressHardware()
+        await coordinator.prepareModelAndWait()
+        hardware.deliverFirstBufferOnStart = true
+        try await pressNote(true)
+        guard case .recording(let id, _) = coordinator.activity else { return XCTFail("Missing recording") }
+        let url = try recoveryURL(id)
+        let expected = PCM16.encode(Array(repeating: Float(0.25), count: 2048))
+        try await waitUntil((try? Data(contentsOf: url)) == expected)
+        try await pressNote(false)
+        XCTAssertTrue(PCM16.encode(engine.heard.withLock { $0 }) == expected)
+    }
+
+    func testUnknownSystemErrorsStayOutOfRecordingScreens() {
+        let error = NSError(domain: "AudioFixture", code: 1234,
+                            userInfo: [NSLocalizedDescriptionKey: "internal-diagnostic-1234"])
+        for action in [RecordingProblem.microphone, .load, .transcribe, .storage, .removeModel] {
+            XCTAssertEqual(action.message(for: error), action.rawValue)
+        }
+        XCTAssertEqual(RecordingProblem.microphone.message(for: CaptureError.interrupted), CaptureError.interrupted.errorDescription)
+    }
+
+    func testMiniBufferAndDigitalSilenceNeverCountAsModelSubmission() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = AudioRecoveryStore(directory: directory)
+        let writer = try storage.begin(id: UUID(), engine: "Mini", source: .note)
+        let decode = ParakeetUtterance.decoder(manager: MiniModelLoader.manager(at: directory, repeatMargin: nil),
+                                              decoderLayers: 2, lane: SerialRecognitionDecoder())
+        let silent = ParakeetUtterance(decode: decode, submission: writer.submission)
+        silent.feed(Array(repeating: 0, count: 16_000))
+        let words = try await silent.finish()
+        XCTAssertEqual(words, "")
+        XCTAssertEqual(try storage.records().first?.attempts?.count, 0)
+        let spoken = ParakeetUtterance(decode: decode, submission: writer.submission)
+        spoken.feed(Array(repeating: 0.2, count: 16_000))
+        XCTAssertEqual(try storage.records().first?.attempts?.count, 0)
+        _ = try? await spoken.finish()
+        XCTAssertEqual(try storage.records().first?.attempts?.count, 1)
+        try await writer.finish()
+    }
+
+    func testColdPressRefusesWhenNeitherRecoveryFolderCanOpen() async throws {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data().write(to: path)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let storage = AudioRecoveryStore(directory: path, fallbackDirectory: path.appendingPathComponent("fallback"))
+        let (hardware, card, _) = pressHardware(recoveryStore: storage)
+        do { try await pressNote(true); XCTFail("The press needed a recovery file") }
+        catch { XCTAssertEqual(error.localizedDescription, AudioRecoveryError.unavailable.localizedDescription) }
+        XCTAssertEqual(hardware.snapshot.activations, 0)
+        XCTAssertFalse(card.isActive)
+        XCTAssertFalse(coordinator.activity.isRecording)
+    }
+
+    func testColdPressUsesGroupFallbackBeforeOpeningMicrophone() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let primary = root.appendingPathComponent("blocked")
+        try Data().write(to: primary)
+        let fallback = root.appendingPathComponent("group")
+        let storage = AudioRecoveryStore(directory: primary, fallbackDirectory: fallback)
+        let (hardware, _, _) = pressHardware(recoveryStore: storage)
+        hardware.deliverFirstBufferOnStart = true
+        try await pressNote(true)
+        guard case .recording(let id, _) = coordinator.activity else { return XCTFail("Missing recording") }
+        let file = fallback.appendingPathComponent(id.uuidString + ".pcm")
+        try await waitUntil((try? Data(contentsOf: file)) == PCM16.encode([Float](repeating: 0.25, count: 2048)))
+        try await pressNote(false)
+        XCTAssertEqual(coordinator.lastSavedNote?.text, engine.text)
+    }
+
+    func testFailedColdModelLeavesAudioOnHome() async throws {
+        let gate = PolicyFinishGate()
+        engine.prepareGate = gate
+        engine.prepareFails = true
+        let (hardware, _, _) = pressHardware()
+        try await pressNote(true)
+        guard case .recording(let id, _) = coordinator.activity else { return XCTFail("Missing recording") }
+        for _ in 0..<24 { hardware.deliverBuffer(value: 0.5) }
+        AudioHardwareQueue.sync {}
+        await gate.open()
+        try await waitUntil(coordinator.audioRecoveryRecords.contains { $0.id == id && $0.audioBytes == 24 * 4096 })
+        XCTAssertTrue(coordinator.lastError?.contains("Home") == true)
+        XCTAssertEqual(coordinator.audioRecoveryRecords.first { $0.id == id }?.attempts?.count, 0)
+    }
+
+    func testMissingModelRefusesBeforeActivationOrDownload() async throws {
+        // The default test coordinator can already be preparing its installed model.
+        // This launch has a separate engine whose files have never been available.
+        engine = PolicySpeechEngine()
+        engine.filesPresent = false
+        let (hardware, _, _) = pressHardware()
+        do { try await pressNote(true); XCTFail("Missing model") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("download the speech model")) }
+        XCTAssertEqual(hardware.snapshot.activations, 0)
+        XCTAssertEqual(engine.prepareCalls, 0)
+    }
+
+    func testClockAndPauseFollowActualSamplesDuringLoad() async throws {
+        let gate = PolicyFinishGate()
+        engine.prepareGate = gate
+        let (hardware, card, _) = pressHardware()
+        try await pressNote(true)
+        settings.soundsEnabled = true
+        let armed = Date()
+        try await Task.sleep(for: .milliseconds(400))
+        hardware.deliverBuffer(value: 0.25)
+        AudioHardwareQueue.sync {}
+        try await waitUntil((card.latestState?.startedAt.timeIntervalSince(armed) ?? 0) > 0.35)
+        guard case .recording(let id, let began) = coordinator.activity else { return XCTFail("Missing recording") }
+        XCTAssertEqual(card.latestState?.startedAt, began)
+        XCTAssertTrue(Journal.app?.events(since: armed).contains { $0.name == "pressStartCue" } == true)
+        XCTAssertTrue(coordinator.recentLevels.contains { $0 > 0 })
+        try await coordinator.performIslandAction(.pause)
+        hardware.deliverBuffer(value: 0.5)
+        AudioHardwareQueue.sync {}
+        XCTAssertEqual(coordinator.noteRecordingDuration(startedAt: began, now: Date()), 2048.0 / 16_000, accuracy: 0.001)
+        try await coordinator.performIslandAction(.pause)
+        hardware.deliverBuffer(value: 0.75)
+        AudioHardwareQueue.sync {}
+        let url = try recoveryURL(id)
+        let expected = PCM16.encode([Float](repeating: 0.25, count: 2048) + [Float](repeating: 0.75, count: 2048))
+        try await waitUntil((try? Data(contentsOf: url)) == expected)
+        let stop = Task { try await coordinator.performIslandAction(.stop) }
+        try await waitUntil(card.latestState?.phase == .processing)
+        await gate.open()
+        try await stop.value
+        XCTAssertTrue(PCM16.encode(engine.heard.withLock { $0 }) == expected)
+    }
+
+    func testKeyboardClaimArrivingDuringPermissionWaitRefusesPress() async throws {
+        let hardware = FakeCaptureHardware()
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        coordinator = DictationCoordinator(settings: settings, store: store, engine: engine,
+            requestSessionPermission: {
+                store.keyboardRecordingClaim = KeyboardRecordingClaim(requestID: UUID(), since: Date(), heartbeat: Date())
+                return true
+            }, captureHardware: hardware)
+        do { try await pressNote(true); XCTFail("The keyboard owns this microphone") }
+        catch { XCTAssertEqual(error.localizedDescription, KeyboardRecordingClaim.pressRefusal) }
+        XCTAssertEqual(hardware.snapshot.activations, 0)
+        XCTAssertFalse(store.session?.recording == true)
+    }
+
+    func testCallDuringLoadHoldsAudioAndSaves() async throws {
+        let gate = PolicyFinishGate()
+        engine.prepareGate = gate
+        let (hardware, card, _) = pressHardware()
+        try await pressNote(true)
+        for _ in 0..<16 { hardware.deliverBuffer(value: 0.25) }
+        AudioHardwareQueue.sync {}
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
+        XCTAssertTrue(coordinator.isHeld)
+        XCTAssertEqual(card.latestState?.phase, .paused)
+        let stop = Task { try await pressNote(false) }
+        try await waitUntil(card.latestState?.phase == .processing)
+        await gate.open()
+        try await stop.value
+        XCTAssertEqual(engine.heard.withLock { $0.count }, 16 * 2048)
+        XCTAssertEqual(coordinator.lastSavedNote?.text, engine.text)
+    }
+
+    func testPressRefusedOnceFromTheBackgroundTriesAgainAndRecords() async throws {
+        var arms = 0
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        coordinator = DictationCoordinator(settings: settings, store: store, engine: engine, reviews: reviews,
+            requestSessionPermission: { true },
+            armSessionCapture: {
+                arms += 1
+                if arms == 1 { throw NSError(domain: "com.apple.coreaudio.avfaudio", code: 2_003_329_396) }
+            })
+        coordinator.pressFindsZoneInFront = { false }
+        coordinator.pressArmPauses = [.milliseconds(20), .milliseconds(20), .milliseconds(20)]
+        await coordinator.prepareModelAndWait()
+        // The press's own preparation: the microphone here is a stand-in, so the recording
+        // that follows it is not part of this test.
+        try await coordinator.prepareRecordingShortcut(noteMode: true)
+        XCTAssertEqual(arms, 2, "One refusal, one more try inside the same press")
+        XCTAssertTrue(coordinator.isArmed, "The second try turned the microphone on")
+        coordinator.endSession(reason: .user)
+    }
+
+    /// Refused every time: the press gives up after its tries and leaves no microphone and no
+    /// card behind.
+    func testPressRefusedEveryTimeGivesUpWithNothingLeftOn() async throws {
+        var arms = 0
+        let indicator = RecordingLiveActivity()
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        coordinator = DictationCoordinator(settings: settings, store: store, engine: engine, reviews: reviews,
+            requestSessionPermission: { true },
+            armSessionCapture: {
+                arms += 1
+                throw NSError(domain: "com.apple.coreaudio.avfaudio", code: 2_003_329_396)
+            }, recordingLiveActivity: indicator)
+        coordinator.pressFindsZoneInFront = { false }
+        coordinator.pressArmPauses = [.milliseconds(20), .milliseconds(20), .milliseconds(20)]
+        await coordinator.prepareModelAndWait()
+        do {
+            _ = try await DictateNoteIntent().perform()
+            XCTFail("A press that cannot record must say why")
+        } catch {}
+        XCTAssertGreaterThanOrEqual(arms, 4, "The first try and three more")
+        XCTAssertFalse(coordinator.isArmed)
+        XCTAssertFalse(indicator.isActive, "No card is left up for a microphone that never started")
+        XCTAssertEqual(engine.starts, 0)
+    }
+
+    /// In front the microphone starts or it does not: nothing is waited for.
+    func testPressRefusedInFrontIsNotRetried() async throws {
+        var arms = 0
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        coordinator = DictationCoordinator(settings: settings, store: store, engine: engine, reviews: reviews,
+            requestSessionPermission: { true },
+            armSessionCapture: {
+                arms += 1
+                throw NSError(domain: "com.apple.coreaudio.avfaudio", code: 2_003_329_396)
+            })
+        coordinator.pressFindsZoneInFront = { true }
+        await coordinator.prepareModelAndWait()
+        do { _ = try await DictateNoteIntent().perform(); XCTFail("Must fail") } catch {}
+        XCTAssertEqual(arms, 1)
     }
 
     /// An interruption that ends without the hint to resume ends standby, and its card with it:
@@ -626,6 +1231,18 @@ final class RecordingIntentPolicyTests: XCTestCase {
     /// The finished note was cleared after the standby card was made, which ended that card,
     /// and iOS does not grant a backgrounded press a second one.
     func testStartAfterFinishedNoteKeepsItsFirstIndicator() async throws {
+        try await startAfterFinishedNoteKeepsItsFirstIndicator()
+    }
+
+    /// This file runs with "Show Zone during standby" off, where arming used to end the press's
+    /// card as an unwanted standby card (until November 19), costing the press a second
+    /// request. The same must hold with the standby card on.
+    func testStartAfterFinishedNoteKeepsItsFirstIndicatorWithTheStandbyCardOn() async throws {
+        settings.islandWhileReady = true
+        try await startAfterFinishedNoteKeepsItsFirstIndicator()
+    }
+
+    private func startAfterFinishedNoteKeepsItsFirstIndicator() async throws {
         var requests = 0
         let indicator = RecordingLiveActivity(beforeRequest: { requests += 1 })
         let store = UserDefaultsSharedStore(suiteName: suite)
@@ -653,7 +1270,7 @@ final class RecordingIntentPolicyTests: XCTestCase {
     /// The phone's log: a press during a call or while Siri listens failed with !pri or siri,
     /// and the fallback asked a locked phone for its passcode, which could not help.
     func testBusyMicrophoneSaysSoInsteadOfOpeningZone() async throws {
-        for code in [561_017_449, 1_936_290_409, 561_015_905] {
+        for code in [561_017_449, 1_936_290_409] {
             let store = UserDefaultsSharedStore(suiteName: suite)
             coordinator = DictationCoordinator(settings: settings, store: store, engine: engine, reviews: reviews,
                 requestSessionPermission: { true },
@@ -667,6 +1284,24 @@ final class RecordingIntentPolicyTests: XCTestCase {
             }
             XCTAssertFalse(coordinator.isArmed)
             XCTAssertEqual(engine.starts, 0)
+        }
+    }
+
+    /// "Busy" (!act) came with no call or Siri on the phone, and a second press worked, so it
+    /// must not be blamed on a call or Siri.
+    func testSessionBusyIsNotBlamedOnACallOrSiri() async throws {
+        let error = NSError(domain: NSOSStatusErrorDomain, code: 561_015_905)
+        XCTAssertFalse(DictateNoteIntent.microphoneIsBusy(error))
+        XCTAssertTrue(DictateNoteIntent.microphoneIsBusy(NSError(domain: NSOSStatusErrorDomain, code: 561_017_449)))
+        XCTAssertTrue(DictateNoteIntent.microphoneIsBusy(NSError(domain: NSOSStatusErrorDomain, code: 1_936_290_409)))
+    }
+
+    /// A press that could not start says what worked on the phone, never "Open Zone once".
+    func testPressRefusalSaysWhatWorked() {
+        XCTAssertEqual(DictateNoteIntent.pressRefusal(carPlay: false), "Zone's microphone did not start. Press again.")
+        XCTAssertTrue(DictateNoteIntent.pressRefusal(carPlay: true).contains("Open Zone, then press again"))
+        for carPlay in [false, true] {
+            XCTAssertFalse(DictateNoteIntent.pressRefusal(carPlay: carPlay).contains("Open Zone once"))
         }
     }
 
@@ -738,6 +1373,28 @@ final class RecordingIntentPolicyTests: XCTestCase {
         XCTAssertFalse(StandbyControlState(isOn: false, until: now.addingTimeInterval(60)).isOn(at: now))
     }
 
+    func testDeadStandbyAndOldSnapshotsReadOff() throws {
+        let old = try JSONDecoder().decode(StandbyControlState.self, from: Data(#"{"isOn":true}"#.utf8))
+        XCTAssertFalse(old.isOn())
+        let now = Date()
+        let state = StandbyControlState(isOn: true, until: nil, refreshedAt: now)
+        XCTAssertTrue(state.isOn(at: now.addingTimeInterval(10)))
+        XCTAssertFalse(state.isOn(at: now.addingTimeInterval(CarWidgetState.staleAfter)))
+    }
+
+    func testIndependentNoteWinsDuringPressPreparation() async throws {
+        try await startNote()
+        let before = coordinator.activity
+        do {
+            try await coordinator.runRecordingShortcut(noteMode: false, finishing: nil, trigger: .control)
+            XCTFail("A losing start must explain why")
+        } catch let error as RecordingUnchanged {
+            XCTAssertTrue(error.message.contains("another recording"))
+        }
+        XCTAssertEqual(coordinator.activity, before)
+        XCTAssertEqual(engine.starts, 1)
+    }
+
     func testDeactivationFailureKeepsIndicatorUntilSuccessfulRetry() async throws {
         let indicator = RecordingLiveActivity()
         var fails = true
@@ -799,7 +1456,7 @@ final class RecordingIntentPolicyTests: XCTestCase {
         off.value = false
         do { _ = try await off.perform(); XCTFail("Expected explanation of safe stop") }
         catch let error as DictationCoordinator.ShortcutFailure {
-            XCTAssertTrue(error.message.contains("kept in Zone"))
+            XCTAssertTrue(error.message.contains("Open Zone to check the result"))
         }
         XCTAssertFalse(coordinator.isArmed)
         XCTAssertEqual(coordinator.lastResult?.text, engine.text)
@@ -832,23 +1489,34 @@ final class RecordingIntentPolicyTests: XCTestCase {
 
 private enum PolicyFailure: Error { case failed }
 private final class PolicySpeechEngine: SpeechEngine {
-    let kind: EngineKind = .fluidMiniCPU
+    var kind: EngineKind = .fluidMiniCPU
     var isReady = true
     var text = "A policy regression note."
     var starts = 0
     var startFails = false
     var finishFails = false
+    let heard = Locked<[Float]>([])
+    var prepareFails = false
+    var prepareGate: PolicyFinishGate?
     var finishGate: PolicyFinishGate?
-    func assetsPresent() -> Bool { true }
+    var prepareCalls = 0
+    var filesPresent = true
+    func assetsPresent() -> Bool { filesPresent }
     func bytesOnDisk() -> Int64 { 0 }
     func removeAssets() throws {}
     func downloadAssets(progress: @escaping @Sendable (Double, String) -> Void) async throws {}
-    func prepare(progress: @escaping @Sendable (Double, String) -> Void) async throws {}
+    func prepare(progress: @escaping @Sendable (Double, String) -> Void) async throws {
+        prepareCalls += 1
+        await prepareGate?.wait()
+        if prepareFails { throw PolicyFailure.failed }
+    }
     func setContextHints(_ text: String) {}
     func beginUtterance() throws -> UtteranceSession {
         starts += 1
         if startFails { throw PolicyFailure.failed }
-        return PolicyUtterance(text: text, fails: finishFails, gate: finishGate)
+        let session = PolicyUtterance(text: text, fails: finishFails, gate: finishGate)
+        session.receive = { [heard] samples in heard.withLock { $0 += samples } }
+        return session
     }
     func unload() {}
 }
@@ -856,11 +1524,12 @@ private final class PolicyUtterance: UtteranceSession {
     let textSoFar: String
     let fails: Bool
     let gate: PolicyFinishGate?
-    var audioSeconds: Double { 0 }
+    var audioSeconds: Double { 2 }
     var failure: Error? { nil }
     var availableAudioSamples: Int { Int.max }
     init(text: String, fails: Bool, gate: PolicyFinishGate?) { textSoFar = text; self.fails = fails; self.gate = gate }
-    func feed(_ samples: [Float]) {}
+    var receive: (([Float]) -> Void)?
+    func feed(_ samples: [Float]) { receive?(samples) }
     func finish() async throws -> String {
         await gate?.wait()
         if fails { throw PolicyFailure.failed }

@@ -9,23 +9,23 @@ import ZoneCore
 /// live waveform.
 struct KeyboardTheme {
     let isDark: Bool
-    /// The accent this theme was made with. The colors below are statics SwiftUI cannot observe;
-    /// carrying the choice makes a theme made after `refreshAccent` changed it a different value,
-    /// so every view handed the theme draws again with the new accent.
-    var accentStamp = KeyboardTheme.accentChoice
+    /// The stamp, fills and UIKit colors are captured together for this keyboard appearance.
+    let accentStamp: AccentChoice
+    let accentTone: Color
+    let accentToneUIColor: UIColor
+
+    init(isDark: Bool, accentStamp: AccentChoice = KeyboardTheme.accentChoice) {
+        self.isDark = isDark
+        self.accentStamp = accentStamp
+        accentTone = Color(hex: isDark ? accentStamp.darkHex : accentStamp.lightHex)
+        accentToneUIColor = UIColor(accentTone)
+    }
 
     /// zayd.wtf's accent, shared with the app (the extension has no asset catalog).
     /// Read once per keyboard appearance (`refreshAccent`), not on every use: each read was a
     /// shared-defaults lookup, 40 to 60 a second while recording.
     nonisolated(unsafe) private(set) static var accentChoice = storedAccent()
-    nonisolated(unsafe) private(set) static var accent = Color(hex: accentChoice.hex)
-    nonisolated(unsafe) private(set) static var accentOnLight = Color(hex: accentChoice.textHexOnLight)
-
-    /// The same accents as UIColors for the Core Animation views (meter, wave, ring), converted
-    /// once per accent change instead of on every 20 Hz meter update.
-    nonisolated(unsafe) private(set) static var accentUIColor = UIColor(accent)
-    nonisolated(unsafe) private(set) static var accentOnLightUIColor = UIColor(accentOnLight)
-    nonisolated(unsafe) private(set) static var accentGraphicOnLightUIColor = UIColor(Color(hex: accentChoice.graphicHexOnLight))
+    nonisolated(unsafe) private(set) static var accent = Color(hex: accentChoice.darkHex)
 
     /// The app's accent, or the last one this keyboard read when the App Group gives nothing back
     /// (a fresh keyboard process can read before its access settles, and drew violet).
@@ -39,22 +39,24 @@ struct KeyboardTheme {
         let choice = storedAccent()
         guard choice != accentChoice else { return false }
         accentChoice = choice
-        accent = Color(hex: choice.hex)
-        accentOnLight = Color(hex: choice.textHexOnLight)
-        accentUIColor = UIColor(accent)
-        accentOnLightUIColor = UIColor(accentOnLight)
-        accentGraphicOnLightUIColor = UIColor(Color(hex: choice.graphicHexOnLight))
+        accent = Color(hex: choice.darkHex)
         return true
     }
 
-    /// The accent for glyphs and text: Ice and Ember are too light on white keys and light
-    /// backgrounds (1.3 to 2.3:1), so light keyboards use the deeper tone of the same hue.
-    var accentInk: Color { isDark ? Self.accent : Self.accentOnLight }
-    var accentInkUIColor: UIColor { isDark ? Self.accentUIColor : Self.accentOnLightUIColor }
+    /// The other reviewed tone makes the braid visible when either surface tone changes.
+    var otherAccentToneUIColor: UIColor { UIColor(Color(hex: isDark ? accentStamp.lightHex : accentStamp.darkHex)) }
 
-    /// The accent for shapes (wave, bars, swipe trail): the accent on dark keyboards, its vivid
-    /// mid tone on light ones, where the pale accent is a tint against the backdrop.
-    var accentGraphicUIColor: UIColor { isDark ? Self.accentUIColor : Self.accentGraphicOnLightUIColor }
+    var accentStroke: Color {
+        let tone = accentToneUIColor
+        let strong = UIColor(text)
+        return Color(uiColor: UIColor { $0.accessibilityContrast == .high ? strong : tone })
+    }
+
+    var markFaceHex: UInt32 { isDark && accentStamp == .ice ? 0xB1D5DF : accentStamp.darkHex }
+    var markRimHex: UInt32 { isDark && accentStamp == .ice ? 0x48636D : accentStamp.lightHex }
+
+    var controlFill: Color { Color(hex: accentStamp.controlFillHex(isDark: isDark)) }
+    var controlInk: Color { Color(hex: accentStamp.controlInkHex(isDark: isDark)) }
 
     static let live = Color(hex: 0xFF6B6B)
 
@@ -69,26 +71,74 @@ struct KeyboardTheme {
     /// A latched strip key: darker than the raised key so it reads as pressed in.
     var latchedKey: Color { isDark ? Color(hex: 0x2E2E2F) : Color(hex: 0xD1D3D9) }
     var text: Color { isDark ? .white : .black }
-    var secondaryText: Color { isDark ? Color.white.opacity(0.65) : Color.black.opacity(0.55) }
-    /// The one ink control in the strip: the mic circle and the Start pill.
     var ink: Color { isDark ? .white : .black }
     var onInk: Color { isDark ? .black : .white }
+    var secondaryText: Color { isDark ? Color.white.opacity(0.65) : Color.black.opacity(0.55) }
     static let cornerRadius: CGFloat = 8
 }
 
-/// The icon's Z on its own, with no tile behind it. It takes the accent's ink tone: the accent on
-/// dark keyboards and its deeper shade on light ones, where Ice and Ember are too pale to read.
-/// A charcoal tile behind it (build 2026110812) read as a dark square on light keyboards.
+/// The logo has the same rim and face on both keyboard appearances.
 struct ZoneHomeMark: View {
     let theme: KeyboardTheme
 
     var body: some View {
-        Image("ZoneHomeMark")
-            .renderingMode(.template)
-            .resizable()
-            .scaledToFit()
-            // 18 pt: at 15 pt the icon Z's hairline bars washed out on a phone and the letter read as a slash.
+        ZoneHomeGlyph()
+            .fill(Color(hex: theme.markFaceHex))
+            .background {
+                ZoneHomeGlyph().stroke(Color(hex: theme.markRimHex),
+                                       style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
+            }
             .frame(width: 18 * 293 / 355, height: 18)
-            .foregroundStyle(theme.accentInk)
+            .padding(1)
+            .accessibilityHidden(true)
+    }
+}
+
+/// The outline of the 293 × 355 serif Z used for the app mark. A native shape also
+/// draws inside a hosted keyboard button without resolving a template image in Canvas.
+private struct ZoneHomeGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: 11, y: 0))
+        path.addLine(to: CGPoint(x: 291, y: 0))
+        path.addLine(to: CGPoint(x: 108, y: 351))
+        path.addQuadCurve(to: CGPoint(x: 174, y: 348), control: CGPoint(x: 140, y: 351))
+        path.addCurve(to: CGPoint(x: 291, y: 231), control1: CGPoint(x: 254, y: 342),
+                      control2: CGPoint(x: 280, y: 310))
+        path.addLine(to: CGPoint(x: 288, y: 355))
+        path.addLine(to: CGPoint(x: 1, y: 355))
+        path.addLine(to: CGPoint(x: 184, y: 4))
+        path.addQuadCurve(to: CGPoint(x: 124, y: 8), control: CGPoint(x: 153, y: 5))
+        path.addCurve(to: CGPoint(x: 7, y: 110), control1: CGPoint(x: 47, y: 16),
+                      control2: CGPoint(x: 20, y: 47))
+        path.closeSubpath()
+        return path.applying(CGAffineTransform(translationX: rect.minX, y: rect.minY)
+            .scaledBy(x: rect.width / 293, y: rect.height / 355))
+    }
+}
+
+extension View {
+    func keyboardAccentBadge(_ theme: KeyboardTheme) -> some View {
+        foregroundStyle(theme.controlInk)
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(theme.controlFill, in: Capsule())
+    }
+}
+
+/// The sun or moon shadow for strip keys, read once per keyboard appearance: no location, no
+/// timer. Strip keys sit a few points apart, so they keep a shorter shadow than the app's cards.
+/// 2 pt overhead (and at night) to 3.5 pt on the horizon: at 1 pt the night shadow was a hairline
+/// on the phone (Zayd, November 19), and the keys sit 6 pt apart, so 3.5 still clears the next.
+enum KeyboardSun {
+    static var current = cast()
+    static func refresh() { current = cast() }
+    private static func cast() -> SunShadow { SunShadow.at(minLength: 2, maxLength: 3.5) }
+}
+
+extension View {
+    /// The raised-key shadow alone, for shapes that are not buttons (the style key's fill).
+    func sunCast(theme: KeyboardTheme) -> some View {
+        let sun = KeyboardSun.current
+        return shadow(color: .black.opacity(sun.alpha * (theme.isDark ? 0.6 : 0.25)), radius: 0, x: sun.dx, y: sun.dy)
     }
 }

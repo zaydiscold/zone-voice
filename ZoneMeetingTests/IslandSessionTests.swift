@@ -1,5 +1,6 @@
 // by zayd/cold @ zayd.wtf
 
+import UIKit
 import XCTest
 import ZoneCore
 @testable import Zone
@@ -12,6 +13,20 @@ final class IslandSessionTests: XCTestCase {
     private let us = Locale(identifier: "en_US")
     /// 08:31 UTC.
     private let start = Date(timeIntervalSince1970: 8 * 3600 + 31 * 60)
+
+    func testLockScreenHintUsesTheStartOfThisRecording() {
+        var state = RecordingActivityAttributes.ContentState(phase: .recording, noteMode: true, startedAt: Date())
+        XCTAssertEqual(state.recordingHint, "Tap Stop to finish")
+        state.controlOwned = true
+        state.startedByPress = false
+        XCTAssertEqual(state.recordingHint, "Tap Stop to finish")
+        state.startedByPress = true
+        XCTAssertEqual(state.recordingHint, "Press again to stop")
+        state.startedByPress = false
+        state.controlOwned = false
+        state.controls = false
+        XCTAssertEqual(state.recordingHint, "Recording on this iPhone")
+    }
 
     func testNothingToTellBeforeTheFirstDictation() {
         let session = IslandSession(since: start)
@@ -33,55 +48,73 @@ final class IslandSessionTests: XCTestCase {
     func testTimeSavedMatchesHome() {
         for (words, seconds) in [(0, 0.0), (20, 40.0), (312, 121.0), (1_240, 400.0), (5_000, 2_000.0)] {
             var session = IslandSession(since: start)
-            session.add(words: words, seconds: seconds)
+            session.add(words: words, seconds: seconds, kept: words)
             let home = DictationStats.minutesSaved(words: words, secondsSpoken: Double(session.seconds))
             XCTAssertEqual(session.minutesSaved ?? 0, home, "\(words) words in \(seconds) s")
         }
         XCTAssertEqual(IslandSession.typingWordsPerMinute, DictationStats.typingWordsPerMinute)
     }
 
-    func testSpeedMatchesHome() {
+    func testSpeedIncludesPausesAndSavingsRequireDelivery() {
         var session = IslandSession(since: start)
-        session.add(words: 40, seconds: 22, speakingSeconds: 18.4)
-        session.add(words: 210, seconds: 110, speakingSeconds: 101.6)
-        XCTAssertEqual(session.wordsPerMinute, DictationStats.wordsPerMinute(words: 250, speakingSeconds: 120))
-        XCTAssertEqual(session.wordsPerMinute, 125)
-    }
-
-    func testLastDictationSpeedNeedsEnoughToMeasure() {
-        var session = IslandSession(since: start)
-        session.add(words: 42, seconds: 24, speakingSeconds: 19.7)
-        XCTAssertEqual(session.lastWordsPerMinute, 128)
-        XCTAssertEqual(session.keptLine(words: 42), "Kept 42 words · 128 wpm.")
-        session.add(words: 2, seconds: 3, speakingSeconds: 0.9) // "ok thanks": too short to time
-        XCTAssertNil(session.lastWordsPerMinute)
-        XCTAssertEqual(session.keptLine(words: 2), "Kept 2 words.")
-        session.add(words: 30, seconds: 14) // no speaking time measured
-        XCTAssertNil(session.lastWordsPerMinute)
-    }
-
-    func testLockScreenLineLeadsWithSpeedOnceThereIsOne() {
-        var session = IslandSession(since: start)
-        session.add(words: 12, seconds: 20, speakingSeconds: 5) // 5 s of speech: no speed yet
+        session.add(words: 12, seconds: 5)
         XCTAssertEqual(session.lockScreenLine, "1 dictation · 12 words")
-        session.add(words: 300, seconds: 110, speakingSeconds: 140)
-        XCTAssertEqual(session.lockScreenLine, "312 words · 129 wpm · 6 min saved")
+        session.add(words: 300, seconds: 125)
+        XCTAssertEqual(session.wordsPerMinute, DictationStats.wordsPerMinute(words: 312, recordingSeconds: 130))
+        XCTAssertEqual(session.lockScreenLine, "312 words · 144 wpm")
+        session.keptWords = 300
+        XCTAssertEqual(session.lockScreenLine, "312 words · 144 wpm · 6 min saved")
+        XCTAssertNil(IslandSession(since: start + 180).lockScreenLine)
     }
 
-    func testLockScreenLineAddsTimeSavedOnlyOnceThereIsSome() {
+    @MainActor
+    func testLockScreenStatsFitTheSmallPhoneAtDefaultCaptionSize() throws {
         var session = IslandSession(since: start)
-        session.add(words: 12, seconds: 20) // typing 12 words takes about 19 s: nothing saved
-        XCTAssertEqual(session.lockScreenLine, "1 dictation · 12 words")
-        session.add(words: 300, seconds: 110)
-        XCTAssertEqual(session.lockScreenLine, "2 dictations · 312 words · 6 min saved")
+        session.add(words: 312, seconds: 130, kept: 300)
+        let line = try XCTUnwrap(session.lockScreenLine) as NSString
+        let traits = UITraitCollection(preferredContentSizeCategory: .large)
+        let caption = UIFont.preferredFont(forTextStyle: .caption2, compatibleWith: traits)
+        // Allow 32 points around the card, its two 14-point insets, the widest
+        // 24-point figure (2.3x wide), three 10-point gaps and an 80-point end time.
+        let available: CGFloat = 375 - 32 - 28 - 56 - 30 - 80
+        XCTAssertLessThanOrEqual(ceil(line.size(withAttributes: [.font: caption]).width * 0.8), available)
+    }
+
+    func testFailedNoteCountsTowardPaceButOnlyMeasuredSecondsAffectSavings() {
+        let session = IslandSession(since: start, dictations: 2, words: 140, seconds: 180,
+                                    recordedSeconds: 180, measuredSeconds: 30, keptWords: 100)
+        XCTAssertEqual(session.wordsPerMinute, DictationStats.wordsPerMinute(words: 140, recordingSeconds: 180))
+        XCTAssertEqual(session.minutesSaved, DictationStats.minutesSaved(words: 100, secondsSpoken: 30))
+    }
+
+    func testOldIslandPayloadDoesNotAssumeDelivery() throws {
+        var session = IslandSession(since: start)
+        session.words = 500
+        session.seconds = 200
+        session.dictations = 2
+        let decoded = try JSONDecoder().decode(IslandSession.self, from: JSONEncoder().encode(session))
+        XCTAssertEqual(decoded.wordsPerMinute, 150)
+        XCTAssertNil(decoded.minutesSaved)
     }
 
     /// The payload stays small: every update carries the session.
     func testTheSessionAddsLittleToEachUpdate() throws {
         var session = IslandSession(since: start)
-        for _ in 0..<500 { session.add(words: 999, seconds: 300, speakingSeconds: 250) }
+        for _ in 0..<500 { session.add(words: 999, seconds: 300, kept: 900) }
         let bytes = try JSONEncoder().encode(session).count
         // 144 bytes with the speed fields filled; ActivityKit allows 4 KB per update.
         XCTAssertLessThan(bytes, 160)
+    }
+
+    /// Times (Settings > Dynamic Island) rides on every update. An older payload has no field
+    /// and reads as clock times; Live survives the round trip ActivityKit makes.
+    func testTimesDecodeFromOlderPayloadsAndSurviveTheTrip() throws {
+        var state = RecordingActivityAttributes.ContentState(phase: .ready, noteMode: false, startedAt: Date(timeIntervalSince1970: 0))
+        let older = try JSONEncoder().encode(state)
+        XCTAssertNil(try JSONDecoder().decode(RecordingActivityAttributes.ContentState.self, from: older).times)
+        state.times = .live
+        let data = try JSONEncoder().encode(state)
+        XCTAssertEqual(try JSONDecoder().decode(RecordingActivityAttributes.ContentState.self, from: data).times, .live)
+        XCTAssertEqual(IslandTimes.allCases.map(\.title), ["Clock", "Live"])
     }
 }

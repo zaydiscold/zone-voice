@@ -23,7 +23,7 @@ settings:
     SWIFT_VERSION: "5.0"
     SWIFT_STRICT_CONCURRENCY: minimal
     CODE_SIGN_STYLE: Automatic
-    MARKETING_VERSION: "1.0.5"
+    MARKETING_VERSION: "1.0.6"
     CURRENT_PROJECT_VERSION: 1
     TARGETED_DEVICE_FAMILY: "1"
     # iOS 18: Fluid Speech Mini, the one speech model, requires it. Every iPhone that runs
@@ -49,16 +49,44 @@ packages:
 
 targets:
   Zone:
+    buildRules: &workerPointRules
+      - name: Write the speech worker point identifier
+        filePattern: "*.workerpoint"
+        runOncePerArchitecture: false
+        outputFiles:
+          - "$(DERIVED_FILE_DIR)/$(ZONE_BUNDLE_PREFIX)/WorkerPointID.swift"
+        script: |
+          set -eu
+          case "$ZONE_BUNDLE_PREFIX" in *[!a-zA-Z0-9.-]*|'') exit 1 ;; esac
+          mkdir -p "$(dirname "$SCRIPT_OUTPUT_FILE_0")"
+          sed "s/@PREFIX@/$ZONE_BUNDLE_PREFIX/g" "$INPUT_FILE_PATH" > "$SCRIPT_OUTPUT_FILE_0"
     type: application
     platform: iOS
     sources:
+      - path: Config/Identifier.workerpoint
+        buildPhase: sources
+      # Personalize renders the extension's typing strip and key grid with no input session.
+      - path: ZoneKeyboard
+        includes: ["*.swift", "Views/**/*.swift", "Layout/**/*.swift"]
+        excludes:
+          - KeyboardViewController.swift
+          - TextProxyGate.swift
+          - KeyboardMemory.swift
+          - ClipboardController.swift
+          - Views/KeyboardRootView.swift
+          - Views/HistoryPanelView.swift
+          - Views/EmojiPanelView.swift
+      - path: ZoneKeyboard/Assets.xcassets
       - path: Zone
         excludes: [ReleaseNotes]
       # Each version's release notes, copied as a folder so the app reads ReleaseNotes/<version>.md.
       - path: Zone/ReleaseNotes
         type: folder
         buildPhase: resources
+      - path: THIRD-PARTY-NOTICES.md
+        buildPhase: resources
       - path: Shared
+        excludes: [KeyboardWebASR]
     settings:
       base:
         PRODUCT_NAME: Zone
@@ -66,12 +94,36 @@ targets:
         INFOPLIST_FILE: Zone/Info.plist
         CODE_SIGN_ENTITLEMENTS: Zone/Zone.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         # ZoneExceptionCatcher: AVAudioEngine raises Objective-C exceptions Swift cannot catch.
         SWIFT_OBJC_BRIDGING_HEADER: Zone/Zone-Bridging-Header.h
         SUPPORTS_MACCATALYST: NO
         TARGETED_DEVICE_FAMILY: "1"
+    postBuildScripts:
+      - name: Register the speech worker point
+        inputFiles:
+          - $(TARGET_TEMP_DIR)/Objects-normal
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Extensions/Zone.appexpt
+        script: |
+          set -eu
+          # Debug writes one const-values file per source (SpeechWorkerPoint.swiftconstvalues);
+          # Release compiles the module whole and writes Zone-primary.swiftconstvalues. Take
+          # whichever file holds the extension point, and fail the build if none does: without
+          # Zone.appexpt the keyboard cannot find the speech worker.
+          out="$SCRIPT_OUTPUT_FILE_0"
+          rm -f "$out"
+          find "$SCRIPT_INPUT_FILE_0" -name '*.swiftconstvalues' -print0 | while IFS= read -r -d '' values; do
+            grep -q 'ExtensionPoint' "$values" || continue
+            xcrun exutil extract-extension-points --module-name "$PRODUCT_MODULE_NAME" --sdk-root "$SDKROOT" --platform-family iOS --deployment-target 26.0 --bundle-identifier "$PRODUCT_BUNDLE_IDENTIFIER" --output "$out" "$values" || true
+            [ -s "$out" ] && break
+          done
+          if [ ! -s "$out" ]; then
+            echo "error: no speech worker extension point was found in $SCRIPT_INPUT_FILE_0" >&2
+            exit 1
+          fi
     dependencies:
+      - target: ZoneSpeechWorker
+        embed: true
       - target: ZoneKeyboard
       - target: ZoneActivity
       - target: ZoneMessages
@@ -90,13 +142,24 @@ targets:
     deploymentTarget:
       iOS: "18.0"
     sources:
+      - path: Privacy/ZoneActivity/PrivacyInfo.xcprivacy
+        buildPhase: resources
       - path: ZoneActivity
+      - path: ZoneCore/Sources/ZoneCore/AccentChoice.swift
+      - path: ZoneCore/Sources/ZoneCore/AppGroup.swift
+      - path: Shared/ColorHex.swift
       - path: Shared/RecordingActivityAttributes.swift
+      - path: Shared/IslandCompact.swift
+      - path: Shared/MeetingWave.swift
+      - path: Shared/IslandArt.swift
+      - path: Shared/IslandArtworks.swift
+      - path: Shared/IslandSprite.swift
       - path: Shared/ZoneIntents.swift
       - path: Shared/CarWidgetState.swift
     settings:
       base:
         PRODUCT_NAME: ZoneActivity
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) ZONE_ACTIVITY_EXTENSION"
         PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_BUNDLE_PREFIX).zone.activity
         INFOPLIST_FILE: ZoneActivity/Info.plist
         CODE_SIGN_ENTITLEMENTS: ZoneActivity/ZoneActivity.entitlements
@@ -104,15 +167,51 @@ targets:
         SKIP_INSTALL: YES
         TARGETED_DEVICE_FAMILY: "1"
 
+  ZoneSpeechWorker:
+    type: extensionkit-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Privacy/ZoneSpeechWorker/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - ZoneSpeechWorker
+      - Zone/Engine/ParakeetUtterance.swift
+    dependencies:
+      - package: ZoneCore
+        product: ZoneCore
+      - package: ZoneFluidAudio
+        product: ZoneFluidAudio
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_BUNDLE_PREFIX).zone.recognition
+        INFOPLIST_FILE: ZoneSpeechWorker/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ZoneKeyboard/ZoneKeyboard.entitlements
+        SKIP_INSTALL: YES
   ZoneKeyboard:
+    buildRules: *workerPointRules
     type: app-extension
     platform: iOS
     sources:
+      - path: Config/Identifier.workerpoint
+        buildPhase: sources
       - path: ZoneKeyboard
+      - path: Shared/KeyboardWebASR
+        type: folder
+        buildPhase: resources
+      - path: Zone/Resources/Sounds
+        includes: ["dictation-*.caf"]
+        buildPhase: resources
       - path: Shared
-        excludes: [RecordingActivityAttributes.swift, ZoneIntents.swift, CarWidgetState.swift]
+        excludes: [KeyboardWebASR, RecordingActivityAttributes.swift, IslandCompact.swift, MeetingWave.swift, IslandArt.swift, IslandArtworks.swift, IslandSprite.swift, ZoneIntents.swift, CarWidgetState.swift]
     settings:
       base:
+        # UIKit added reservedRegions in 27.1. Keep older build SDKs supported.
+        DUO_REGION_FLAG: ZONE_DUO_REGIONS
+        "DUO_REGION_FLAG[sdk=iphoneos1*]": ""
+        "DUO_REGION_FLAG[sdk=iphonesimulator1*]": ""
+        "DUO_REGION_FLAG[sdk=iphone*26.*]": ""
+        "DUO_REGION_FLAG[sdk=iphone*27.0*]": ""
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(DUO_REGION_FLAG)"
         PRODUCT_NAME: ZoneKeyboard
         PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_BUNDLE_PREFIX).zone.keyboard
         INFOPLIST_FILE: ZoneKeyboard/Info.plist
@@ -134,6 +233,9 @@ targets:
     platform: iOS
     sources:
       - path: ZoneMessages
+      - path: ZoneCore/Sources/ZoneCore/AccentChoice.swift
+      - path: ZoneCore/Sources/ZoneCore/AppGroup.swift
+      - path: Shared/ColorHex.swift
       - path: Shared/CompanionNoteEnvelope.swift
     settings:
       base:
@@ -155,6 +257,9 @@ targets:
     deploymentTarget: "10.0"
     sources:
       - path: ZoneWatch
+      - path: ZoneCore/Sources/ZoneCore/AccentChoice.swift
+      - path: ZoneCore/Sources/ZoneCore/AppGroup.swift
+      - path: Shared/ColorHex.swift
       - path: Shared/CompanionNoteEnvelope.swift
     settings:
       base:
@@ -167,12 +272,20 @@ targets:
         TARGETED_DEVICE_FAMILY: "4"
 
   KeyboardTests:
+    buildRules: *workerPointRules
     type: bundle.unit-test
     platform: iOS
     sources:
+      - path: Config/Identifier.workerpoint
+        buildPhase: sources
       - path: KeyboardTests
+      - path: ZoneCore/Tests/ZoneCoreTests/KeyboardCapturePageTests.swift
+      - path: Zone/Resources/test-clip.wav
+        buildPhase: resources
+      - path: ZoneKeyboard/Assets.xcassets
       - path: ZoneKeyboard/SwipeEngine.swift
       - path: ZoneKeyboard/KeyboardModel.swift
+      - path: ZoneKeyboard/EmojiStore.swift
       - path: ZoneKeyboard/SpellingStore.swift
       - path: ZoneKeyboard/TextProxyActions.swift
       - path: ZoneKeyboard/TextProxyGate.swift
@@ -182,12 +295,35 @@ targets:
       - path: ZoneKeyboard/Layout/KeyboardLayout.swift
       - path: ZoneKeyboard/Views/KeyGridView.swift
       - path: ZoneKeyboard/Views/KeyBalloonLayer.swift
+      - path: ZoneKeyboard/Views/HandPickerLayer.swift
+      - path: ZoneKeyboard/Views/OneHandedPanel.swift
       - path: ZoneKeyboard/Views/KeyGlyphs.swift
       - path: ZoneKeyboard/Views/KeyboardTheme.swift
+      - path: ZoneKeyboard/Views/ZonePanelView.swift
+      - path: ZoneKeyboard/Views/SuggestionBar.swift
       - path: ZoneKeyboard/Views/PasteControlKey.swift
+      - path: ZoneKeyboard/ClipboardController.swift
       - path: ZoneKeyboard/Layout/KeyGridLayout.swift
       - path: ZoneKeyboard/Layout/KeyGridPrediction.swift
       - path: Shared/ColorHex.swift
+      # The mic's state machine and the keyboard's own recording, driven with a fake recorder
+      # (LocalDictationFlowTests).
+      - path: ZoneKeyboard/MicController.swift
+      - path: ZoneKeyboard/ZoneModelSpeech.swift
+      - path: ZoneKeyboard/KeyboardRecordingCue.swift
+      - path: ZoneKeyboard/LocalDictation.swift
+      - path: ZoneKeyboard/KeyboardWebSpeech.swift
+      - path: Shared/KeyboardWebASR
+        type: folder
+        buildPhase: resources
+      - path: ZoneKeyboard/OwnModelLabRunner.swift
+      - path: ZoneKeyboard/LocalDictationHost.swift
+      - path: ZoneKeyboard/KeyboardFixture.swift
+      - path: Shared/LevelChannel.swift
+      - path: Shared/FlowingWave.swift
+      - path: Shared/SignalLevelMeter.swift
+      - path: Shared/VoiceArtView.swift
+      - path: Shared/Hex
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
@@ -201,8 +337,10 @@ targets:
     platform: iOS
     sources:
       - path: KeyboardTestHost
+      - path: ZoneKeyboard/Resources/en-pairs.bin
       - path: ZoneKeyboard/SwipeEngine.swift
       - path: ZoneKeyboard/KeyboardModel.swift
+      - path: ZoneKeyboard/EmojiStore.swift
       - path: ZoneKeyboard/SpellingStore.swift
       - path: ZoneKeyboard/TextProxyActions.swift
       - path: ZoneKeyboard/TextProxyGate.swift
@@ -212,16 +350,22 @@ targets:
       - path: ZoneKeyboard/Layout/KeyboardLayout.swift
       - path: ZoneKeyboard/Views/KeyGridView.swift
       - path: ZoneKeyboard/Views/KeyBalloonLayer.swift
+      - path: ZoneKeyboard/Views/HandPickerLayer.swift
       - path: ZoneKeyboard/Views/KeyGlyphs.swift
       - path: ZoneKeyboard/Views/KeyboardTheme.swift
+      - path: ZoneKeyboard/Views/SuggestionBar.swift
       - path: ZoneKeyboard/Views/PasteControlKey.swift
+      - path: ZoneKeyboard/ClipboardController.swift
+      - path: ZoneKeyboard/Views/HistoryPanelView.swift
       - path: ZoneKeyboard/Layout/KeyGridLayout.swift
       - path: ZoneKeyboard/Layout/KeyGridPrediction.swift
       - path: Shared/ColorHex.swift
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: wtf.zayd.zone.swipeqa
+        "CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]": ZoneKeyboard/ZoneKeyboard.entitlements
+        ZONE_QA_BUNDLE_ID: wtf.zayd.zone.swipeqa
+        PRODUCT_BUNDLE_IDENTIFIER: $(ZONE_QA_BUNDLE_ID)
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
     dependencies:
       - package: ZoneCore
@@ -273,6 +417,7 @@ schemes:
     build:
       targets:
         KeyboardTestHost: all
+        Zone: [test]
     test:
       targets:
         - KeyboardUITests

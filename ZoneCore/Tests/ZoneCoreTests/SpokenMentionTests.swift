@@ -11,6 +11,13 @@ final class SpokenMentionTests: XCTestCase {
         style.apply(text, personalWords: words, mentions: true, handles: handles)
     }
 
+    func testCompleteFirstNameListIsAvailable() {
+        XCTAssertEqual(SpokenMentions.firstNames.count, 10_906)
+        XCTAssertEqual(TextStyle.givenNames.count, 1_250)
+        XCTAssertTrue(TextStyle.givenNames.contains("grace"))
+        XCTAssertFalse(TextStyle.givenNames.contains("will"))
+    }
+
     func testRecognizedTagsBecomeHandles() {
         let cases: [(String, String)] = [
             ("At Kevin, what do you think?", "@kevin what do you think?"),

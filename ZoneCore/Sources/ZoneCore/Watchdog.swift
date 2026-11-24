@@ -73,8 +73,9 @@ public enum Watchdog {
                 Task {
                     while !outcome.isResolved {
                         if pulse.idle >= limit {
-                            work.cancel()
+                            // Claim the timeout before cancellation can produce a different error.
                             outcome.resolve(.failure(Stalled(what: what, seconds: limit)))
+                            work.cancel()
                             return
                         }
                         try? await Task.sleep(nanoseconds: UInt64(max(checkEvery, 0.01) * 1_000_000_000))

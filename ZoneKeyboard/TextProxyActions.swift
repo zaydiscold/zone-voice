@@ -28,6 +28,7 @@ protocol TextProxyActions: AnyObject {
     /// False for fields where autocorrect would get in the way: URLs, email addresses, user names,
     /// passwords, one-time codes, and any field that turned autocorrection off.
     var allowsAutocorrection: Bool { get }
+    var allowsEmojiShortcodes: Bool { get }
     /// False only where a swiped word could never be what the field wants: passwords, user names,
     /// one-time codes, email addresses, bare URLs and number pads. Search bars and address bars
     /// turn autocorrection off and still take swiped words, as they do on Apple's keyboard.
@@ -67,6 +68,11 @@ protocol TextProxyActions: AnyObject {
 extension TextProxyActions {
     /// Implementations that read their traits live have nothing to reload.
     func reloadFieldTraits() {}
+
+    /// Restrictive input traits also cover code editors that deliberately mark their field literal.
+    var allowsEmojiShortcodes: Bool {
+        allowsAutocorrection && allowsSwipeTyping && !prefersNumbers && !isSearchField
+    }
 }
 
 /// `UITextAutocapitalizationType`, without UIKit.

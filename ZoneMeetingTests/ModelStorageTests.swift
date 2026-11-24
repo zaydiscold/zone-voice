@@ -177,6 +177,8 @@ final class ModelStorageTests: XCTestCase {
             armSessionCapture: { captureStarts += 1 })
         let request = DictationRequest(id: UUID(), generation: 1, createdAt: Date(), inputSession: nil, contextBefore: nil)
         store.request = request
+        store.status = DictationStatus(requestID: request.id, generation: request.generation,
+                                       phase: .requested, updatedAt: Date(), message: nil)
         dictation.handle(url: URL(string: "zone://dictate?request=\(request.id.uuidString)")!)
         await fulfillment(of: [entered], timeout: 3)
         dictation.endSession(reason: .user)
@@ -187,6 +189,22 @@ final class ModelStorageTests: XCTestCase {
         XCTAssertEqual(captureStarts, 0)
         XCTAssertEqual(store.status?.phase, .cancelled)
         XCTAssertEqual(store.status?.requestID, request.id)
+    }
+
+    func testAutomaticPreparationCannotStartAMissingFileTransfer() async {
+        let file = RemoteFile(url: root.appendingPathComponent("no-source"),
+                              destination: root.appendingPathComponent("missing-model-file"), bytes: 1,
+                              digest: .sha256(String(repeating: "0", count: 64)))
+        do {
+            try await ModelDownloader.$allowsNewTransfers.withValue(false) {
+                try await ModelDownloader.shared.fetch([file]) { _, _ in }
+            }
+            XCTFail("Automatic preparation accepted a missing file")
+        } catch SpeechEngineError.notReady {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: file.destination.path))
+        } catch {
+            XCTFail("Expected the download consent check: \(error)")
+        }
     }
 
     func testInventoryScanDoesNotBlockMainActor() async {
@@ -262,6 +280,41 @@ final class ModelStorageTests: XCTestCase {
         dictation.scenePhaseChanged(.active)
         await Task.yield()
         XCTAssertEqual(models[.fluidSpeechMini]!.prepareCount, prepares, "opening the app must not recreate deleted files")
+    }
+
+    func testRetiredRewriteWaitsForUnlockAndDeletesOnlyItsDownload() throws {
+        let files = FileManager.default
+        let id = UUID().uuidString
+        let support = files.temporaryDirectory.appendingPathComponent(id)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: id))
+        defer {
+            try? files.removeItem(at: support)
+            defaults.removePersistentDomain(forName: id)
+        }
+        let model = support.appendingPathComponent("Cleanup")
+        let partial = model.appendingPathComponent("fluid-pico.partial")
+        try files.createDirectory(at: partial, withIntermediateDirectories: true)
+        let chunk = partial.appendingPathComponent("chunk")
+        try Data(repeating: 83, count: 65536).write(to: chunk)
+        let archive = support.appendingPathComponent("CleanupHistory")
+        try files.createDirectory(at: archive, withIntermediateDirectories: true)
+        let saved = archive.appendingPathComponent(UUID().uuidString + ".json")
+        let words = Data(#"{"original":"Keep my words."}"#.utf8)
+        try words.write(to: saved)
+        defaults.set(true, forKey: RetiredCleanup.automaticKey)
+        RetiredCleanup.sweep(in: support, defaults: defaults, canReadProtectedData: { false })
+        XCTAssertTrue(files.fileExists(atPath: chunk.path))
+        XCTAssertTrue(defaults.bool(forKey: RetiredCleanup.automaticKey))
+
+        // An open staging file can finish writing after unlink without recreating the download.
+        let writer = try FileHandle(forWritingTo: chunk)
+        RetiredCleanup.sweep(in: support, defaults: defaults, canReadProtectedData: { true })
+        try writer.write(contentsOf: Data([42]))
+        try writer.close()
+        RetiredCleanup.sweep(in: support, defaults: defaults, canReadProtectedData: { true })
+        XCTAssertFalse(files.fileExists(atPath: model.path))
+        XCTAssertNil(defaults.object(forKey: RetiredCleanup.automaticKey))
+        XCTAssertEqual(try Data(contentsOf: saved), words)
     }
 
     func testRetiredCleanupKeepsActiveModelAndIsIdempotent() async throws {
@@ -419,11 +472,47 @@ final class ModelStorageTests: XCTestCase {
         let launched = DictationCoordinator(settings: settings, store: store)
         XCTAssertFalse(SpeechModel.retired.contains(launched.selectedModel), "The model in use is never a retired one")
         XCTAssertFalse(launched.isDeletingModels, "Loading the model in use must not wait for the sweep")
+        XCTAssertTrue(launched.launchCleanup.contains(.moonshineTiny), "Launch deletes the leftover it found")
         let deadline = Date().addingTimeInterval(10)
         while FileManager.default.fileExists(atPath: planted.path), Date() < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: planted.path), "The sweep still removes retired downloads")
+    }
+
+    /// Launch looks for retired folders and deletes only those it finds: none on a phone that
+    /// never had them, so launch then starts no deletion at all.
+    func testRetiredLeftoversNameOnlyFoldersStillOnDisk() throws {
+        for model in SpeechModel.retired {
+            if let directory = model.assetDirectory, FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.removeItem(at: directory)
+            }
+        }
+        XCTAssertEqual(SpeechModel.retiredLeftovers(), [], "Nothing left over: launch deletes nothing")
+        let planted = try XCTUnwrap(SpeechModel.moonshineSmall.assetDirectory)
+        try FileManager.default.createDirectory(at: planted, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: planted) }
+        XCTAssertEqual(SpeechModel.retiredLeftovers(), [.moonshineSmall])
+        XCTAssertFalse(SpeechModel.retiredLeftovers().contains(.fluidSpeechMini), "The model in use is never a leftover")
+    }
+
+    /// With nothing to delete, a production launch never marks itself as deleting, so the
+    /// model in use and the keyboard's standby are never held behind a cleanup.
+    func testLaunchWithNoLeftoversStartsNoDeletion() async throws {
+        for model in SpeechModel.retired {
+            if let directory = model.assetDirectory, FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.removeItem(at: directory)
+            }
+        }
+        let store = UserDefaultsSharedStore(suiteName: suite)
+        let settings = AppSettings(defaults: UserDefaults(suiteName: suite)!, store: store)
+        let launched = DictationCoordinator(settings: settings, store: store)
+        XCTAssertFalse(launched.isDeletingModels)
+        // libraryRevision is no signal here: a model that finishes loading bumps it too (the
+        // compile-cache sweep), as on the batch's simulators, which have the model downloaded.
+        XCTAssertEqual(launched.launchCleanup, [], "Launch found nothing to delete, so it starts no deletion")
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertNil(launched.libraryError)
     }
 }
 

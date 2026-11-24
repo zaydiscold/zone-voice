@@ -12,12 +12,13 @@ public struct LinkPairingLink: Equatable, Sendable {
     /// The computer's iroh endpoint id: 64 lowercase hex characters (iroh's text form), or the
     /// 52-character base32 form iroh also reads.
     public let endpointID: String
-    /// 32 random bytes as 64 lowercase hex characters. One use, good for ten minutes.
+    /// 32 random bytes as 64 lowercase hex characters. Confirmed once per phone. Older links carry no expiry.
     public let secret: String
     /// The computer's name, for the confirmation and the list. Never empty.
     public let name: String
     /// Set when the computer is pinned to one relay.
     public let relay: String?
+    public let expiresAt: Date?
 
     public enum Failure: Error, Equatable {
         case notAPairingLink
@@ -30,11 +31,12 @@ public struct LinkPairingLink: Equatable, Sendable {
     public static let maxLength = 2048
     public static let maxNameLength = 60
 
-    public init(endpointID: String, secret: String, name: String, relay: String? = nil) {
+    public init(endpointID: String, secret: String, name: String, relay: String? = nil, expiresAt: Date? = nil) {
         self.endpointID = endpointID
         self.secret = secret
         self.name = name
         self.relay = relay
+        self.expiresAt = expiresAt
     }
 
     /// True for any `zone://pair` URL, valid or not, so the app can say why a bad one failed
@@ -67,7 +69,13 @@ public struct LinkPairingLink: Equatable, Sendable {
                   scheme == "https" || scheme == "http", url.host?.isEmpty == false else { throw Failure.badRelay }
             relay = raw
         }
-        return LinkPairingLink(endpointID: endpointID, secret: secret, name: cleanedName(try value("name")), relay: relay)
+        var expiresAt: Date?
+        if items.contains(where: { $0.name == "exp" }) {
+            guard let raw = try value("exp"), !raw.isEmpty, raw.utf8.allSatisfy({ (48...57).contains($0) }),
+                  let seconds = Int64(raw), seconds <= 253402300799 else { throw Failure.notAPairingLink }
+            expiresAt = Date(timeIntervalSince1970: TimeInterval(seconds))
+        }
+        return LinkPairingLink(endpointID: endpointID, secret: secret, name: cleanedName(try value("name")), relay: relay, expiresAt: expiresAt)
     }
 
     public static func parse(_ url: URL) throws -> LinkPairingLink {

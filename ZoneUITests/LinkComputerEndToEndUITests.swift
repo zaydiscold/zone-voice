@@ -18,7 +18,7 @@ final class LinkComputerEndToEndUITests: XCTestCase {
     }
 
     private var version: String {
-        Bundle(for: Self.self).infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.4"
+        Bundle(for: Self.self).infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.6"
     }
 
     private func launch(_ extra: [String]) -> XCUIApplication {
@@ -89,6 +89,7 @@ final class LinkComputerEndToEndUITests: XCTestCase {
         let delete = app.buttons["Delete"]
         XCTAssertTrue(delete.waitForExistence(timeout: 5))
         delete.tap()
+        app.buttons["Delete dictation"].tap()
         // A change goes a few seconds later (`LinkCoordinator.changeDelay`), then the session.
         Thread.sleep(forTimeInterval: 15)
     }

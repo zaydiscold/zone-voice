@@ -9,16 +9,13 @@ public enum ZoneLinks {
     /// The App Store's own review sheet for Zone, for the Rate Zone row in Settings. Only ever
     /// opened by a tap on that row: Zone never prompts for a review itself (Guideline 5.6.1).
     public static let writeReview = URL(string: "https://apps.apple.com/app/id6830955448?action=write-review")!
-    /// The public TestFlight beta: the next build before it reaches the App Store.
-    public static let testFlight = URL(string: "https://testflight.apple.com/join/cStumGN1")!
     /// Zone for the computer (Settings > Computers): the app and the `zone` program, with downloads.
     public static let computerApp = URL(string: "https://github.com/zaydiscold/zone-mcp")!
 
     /// One line on its own, for link previews and share-sheet titles.
-    public static let pitch = "I dictate everything now. Zone is a free voice keyboard that runs entirely on the iPhone."
+    public static let pitch = "I dictate everything now. Zone is a free voice keyboard for iPhone."
 
-    /// The text pasted with the card or sent alone: the pitch, then both links on their own lines
-    /// so messaging apps turn each into a tappable preview.
+    /// The invitation sent with a milestone card or on its own.
     public static let invite = invite(sendsToComputer: false)
 
     /// The same message from someone who has paired a computer: their words do leave the phone,
@@ -28,7 +25,6 @@ public enum ZoneLinks {
         \(pitch) \(LinkCopy.inviteClaim(sendsToComputer: sendsToComputer))
 
         Get it on the App Store: \(appStore.absoluteString)
-        Or try the beta on TestFlight: \(testFlight.absoluteString)
         """
     }
 }

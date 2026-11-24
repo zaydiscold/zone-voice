@@ -12,6 +12,17 @@ final class PersonalVocabularyTests: XCTestCase {
         try first.add([" Zayd ", "Dahlsson", "zayd", ""])
         XCTAssertEqual(try PersonalVocabulary(fileURL: first.fileURL).words(), ["Zayd", "Dahlsson"])
     }
+
+    func testRenameHandlePreservesKeyboardChangesAndDoesNotReviveDeletedRows() throws {
+        let app = store(); defer { try? FileManager.default.removeItem(at: app.fileURL.deletingLastPathComponent()) }
+        let keyboard = PersonalVocabulary(fileURL: app.fileURL)
+        try app.addHandles(["old"])
+        try keyboard.addHandles(["new", "learned"])
+        XCTAssertEqual(try app.renameHandle("old", to: "@NEW"), ["new", "learned"])
+        XCTAssertThrowsError(try app.renameHandle("old", to: "lost"))
+        XCTAssertThrowsError(try app.renameHandle("new", to: "@"))
+        XCTAssertEqual(try keyboard.handles(), ["new", "learned"])
+    }
     func testHandlesNormalizeAndSurviveWordEdits() throws {
         let app = store(); defer { try? FileManager.default.removeItem(at: app.fileURL.deletingLastPathComponent()) }
         let legacy = Data(#"{"version":1,"words":["Zayd"],"learnsFromCorrections":true}"#.utf8)

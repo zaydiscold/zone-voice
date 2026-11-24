@@ -15,7 +15,6 @@ struct DictationView: View {
     /// True once this screen has seen a dictation start. An idle state after that means it was
     /// cancelled or refused, never "starting".
     @State private var sawActivity = false
-    @State private var cleaning = false
     /// Idle for this long with nothing starting means the request was refused or lost.
     @State private var startTimedOut = false
 
@@ -41,12 +40,10 @@ struct DictationView: View {
             }
             Spacer()
             switch coordinator.activity {
-            case .recording(_, let startedAt):
-                LiveSurface(startedAt: startedAt, title: "Listening", onCancel: { coordinator.cancelDictation() }) {
+            case .recording, .transcribing:
+                LiveSurface(onCancel: { coordinator.cancelDictation() }) {
                     Task { await coordinator.stopDictation() }
                 }
-            case .transcribing:
-                recognizing
             case .finished(let result, _):
                 finished(result)
             case .failed(let message):
@@ -54,10 +51,12 @@ struct DictationView: View {
             case .idle:
                 if !coordinator.modelIsReady {
                     preparing
+                } else if coordinator.needsFreshKeyboardTap {
+                    Text("Speech model ready. Go back and tap the mic again.")
                 } else if sawActivity || startTimedOut {
                     stopped
                 } else {
-                    HStack(spacing: 10) { ProgressView().tint(Zone.accentGraphic); Text("Starting").foregroundStyle(Zone.muted(scheme)) }
+                    HStack(spacing: 10) { ProgressView().tint(Zone.accentTone(scheme)); Text("Starting").foregroundStyle(Zone.muted(scheme)) }
                 }
             }
             Spacer()
@@ -65,17 +64,15 @@ struct DictationView: View {
         }
         .padding(.horizontal, 24)
         .zoneScreen()
-        .sheet(isPresented: $cleaning) {
-            if case .finished(let result, _) = coordinator.activity { CleanupSheet(text: result.text) }
-        }
         .animation(Zone.motion, value: coordinator.activity.isBusy)
         .animation(Zone.motion, value: showsWayBack)
         .onChange(of: coordinator.activity) { _, activity in
             if activity != .idle { sawActivity = true }
         }
-        .task {
+        .task(id: coordinator.modelIsReady) {
             try? await Task.sleep(for: .seconds(4))
-            if coordinator.activity == .idle, coordinator.modelIsReady { startTimedOut = true }
+            guard !Task.isCancelled else { return }
+            if coordinator.activity == .idle { startTimedOut = true }
         }
     }
 
@@ -85,7 +82,7 @@ struct DictationView: View {
     private var showsWayBack: Bool {
         switch coordinator.activity {
         case .finished: return true
-        case .idle: return coordinator.modelIsReady && (sawActivity || startTimedOut)
+        case .idle: return coordinator.modelIsReady && (coordinator.needsFreshKeyboardTap || sawActivity || startTimedOut)
         default: return false
         }
     }
@@ -95,7 +92,7 @@ struct DictationView: View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "arrow.up.left")
                 .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(Zone.accentText(scheme))
+                .foregroundStyle(Zone.accentTone(scheme))
             VStack(alignment: .leading, spacing: 2) {
                 Text("Tap ◀ in the top-left corner")
                     .font(.headline).foregroundStyle(Zone.ink(scheme))
@@ -106,32 +103,27 @@ struct DictationView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var recognizing: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            DisplayText("Transcribing")
-            SignalLevelMeter(levels: coordinator.recentLevels, color: UIColor(Zone.muted(scheme)), barPitch: 7)
-                .accessibilityHidden(true).frame(height: 48)
-        }
-    }
-
     private func finished(_ result: DictationResult) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
+        let written = coordinator.textForRecoveryCopy(result.text)
+        return VStack(alignment: .leading, spacing: 16) {
             DisplayText(result.text.isEmpty ? "Nothing heard" : "Done")
             if result.text.isEmpty {
                 Text("Nothing was typed. Head back and tap the mic to try again.")
                     .font(.body).foregroundStyle(Zone.muted(scheme))
             } else {
-                Text(result.text)
+                Text(written)
                     .font(.body)
                     .foregroundStyle(Zone.ink(scheme))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .zoneCard()
-                Button("Clean up") { cleaning = true }.buttonStyle(ZoneQuietButtonStyle(fullWidth: true))
-                Text("Switch back and the keyboard inserts this automatically, or shows Insert if your cursor moved. The mic stays ready for \(settings.inactivityPolicy.label).")
+                Text("Switch back and the keyboard inserts this automatically, or shows Insert if your cursor moved. \(settings.inactivityPolicy.micReadySummary)")
                     .font(.subheadline).foregroundStyle(Zone.muted(scheme))
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Copy text") { Clipboard.copy(result.text) }
+                Button("Copy text") {
+                    Clipboard.copy(written)
+                    coordinator.confirmKept(result.requestID, text: written)
+                }
                     .buttonStyle(ZoneQuietButtonStyle())
             }
         }
@@ -160,18 +152,22 @@ struct DictationView: View {
 
     private var preparing: some View {
         VStack(alignment: .leading, spacing: 14) {
-            DisplayText("Loading model")
+            DisplayText(coordinator.modelState == .missing ? "Get the speech model" : "Loading model")
             switch coordinator.modelState {
+            case .missing:
+                Text("After the download, return to the keyboard and tap the mic again.")
+                Button("Download \(coordinator.selectedModel.sizeLabel)") { coordinator.prepareModel() }
+                    .buttonStyle(ZonePrimaryButtonStyle())
             case .downloading(let progress, _):
-                ProgressView(value: progress).tint(Zone.accentGraphic)
-                Text("Downloading speech model · \(Int(progress * 100))% of \(coordinator.selectedModel.sizeLabel). Recording starts automatically.")
+                ProgressView(value: progress).tint(Zone.accentTone(scheme))
+                Text("Downloading speech model · \(Int(progress * 100))% of \(coordinator.selectedModel.sizeLabel).")
                     .font(.footnote).foregroundStyle(Zone.muted(scheme))
             case .failed(let message):
                 Text(message).font(.footnote).foregroundStyle(Zone.live)
                 Button("Try again") { coordinator.prepareModel() }.buttonStyle(ZonePrimaryButtonStyle())
             default:
-                ProgressView().tint(Zone.accentGraphic)
-                Text("Loading speech model. Recording starts automatically.")
+                ProgressView().tint(Zone.accentTone(scheme))
+                Text(startTimedOut ? "The model is still loading. You can close this screen and try the mic again." : "Loading speech model.")
                     .font(.footnote).foregroundStyle(Zone.muted(scheme))
             }
         }
@@ -182,32 +178,62 @@ struct DictationView: View {
 struct LiveSurface: View {
     @Environment(DictationCoordinator.self) private var coordinator
     @Environment(\.colorScheme) private var scheme
-    let startedAt: Date
-    let title: String
+    @Environment(AppSettings.self) private var settings
     let onCancel: () -> Void
     let onStop: () -> Void
     @State private var confirmingDiscard = false
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 10) {
-                StatusDot(color: Zone.accentGraphic(scheme), pulses: true)
-                DisplayText(title)
+            if case .recording(_, let startedAt) = coordinator.activity {
+                HStack(spacing: 10) {
+                    StatusDot(color: Zone.accentTone(scheme), pulses: settings.micLightStyle == .off && !coordinator.showsPaused,
+                              hollow: coordinator.showsPaused)
+                    DisplayText(coordinator.showsPaused ? "Paused" : "Listening")
+                }
+                TimelineView(.periodic(from: startedAt, by: 1)) { context in
+                    HeroNumber(text: context.date.timeIntervalSince(startedAt).countdownLabel)
+                        .accessibilityLabel("Recording for \(context.date.timeIntervalSince(startedAt).countdownLabel)")
+                }
+            } else {
+                DisplayText("Transcribing")
             }
-            TimelineView(.periodic(from: startedAt, by: 1)) { context in
-                HeroNumber(text: context.date.timeIntervalSince(startedAt).countdownLabel)
-                    .accessibilityLabel("Recording for \(context.date.timeIntervalSince(startedAt).countdownLabel)")
+            HStack(spacing: 12) {
+                if coordinator.activity.isRecording {
+                    RoundAction(symbol: "xmark", label: "Cancel dictation") { confirmingDiscard = true }
+                        .accessibilityIdentifier("dictation.cancel")
+                }
+                if settings.meterStyle == .wave || coordinator.activity.isRecording {
+                    LiveWave(live: coordinator.activity.isRecording)
+                        .accessibilityHidden(true)
+                        .frame(height: 64)
+                } else {
+                    SignalLevelMeter(levels: coordinator.recentLevels, color: UIColor(Zone.muted(scheme)), barPitch: 7)
+                        .accessibilityHidden(true).frame(height: 48)
+                }
+                if coordinator.activity.isRecording {
+                    RoundAction(symbol: "checkmark", label: "Stop and keep the words", prominent: true, action: onStop)
+                        .accessibilityIdentifier("dictation.stop")
+                }
             }
-            HStack(spacing: 16) {
-                RoundAction(symbol: "xmark", label: "Cancel dictation") { confirmingDiscard = true }
-                SignalLevelMeter(levels: coordinator.recentLevels, color: UIColor(Zone.accentGraphic(scheme)), barPitch: 9)
-                    .accessibilityHidden(true)
-                    .frame(height: 64)
-                RoundAction(symbol: "checkmark", label: "Stop and keep the words", prominent: true, action: onStop)
+            .padding(12)
+            .background {
+                if settings.micLightStyle == .glow && !reduceTransparency {
+                    RoundedRectangle(cornerRadius: 26)
+                        .fill(LinearGradient(colors: [Zone.accentTone(scheme).opacity(0.11), Zone.card(scheme)],
+                                             startPoint: .topLeading, endPoint: .bottomTrailing))
+                }
             }
-            if let hold = coordinator.holdNotice {
+            .overlay { MicLight(surface: .listening) }
+            if !coordinator.activity.isRecording {
+                EmptyView()
+            } else if let hold = coordinator.holdNotice {
                 Text(hold).font(.footnote).foregroundStyle(Zone.live)
                 Button("Resume") { Task { await coordinator.resumeHeldRecording(trigger: "app") } }
+                    .buttonStyle(ZoneInkPillButtonStyle())
+            } else if coordinator.isPaused {
+                Button("Resume recording") { coordinator.togglePause() }
                     .buttonStyle(ZoneInkPillButtonStyle())
             } else {
                 if let seconds = coordinator.quietFinishIn {

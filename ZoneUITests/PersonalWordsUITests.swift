@@ -7,7 +7,7 @@ import XCTest
 /// back still works without the system's button.
 final class PersonalWordsUITests: XCTestCase {
     private var settled: [String] {
-        let version = Bundle(for: Self.self).infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.4"
+        let version = Bundle(for: Self.self).infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.6"
         return ["-zone.settings.onboardingDone", "YES", "-zone.tour.seen", "YES", "-zoneWhatsNewAfter", version]
     }
 
@@ -26,8 +26,13 @@ final class PersonalWordsUITests: XCTestCase {
         let gear = app.buttons["home.settings"]
         XCTAssertTrue(gear.waitForExistence(timeout: 30), "Home")
         gear.tap()
+        enterMyWords(app)
+    }
+
+    private func enterMyWords(_ app: XCUIApplication) {
         let row = app.buttons["My words"]
-        XCTAssertTrue(row.waitForExistence(timeout: 10), "the My words row")
+        for _ in 0..<12 where !row.isHittable { app.swipeUp(velocity: .slow) }
+        XCTAssertTrue(row.isHittable, "the My words row")
         row.tap()
         XCTAssertTrue(app.textFields["words.field"].waitForExistence(timeout: 10) || app.textViews["words.field"].exists, "My words")
     }
@@ -40,6 +45,78 @@ final class PersonalWordsUITests: XCTestCase {
         let field = field(app)
         field.tap()
         field.typeText(text)
+    }
+
+    func testColonEmojiInWordField() {
+        let app = XCUIApplication()
+        app.launchArguments = settled
+        app.launch()
+        openMyWords(app)
+        type("Lunch :pizza", into: app)
+        let pizza = app.buttons["Insert pizza"]
+        XCTAssertTrue(pizza.waitForExistence(timeout: 8))
+        pizza.tap()
+        XCTAssertEqual(field(app).value as? String, "Lunch 🍕")
+        XCTAssertFalse(pizza.exists)
+    }
+
+    func testHandleHoldOffersCopyEditAndConfirmedDelete() {
+        let app = XCUIApplication()
+        app.launchArguments = settled + ["-zone.settings.handleRecognition", "<false/>"]
+        app.launch()
+        openMyWords(app)
+        let disclosure = app.buttons["Saved @handles"]
+        for _ in 0..<8 where !disclosure.isHittable { app.swipeUp() }
+        disclosure.tap()
+        let draft = app.textFields["Add a handle"]
+        for _ in 0..<6 where !draft.isHittable { app.swipeUp() }
+        XCTAssertTrue(draft.isHittable)
+        let handle = "holdtest" + UUID().uuidString.prefix(8).lowercased()
+        draft.tap()
+        draft.typeText(handle + "\n")
+        let row = app.staticTexts["@" + handle]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.press(forDuration: 1.1)
+        XCTAssertTrue(app.buttons["Copy"].exists)
+        app.buttons["Edit"].tap()
+        app.alerts.textFields.firstMatch.tap()
+        app.alerts.textFields.firstMatch.typeText("x")
+        app.buttons["Save"].tap()
+        let renamed = app.staticTexts["@" + handle + "x"]
+        XCTAssertTrue(renamed.waitForExistence(timeout: 5))
+        renamed.press(forDuration: 1.1)
+        app.buttons["Delete"].tap()
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(renamed.exists)
+        renamed.press(forDuration: 1.1)
+        app.buttons["Delete"].tap()
+        app.buttons["Delete handle"].tap()
+        XCTAssertFalse(renamed.exists)
+    }
+
+    func testImportFromTheWordListRow() {
+        let app = XCUIApplication()
+        app.launchArguments = settled
+        app.launch()
+        openMyWords(app)
+        let transfer = app.buttons["Import or export words"]
+        for _ in 0..<8 where !transfer.isHittable { app.swipeUp() }
+        transfer.tap()
+        let editor = app.textViews["Words to import"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Import"].isEnabled)
+        keepScreenshot("word-list-import")
+        editor.tap()
+        editor.typeText("QuillBerry")
+        app.buttons["Import"].tap()
+        let saved = app.buttons["Remove QuillBerry"]
+        XCTAssertTrue(saved.waitForExistence(timeout: 5))
+        keepScreenshot("word-list-restored")
+        saved.press(forDuration: 1.1)
+        XCTAssertTrue(app.buttons["Edit"].exists)
+        keepScreenshot("word-hold")
+        app.buttons["Delete"].tap()
+        app.buttons["Delete word"].tap()
     }
 
     func testAddFixRemoveAndUndo() {
@@ -67,6 +144,7 @@ final class PersonalWordsUITests: XCTestCase {
 
         // Remove one, then bring it back.
         app.buttons["Remove Quux Corp"].tap()
+        app.buttons["Delete word"].tap()
         XCTAssertTrue(app.buttons["words.undo"].waitForExistence(timeout: 5), "Undo is offered")
         XCTAssertFalse(app.buttons["Remove Quux Corp"].exists)
         app.buttons["words.undo"].tap()
@@ -75,13 +153,20 @@ final class PersonalWordsUITests: XCTestCase {
         // Nothing to save: leaving and coming back shows the same words.
         app.buttons["nav.back"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10), "the Back key returns to Settings")
-        app.buttons["My words"].tap()
+        enterMyWords(app)
         for word in ["Zonetestia", "Quux Corp", "zzyzxlyx"] {
             XCTAssertTrue(app.buttons["Remove \(word)"].waitForExistence(timeout: 5), "\(word) was saved")
         }
 
         // Clean up, so a second run starts from the same place.
-        for word in ["Zonetestia", "Quux Corp", "zzyzxlyx"] { app.buttons["Remove \(word)"].tap() }
+        for word in ["Zonetestia", "Quux Corp", "zzyzxlyx"] {
+            let remove = app.buttons["Remove \(word)"]
+            remove.tap()
+            let confirmation = app.alerts.buttons["Delete word"]
+            XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+            confirmation.tap()
+            XCTAssertTrue(remove.waitForNonExistence(timeout: 5))
+        }
         XCTAssertFalse(app.buttons["Remove Zonetestia"].exists)
     }
 

@@ -11,10 +11,12 @@ struct MeetingDetailView: View {
     @Environment(MeetingCoordinator.self) private var meetings
     @Environment(\.colorScheme) private var scheme
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State var id: UUID
     @State private var title = ""
-    @State private var editingSpeaker: MeetingSpeaker?
+    @State private var speakersTarget: SpeakersTarget?
     @State private var choosingMerge = false
+    @State private var reviewingVoices = false
     @State private var confirmingDelete = false
     @State private var confirmingRetranscribe = false
     @State private var showsInfo = false
@@ -34,16 +36,27 @@ struct MeetingDetailView: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
+        // The title is the editable name field, so there is no navigationTitle to follow; the
+        // Back key still replaces the system's glass Back, from Meetings and from a search alike.
+        .zoneBackButton()
         .toolbar(.visible, for: .navigationBar)
         .toolbar { toolbar }
         .zoneScreen()
-        .sheet(item: $editingSpeaker) { speaker in
-            SpeakerSheet(meetingID: id, speaker: speaker)
-                .presentationDetents([.medium, .large])
+        .sheet(item: $speakersTarget) { target in
+            MeetingSpeakersSheet(meetingID: id, focus: target.person)
+                .presentationDetents([.large])
         }
+        .safeAreaInset(edge: .bottom) { if speakersTarget == nil { SpeakerUndoBar(meetingID: id) } }
+        .animation(.snappy(duration: 0.2), value: meetings.speakerUndo)
         .sheet(isPresented: $choosingMerge) {
             MergePicker(target: id) { merged in id = merged }
-                .presentationDetents([.medium, .large])
+                .presentationDetents(typeSize.isAccessibilitySize ? [.large] : [.medium, .large])
+        }
+        .sheet(isPresented: $reviewingVoices) {
+            if let meeting {
+                NavigationStack { MeetingVoiceReview(meeting: meeting) }
+                    .presentationDetents(typeSize.isAccessibilitySize ? [.large] : [.medium, .large])
+            }
         }
         .sheet(isPresented: $showsInfo) {
             if let meeting { MeetingDetailInfo(meeting: meeting).presentationDetents([.medium, .large]) }
@@ -51,7 +64,7 @@ struct MeetingDetailView: View {
         .sheet(isPresented: $editingTranscript) {
             if let meeting { MeetingTranscriptEditor(meeting: meeting) }
         }
-        .onDisappear { playback.stop() }
+        .onDisappear { playback.stop(); meetings.forgetSpeakerUndo() }
         .confirmationDialog("Delete this meeting?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button("Delete audio and transcript", role: .destructive) {
                 meetings.delete(id)
@@ -121,8 +134,8 @@ struct MeetingDetailView: View {
                         LazyVStack(alignment: .leading, spacing: 20) {
                             ForEach(paragraphs) { paragraph in
                                 ParagraphView(meeting: meeting, paragraph: paragraph) {
-                                    if let id = paragraph.speaker, let speaker = meeting.speakers.first(where: { $0.id == id }) {
-                                        editingSpeaker = speaker
+                                    if let person = paragraph.speaker, meeting.speakers.contains(where: { $0.id == person }) {
+                                        speakersTarget = SpeakersTarget(person: person)
                                     }
                                 }
                             }
@@ -155,6 +168,8 @@ struct MeetingDetailView: View {
                         .disabled(meeting.segments.isEmpty || meeting.status == .recording || meeting.status == .transcribing)
                     Button { Clipboard.copy(MeetingExport.text(meeting)) } label: { Label("Copy transcript", systemImage: "doc.on.doc") }
                         .disabled(meeting.segments.isEmpty)
+                    Button { speakersTarget = SpeakersTarget(person: nil) } label: { Label("Speakers", systemImage: "person.2") }
+                        .disabled(meeting.speakers.isEmpty)
                     Button { choosingMerge = true } label: { Label("Merge with another recording", systemImage: "arrow.triangle.merge") }
                         .disabled(meeting.status == .recording || meeting.status == .transcribing)
                     Button { confirmingRetranscribe = true } label: { Label("Transcribe again", systemImage: "arrow.clockwise") }
@@ -165,6 +180,7 @@ struct MeetingDetailView: View {
                 } label: {
                     Image(systemName: "ellipsis")
                 }
+                .menuStyle(.button)
                 .accessibilityLabel("More")
             }
         }
@@ -174,7 +190,7 @@ struct MeetingDetailView: View {
         switch meeting.status {
         case .recording:
             HStack(spacing: 12) {
-                Text(meetings.isPaused ? "Paused" : "Recording").font(.body.weight(.medium)).foregroundStyle(Zone.accentText(scheme))
+                Text(meetings.isPaused ? "Paused" : "Recording").font(.body.weight(.medium)).zoneAccentBadge(scheme)
                 Spacer()
                 Button("Open") { meetings.showsRecorder = true }.buttonStyle(ZoneInkPillButtonStyle())
             }
@@ -195,7 +211,18 @@ struct MeetingDetailView: View {
                 }
             }
         case .done:
-            if let message = meeting.message {
+            if meetings.isMatchingVoices(meeting.id) {
+                // The transcript is done and readable; only who is who can still change.
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Matching voices across the recordings")
+                        .font(.footnote).foregroundStyle(Zone.muted(scheme))
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("meeting.matchingVoices")
+            } else if meeting.voiceReviewCandidates != nil, meeting.visibleMessage != nil {
+                Button("Review voices") { reviewingVoices = true }.buttonStyle(ZonePillButtonStyle())
+            } else if let message = meeting.visibleMessage {
                 Text(message).font(.footnote).foregroundStyle(Zone.muted(scheme))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -205,17 +232,25 @@ struct MeetingDetailView: View {
     private func speakers(_ meeting: Meeting) -> some View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
-                ForEach(meeting.speakers) { speaker in
-                    Button { editingSpeaker = speaker } label: {
+                // One pill per person: a voice joined to someone is not listed again.
+                ForEach(meeting.people) { speaker in
+                    Button { speakersTarget = SpeakersTarget(person: speaker.id) } label: {
                         HStack(spacing: 6) {
                             Image(systemName: speaker.isMe ? "person.fill" : "waveform")
                                 .font(.caption2.weight(.semibold))
-                                .foregroundStyle(speaker.isMe ? Zone.accentText(scheme) : Zone.muted(scheme))
+                                .foregroundStyle(speaker.isMe ? Zone.accentTone(scheme) : Zone.muted(scheme))
                             Text(meeting.speakerName(speaker.id) ?? speaker.id)
+                            if speaker.recognized == true {
+                                // Zone's guess from the voice, until someone saves the name.
+                                Circle().fill(Zone.accentTone(scheme)).frame(width: 6, height: 6)
+                            }
                         }
                     }
                     .buttonStyle(ZonePillButtonStyle())
+                    .accessibilityValue(speaker.recognized == true ? "Recognized by voice, not confirmed" : "")
+                    .accessibilityIdentifier("meeting.paragraph.speaker")
                     .accessibilityHint("Hear this speaker and name them")
+                    .accessibilityIdentifier("meeting.speaker.\(speaker.id)")
                 }
             }
         }
@@ -242,9 +277,12 @@ private struct ParagraphView: View {
                     let isMe = meeting.speakers.first(where: { $0.id == paragraph.speaker })?.isMe == true
                     Button(action: onSpeaker) {
                         Text(name).font(.subheadline.weight(.semibold))
-                            .foregroundStyle(isMe ? Zone.accentText(scheme) : Zone.ink(scheme))
+                            .foregroundStyle(isMe ? Zone.controlInk(scheme) : Zone.ink(scheme))
+                            .padding(.horizontal, isMe ? 6 : 0)
+                            .background(isMe ? Zone.controlFill(scheme) : .clear, in: Capsule())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("meeting.paragraph.speaker")
                     .accessibilityHint("Hear this speaker and name them")
                 }
                 Text(MeetingExport.timestamp(paragraph.start))
@@ -259,105 +297,7 @@ private struct ParagraphView: View {
     }
 }
 
-// MARK: Naming a speaker
-
-/// "Who is Speaker 2?": three short clips of their voice play as the sheet opens, then a name,
-/// or one tap on This is me.
-private struct SpeakerSheet: View {
-    @Environment(MeetingCoordinator.self) private var meetings
-    @Environment(\.colorScheme) private var scheme
-    @Environment(\.dismiss) private var dismiss
-    let meetingID: UUID
-    let speaker: MeetingSpeaker
-    @State private var name = ""
-    @State private var player = SpeakerSamplePlayer()
-    @FocusState private var focused: Bool
-
-    private var meeting: Meeting? { meetings.meeting(meetingID) }
-    private var clips: [ClosedRange<Double>] {
-        meeting.map { MeetingSpeakerSamples.clips(for: speaker.id, in: $0.segments) } ?? []
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Text("Who is \(meeting?.speakerName(speaker.id) ?? "this")?")
-                .font(.zoneTitle).foregroundStyle(Zone.ink(scheme))
-                .lineLimit(2)
-            if !clips.isEmpty {
-                HStack(spacing: 12) {
-                    ForEach(Array(clips.enumerated()), id: \.offset) { index, clip in
-                        SampleButton(index: index, clip: clip, playing: player.playing == index) {
-                            if player.playing == index { player.stop() } else if !meetings.isRecording { player.play(clips: clips, from: index, meeting: meetingID, store: meetings.store) }
-                        }
-                    }
-                }
-            }
-            TextField("Name", text: $name)
-                .font(.body)
-                .padding(.horizontal, 16)
-                .frame(minHeight: 48)
-                .background(Zone.field(scheme), in: Zone.fieldShape)
-                .overlay(Zone.fieldShape.strokeBorder(Zone.rule(scheme), lineWidth: 1))
-                .focused($focused)
-                // Names are not dictionary words; autocorrect turned "Zayd" into "Says".
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.words)
-                .textContentType(.name)
-                .submitLabel(.done)
-                .onSubmit { save(isMe: speaker.isMe) }
-            VStack(spacing: 12) {
-                Button("Save") { save(isMe: speaker.isMe) }.buttonStyle(ZonePrimaryButtonStyle())
-                Button(speaker.isMe ? "This is not me" : "This is me") { save(isMe: !speaker.isMe) }
-                    .buttonStyle(ZoneQuietButtonStyle(fullWidth: true))
-            }
-        }
-        .padding(20)
-        .padding(.top, 8)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(Zone.paper(scheme).ignoresSafeArea())
-        .onAppear {
-            name = speaker.name ?? ""
-            // Hear them first: the three clips play back to back as the sheet opens.
-            // Never out loud into a meeting that is still recording.
-            if !clips.isEmpty, !meetings.isRecording { player.play(clips: clips, from: 0, meeting: meetingID, store: meetings.store) }
-        }
-        .onDisappear { player.stop() }
-    }
-
-    private func save(isMe: Bool) {
-        player.stop()
-        meetings.renameSpeaker(meetingID, speaker: speaker.id, to: name)
-        if isMe != speaker.isMe { meetings.setMe(meetingID, speaker: isMe ? speaker.id : nil) }
-        dismiss()
-    }
-}
-
-private struct SampleButton: View {
-    @Environment(\.colorScheme) private var scheme
-    let index: Int
-    let clip: ClosedRange<Double>
-    let playing: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: playing ? "speaker.wave.2.fill" : "play.fill")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(playing ? Zone.accentText(scheme) : Zone.ink(scheme))
-                    .symbolEffect(.variableColor.iterative, isActive: playing)
-                Text(MeetingExport.timestamp(clip.lowerBound)).font(.footnote.weight(.medium).monospacedDigit())
-                    .foregroundStyle(Zone.ink(scheme))
-            }
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .background(Zone.card(scheme), in: Zone.keyShape)
-            .overlay(Zone.keyShape.strokeBorder(playing ? Zone.accentGraphic : Zone.rule(scheme), lineWidth: playing ? 1.5 : 1))
-            .contentShape(Zone.keyShape)
-        }
-        .buttonStyle(ScaleButtonStyle())
-        .accessibilityLabel(playing ? "Stop sample \(index + 1)" : "Play sample \(index + 1), at \(MeetingExport.timestamp(clip.lowerBound))")
-    }
-}
+// MARK: Hearing a speaker
 
 /// Plays a speaker's clips one after another from the meeting's PCM parts.
 @Observable @MainActor
@@ -460,13 +400,25 @@ private struct MeetingDetailInfo: View {
 }
 
 /// Pick the other half of a split recording. Earlier audio always plays first.
-private struct MergePicker: View {
+struct MergePicker: View {
     @Environment(MeetingCoordinator.self) private var meetings
     @Environment(\.colorScheme) private var scheme
     @Environment(\.dismiss) private var dismiss
     let target: UUID
     let onMerged: (UUID) -> Void
     @State private var candidate: Meeting?
+    @State private var joinedID: UUID?
+
+    @ViewBuilder private func result(_ id: UUID) -> some View {
+        if let meeting = meetings.meeting(id), meeting.voiceReviewCandidates?.isEmpty == false, !meetings.isMatchingVoices(id) {
+            MeetingVoiceReview(meeting: meeting)
+        } else if let meeting = meetings.meeting(id), meeting.speakerGroupsToMatch != nil, meeting.status == .done {
+            ProgressView("Checking voices")
+                .toolbar { ZoneBarItem(.cancellationAction) { Button("Close") { dismiss() } } }
+        } else {
+            Color.clear.onAppear { dismiss() }
+        }
+    }
 
     private var choices: [Meeting] {
         meetings.meetings.filter { $0.id != target && $0.status != .recording && $0.status != .transcribing }
@@ -474,53 +426,71 @@ private struct MergePicker: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Choose another recording to combine with this one. Earlier audio plays first.")
-                        .font(.subheadline).foregroundStyle(Zone.muted(scheme))
-                        .fixedSize(horizontal: false, vertical: true)
-                    if choices.isEmpty {
-                        Text("No other recordings available to merge.").font(.subheadline).foregroundStyle(Zone.muted(scheme))
-                    }
-                    ForEach(choices) { meeting in
-                        Button { candidate = meeting } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(meeting.title).font(.body.weight(.semibold)).foregroundStyle(Zone.ink(scheme))
-                                Text(meetingMetaLine(meeting)).font(.caption.monospacedDigit()).foregroundStyle(Zone.muted(scheme))
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .zoneCard(padding: 16)
+            if let joinedID {
+                result(joinedID)
+            } else {
+                picker
+            }
+        }
+    }
+
+    private var picker: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Choose another recording to combine with this one. Earlier audio plays first.")
+                    .font(.subheadline).foregroundStyle(Zone.muted(scheme))
+                    .fixedSize(horizontal: false, vertical: true)
+                if choices.isEmpty {
+                    Text("No other recordings available to merge.").font(.subheadline).foregroundStyle(Zone.muted(scheme))
+                }
+                ForEach(choices) { meeting in
+                    Button { candidate = meeting } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(meeting.title).font(.body.weight(.semibold)).foregroundStyle(Zone.ink(scheme))
+                            Text(meetingMetaLine(meeting)).font(.caption.monospacedDigit()).foregroundStyle(Zone.muted(scheme))
                         }
-                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .zoneCard(padding: 16)
                     }
+                    .buttonStyle(.plain)
                 }
-                .padding(20)
             }
-            .navigationTitle("Merge")
-            .zoneBackButton()
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ZoneBarItem(.cancellationAction) { Button("Cancel") { dismiss() } } }
-            .zoneScreen()
-            .confirmationDialog("Merge these recordings?", isPresented: Binding(get: { candidate != nil }, set: { if !$0 { candidate = nil } }),
-                                titleVisibility: .visible, presenting: candidate) { other in
-                Button("Merge") {
-                    if let merged = meetings.merge(target, with: other.id) { onMerged(merged) }
-                    dismiss()
+            .padding(20)
+        }
+        .navigationTitle("Merge")
+        .zoneBackButton()
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ZoneBarItem(.cancellationAction) { Button("Cancel") { dismiss() } } }
+        .zoneScreen()
+        .confirmationDialog("Merge these recordings?", isPresented: Binding(get: { candidate != nil }, set: { if !$0 { candidate = nil } }),
+                            titleVisibility: .visible, presenting: candidate) { other in
+            Button("Merge") {
+                if let merged = meetings.merge(target, with: other.id) {
+                    joinedID = merged
+                    onMerged(merged)
                 }
-            } message: { other in
-                Text("\u{201C}\(other.title)\u{201D} joins this meeting as one recording. This cannot be undone.")
             }
+        } message: { other in
+            Text("\u{201C}\(other.title)\u{201D} joins this meeting as one recording. This cannot be undone.")
         }
     }
 }
 
 /// An explicit count can separate voices that automatic detection grouped together.
 /// The choice belongs to this recording, never to every future meeting.
-private struct MeetingRetranscribeSheet: View {
+struct MeetingRetranscribeSheet: View {
     let meeting: Meeting
     @Environment(MeetingCoordinator.self) private var meetings
     @Environment(\.dismiss) private var dismiss
     @State private var count = 0
+
+    /// A speaker named before voice prints were kept cannot be found again by voice.
+    private var namesWithoutVoices: Bool {
+        meeting.speakers.contains { speaker in
+            speaker.voice == nil
+                && (speaker.isMe || !(speaker.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -545,7 +515,9 @@ private struct MeetingRetranscribeSheet: View {
                     }
                 }
                 Section {
-                    Text("Rebuilds the transcript from saved audio. Manual edits and speaker names will reset.")
+                    Text(namesWithoutVoices
+                         ? "Rebuilds the transcript from saved audio. Manual edits and speaker names will reset."
+                         : "Rebuilds the transcript from saved audio. Manual edits will reset; named speakers keep their names when Zone recognizes their voices.")
                     Button("Transcribe again") {
                         let hint = meetings.labelsSpeakers && meetings.speakerModel == .ready
                             && meeting.duration <= MeetingRecordingSafety.maximumSpeakerSeconds && count > 0 ? count : nil

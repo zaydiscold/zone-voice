@@ -11,13 +11,14 @@ struct AlphaTag: View {
     var onInk = false
 
     var body: some View {
-        let color = onInk ? Zone.onInk(scheme).opacity(0.8) : Zone.accentText(scheme)
+        let color = onInk ? Zone.onInk(scheme).opacity(0.8) : Zone.controlInk(scheme)
         Text("Alpha")
             .font(.caption2.weight(.semibold))
             .foregroundStyle(color)
             .padding(.horizontal, 6)
             .padding(.vertical, 1)
-            .overlay(Capsule().strokeBorder(color.opacity(0.55), lineWidth: 1))
+            .background(onInk ? .clear : Zone.controlFill(scheme), in: Capsule())
+            .overlay(Capsule().strokeBorder(onInk ? color.opacity(0.55) : .clear, lineWidth: 1))
             .fixedSize()
             .accessibilityLabel("Alpha")
     }
@@ -37,7 +38,7 @@ struct SpeakerModelStatus: View {
         switch meetings.speakerModel {
         case .downloading(let fraction):
             VStack(alignment: .leading, spacing: 4) {
-                ProgressView(value: fraction).tint(Zone.accentGraphic)
+                ProgressView(value: fraction).tint(Zone.accentTone(scheme))
                 Text("Downloading, \(Int(fraction * 100))% of \(MeetingDiarizer.downloadBytes.byteCountLabel)")
                     .font(.caption.monospacedDigit()).foregroundStyle(Zone.muted(scheme))
             }
@@ -69,7 +70,7 @@ struct MeetingProgressLine: View {
         let live = meetings.transcribingID == meeting.id
         VStack(alignment: .leading, spacing: 4) {
             ProgressView(value: live ? (waitsForDownload ? (meetings.speakerModelDownload ?? 0) : meetings.progress) : meeting.progress)
-                .tint(Zone.accentGraphic)
+                .tint(Zone.accentTone(scheme))
                 .animation(Zone.motion, value: meetings.progress)
             Text(label(live: live)).font(.caption.monospacedDigit()).foregroundStyle(Zone.muted(scheme))
                 .lineLimit(2)

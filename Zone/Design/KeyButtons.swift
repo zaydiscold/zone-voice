@@ -69,6 +69,7 @@ struct ZoneBarItem<Content: View>: ToolbarContent {
 /// Replaces the system's round glass Back button with a key. Safe on any screen: the key shows
 /// only when the screen was pushed, and swiping back from the edge keeps working.
 private struct ZoneBackButtonModifier: ViewModifier {
+    var beforeDismiss: (() -> Bool)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var pushed = false
 
@@ -79,7 +80,7 @@ private struct ZoneBackButtonModifier: ViewModifier {
             .toolbar {
                 if pushed {
                     ZoneBarItem(.topBarLeading) {
-                        Button { dismiss() } label: {
+                        Button { if beforeDismiss?() != false { dismiss() } } label: {
                             Image(systemName: "chevron.left").font(.body.weight(.semibold))
                         }
                         .buttonStyle(ZoneKeyButtonStyle())
@@ -92,7 +93,9 @@ private struct ZoneBackButtonModifier: ViewModifier {
 }
 
 extension View {
-    func zoneBackButton() -> some View { modifier(ZoneBackButtonModifier()) }
+    func zoneBackButton(beforeDismiss: (() -> Bool)? = nil) -> some View {
+        modifier(ZoneBackButtonModifier(beforeDismiss: beforeDismiss))
+    }
 }
 
 /// Reports whether its screen sits above another in a navigation stack, and keeps the

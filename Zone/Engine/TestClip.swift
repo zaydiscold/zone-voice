@@ -17,6 +17,15 @@ enum TestClip {
         return try samples(from: url)
     }
 
+    #if targetEnvironment(simulator)
+    static func simulatorInput(_ value: String) throws -> [Float] {
+        if value == "1" { return try samples() }
+        guard value == "speech-then-fan" else { return try samples(from: URL(fileURLWithPath: value)) }
+        let cycle = (0..<160).map { Float(sin(2 * Double.pi * Double($0) / 160)) * 0.036 }
+        return try Array(repeating: Float.zero, count: 32_000) + samples() + Array(repeating: cycle, count: 2_000).flatMap { $0 }
+    }
+    #endif
+
     /// Reads any 16 kHz mono WAV as Float32 samples.
     static func samples(from url: URL) throws -> [Float] {
         let file = try AVAudioFile(forReading: url)

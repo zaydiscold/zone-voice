@@ -3,9 +3,9 @@
 import SwiftUI
 import ZoneCore
 
-/// One version's release notes: a big version number and date, a card for each feature, then
-/// the smaller changes in a compact list. The history screen pushes it; the What's New sheet
-/// shows the same content under its own heading.
+/// One version's release notes: the version, its name and date, then every change as one line,
+/// grouped by the part of Zone it belongs to. A long version opens with its groups folded. The history screen pushes it, and the What's New
+/// sheet opens the same page from "All changes".
 struct ReleaseNotesView: View {
     @Environment(WhatsNewGate.self) private var gate
     let note: ReleaseNote
@@ -36,58 +36,81 @@ struct ReleaseNotesContent: View {
     /// Shown small at the very end, for the installed version only.
     var build: String?
 
+    /// The most changes a version shows unfolded.
+    static let openLimit = 24
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            header
-                .padding(.bottom, 8)
-            ForEach(Array(note.features.enumerated()), id: \.element.id) { index, feature in
-                ReleaseFeatureCard(feature: feature, leads: index == 0)
-            }
-            if !note.fixes.isEmpty {
-                ReleaseFixList(fixes: note.fixes)
-                    .padding(.top, 12)
+        VStack(alignment: .leading, spacing: 0) {
+            ReleaseNotesHeader(note: note, eyebrow: eyebrow, isInstalled: isInstalled, showsCount: true)
+                .padding(.bottom, 26)
+            // A short version shows every line. A long one opens as its groups, each naming its
+            // changes, so the whole version reads on one screen and a tap opens the part you want.
+            let startsOpen = note.count <= Self.openLimit
+            ForEach(note.groups) { group in
+                ReleaseGroupSection(group: group, startsOpen: startsOpen)
+                    .padding(.bottom, startsOpen ? 26 : 18)
             }
             if let build, !build.isEmpty {
                 Text("Build \(build)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(Zone.muted(scheme).opacity(0.75))
                     .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, 8)
                     .accessibilityIdentifier("releaseNotes.build")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
 
-    private var header: some View {
+/// The top of a version's notes: the number, what the update is called, its date and one sentence.
+struct ReleaseNotesHeader: View {
+    @Environment(\.colorScheme) private var scheme
+    let note: ReleaseNote
+    let eyebrow: String
+    var isInstalled = false
+    /// The full page says how many changes follow; the sheet shows only a few.
+    var showsCount = false
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Eyebrow(eyebrow)
             HeroNumber(text: note.version.description)
                 .accessibilityLabel("Version \(note.version.description)")
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityIdentifier("releaseNotes.version")
+            if let name = note.name {
+                Text("The \(name) update")
+                    .font(.system(.title3, design: .serif, weight: .semibold))
+                    .foregroundStyle(Zone.ink(scheme))
+                    .accessibilityIdentifier("releaseNotes.name")
+            }
             // Side by side while they fit; at the largest text sizes the pill drops under the date.
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 10) { dateAndPill }
                 VStack(alignment: .leading, spacing: 6) { dateAndPill }
             }
             Text(note.summary)
-                .font(.system(.title3, design: .serif))
-                .foregroundStyle(Zone.ink(scheme))
+                .font(.body)
+                .foregroundStyle(Zone.ink(scheme).opacity(0.86))
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 8)
         }
     }
-}
 
-extension ReleaseNotesContent {
     @ViewBuilder private var dateAndPill: some View {
-        if let date = note.day?.date() {
-            Text(date.formatted(date: .long, time: .omitted))
+        if let line = dateLine {
+            Text(line)
                 .font(.subheadline)
                 .foregroundStyle(Zone.muted(scheme))
         }
         if isInstalled { InstalledPill() }
+    }
+
+    private var dateLine: String? {
+        let date = note.day?.date().map { $0.formatted(date: .long, time: .omitted) }
+        let count = showsCount ? (note.count == 1 ? "1 change" : "\(note.count) changes") : nil
+        let parts = [date, count].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " \u{00B7} ")
     }
 }
 
@@ -99,86 +122,135 @@ struct InstalledPill: View {
         Label("Installed", systemImage: "checkmark")
             .font(.caption.weight(.semibold))
             .labelStyle(.titleAndIcon)
-            .foregroundStyle(Zone.accentText(scheme))
+            .foregroundStyle(Zone.controlInk(scheme))
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
-            .background(Zone.accentGraphic(scheme).opacity(scheme == .dark ? 0.2 : 0.14), in: Capsule())
+            .background(Zone.controlFill(scheme), in: Capsule())
             .lineLimit(1)
             .fixedSize()
             .accessibilityLabel("Installed on this iPhone")
     }
 }
 
-/// A feature: its picture, an optional label such as Beta, a short serif title, one to three
-/// sentences, and where to find it. The first card of a version leads with a wide banner.
-private struct ReleaseFeatureCard: View {
+/// One part of Zone and its changes. Folded, it is the group's picture, name and count over the
+/// names of its changes; a tap unfolds it into a line per change, a hairline apart on the page.
+/// No cards: the list is the design.
+private struct ReleaseGroupSection: View {
     @Environment(\.colorScheme) private var scheme
-    @Environment(\.dynamicTypeSize) private var typeSize
-    let feature: ReleaseFeature
-    let leads: Bool
+    let group: ReleaseGroup
+    @State private var open: Bool
 
-    var body: some View {
-        let shape = Zone.cardShape
-        VStack(alignment: .leading, spacing: 0) {
-            if leads {
-                ReleaseBanner(symbol: feature.symbol, seed: feature.title)
-                    .frame(height: 112)
-            }
-            VStack(alignment: .leading, spacing: 12) {
-                // At the largest text sizes the picture sits above the title, not beside it.
-                if leads {
-                    titleBlock
-                } else if typeSize.isAccessibilitySize {
-                    ReleaseSymbolTile(symbol: feature.symbol)
-                    titleBlock
-                } else {
-                    HStack(alignment: .center, spacing: 14) {
-                        ReleaseSymbolTile(symbol: feature.symbol)
-                        titleBlock
-                    }
-                }
-                Text(feature.body)
-                    .font(.body)
-                    .foregroundStyle(Zone.muted(scheme))
-                    .fixedSize(horizontal: false, vertical: true)
-                if let location = feature.location {
-                    Label {
-                        Text(location).fixedSize(horizontal: false, vertical: true)
-                    } icon: {
-                        Image(systemName: "arrow.turn.down.right")
-                    }
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(Zone.accentText(scheme))
-                    .accessibilityLabel("Find it in \(location.replacingOccurrences(of: " > ", with: ", "))")
-                }
-            }
-            .padding(18)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .clipShape(shape)
-        .background { shape.fill(Zone.card(scheme)).sunShadow(scale: 0.8) }
-        .overlay(shape.strokeBorder(Zone.rule(scheme), lineWidth: 1))
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("releaseNotes.feature")
+    init(group: ReleaseGroup, startsOpen: Bool) {
+        self.group = group
+        _open = State(initialValue: startsOpen)
     }
 
-    private var titleBlock: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            if let tag = feature.tag {
-                Text(tag.uppercased())
-                    .font(.caption2.weight(.bold))
-                    .tracking(0.6)
-                    .foregroundStyle(Zone.accentText(scheme))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .overlay(Capsule().strokeBorder(Zone.accentText(scheme).opacity(0.5), lineWidth: 1))
-                    .accessibilityLabel(tag)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(Zone.motion) { open.toggle() }
+            } label: {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .firstTextBaseline, spacing: 9) {
+                        Image(systemName: ReleaseSymbol.name(group.symbol))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Zone.accentTone(scheme))
+                            .frame(width: ReleaseItemRow.gutter)
+                        Text(group.title)
+                            .font(.system(.headline, design: .serif))
+                            .foregroundStyle(Zone.ink(scheme))
+                        Spacer(minLength: 8)
+                        Text("\(group.items.count)")
+                            .font(.footnote.monospacedDigit())
+                            .foregroundStyle(Zone.muted(scheme))
+                        Image(systemName: "chevron.down")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Zone.muted(scheme).opacity(0.8))
+                            .rotationEffect(.degrees(open ? 180 : 0))
+                    }
+                    if !open {
+                        Text(preview)
+                            .font(.subheadline)
+                            .foregroundStyle(Zone.muted(scheme))
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(3)
+                            .padding(.leading, ReleaseItemRow.gutter + 9)
+                    }
+                }
+                .padding(.bottom, 9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            Text(feature.title)
-                .font(.system(.title3, design: .serif, weight: .semibold))
-                .foregroundStyle(Zone.ink(scheme))
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(group.title), \(group.items.count == 1 ? "1 change" : "\(group.items.count) changes")")
+            .accessibilityValue(open ? "Open" : preview)
+            .accessibilityHint(open ? "Folds this group" : "Shows each change")
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("releaseNotes.group")
+            Hairline()
+            if open {
+                ForEach(Array(group.items.enumerated()), id: \.offset) { index, item in
+                    if index > 0 { Hairline().padding(.leading, ReleaseItemRow.gutter + 9) }
+                    ReleaseItemRow(item: item)
+                }
+            }
+        }
+    }
+
+    /// The names of the group's changes, which is the whole group at a glance. A group of unnamed
+    /// fixes shows its first one.
+    private var preview: String {
+        let names = group.items.compactMap(\.title)
+        if names.isEmpty { return group.items.first?.text ?? "" }
+        let unnamed = group.items.count - names.count
+        return names.joined(separator: ", ") + (unnamed > 0 ? ", and \(unnamed) more" : "")
+    }
+}
+
+/// One change: its name in ink, then its sentence in the quieter color, as one paragraph. A
+/// starred change carries a small dot in the margin.
+struct ReleaseItemRow: View {
+    @Environment(\.colorScheme) private var scheme
+    static let gutter: CGFloat = 22
+    let item: ReleaseItem
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 9) {
+            Circle()
+                .fill(item.isHighlight ? Zone.accentTone(scheme) : .clear)
+                .frame(width: 5, height: 5)
+                .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 3 }
+                .frame(width: Self.gutter)
+                .accessibilityHidden(true)
+            ReleaseItemText(item: item)
+                .font(.subheadline)
                 .fixedSize(horizontal: false, vertical: true)
-                .accessibilityAddTraits(.isHeader)
+        }
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("releaseNotes.item")
+    }
+}
+
+/// A change as one run of text: "Next word BETA  Finish a word and the row offers the next one."
+struct ReleaseItemText: View {
+    @Environment(\.colorScheme) private var scheme
+    let item: ReleaseItem
+
+    var body: some View {
+        if let title = item.title {
+            let name = Text(title).fontWeight(.semibold).foregroundStyle(Zone.ink(scheme))
+            let sentence = Text(item.text).foregroundStyle(Zone.muted(scheme))
+            if let tag = item.tag {
+                let label = Text(tag.uppercased()).font(.caption2.weight(.bold)).foregroundStyle(Zone.ink(scheme))
+                Text("\(name) \(label)  \(sentence)")
+            } else {
+                Text("\(name)  \(sentence)")
+            }
+        } else {
+            Text(item.text).foregroundStyle(Zone.muted(scheme))
         }
     }
 }
@@ -198,9 +270,9 @@ struct ReleaseSymbolTile: View {
     var body: some View {
         Image(systemName: ReleaseSymbol.name(symbol))
             .font(.system(size: side * 0.44, weight: .medium))
-            .foregroundStyle(Zone.accentText(scheme))
+            .foregroundStyle(Zone.ink(scheme))
             .frame(width: side, height: side)
-            .background(Zone.accentGraphic(scheme).opacity(scheme == .dark ? 0.18 : 0.12),
+            .background(Zone.accentTone(scheme).opacity(scheme == .dark ? 0.18 : 0.12),
                         in: Zone.fieldShape)
             .accessibilityHidden(true)
     }
@@ -209,106 +281,5 @@ struct ReleaseSymbolTile: View {
 enum ReleaseSymbol {
     static func name(_ symbol: String) -> String {
         UIImage(systemName: symbol) == nil ? "sparkles" : symbol
-    }
-}
-
-/// The lead card's picture: the feature's symbol over a still waveform, Zone's own mark. The
-/// bars are drawn from the feature's title, so each version's banner is its own and never
-/// changes between launches.
-private struct ReleaseBanner: View {
-    @Environment(\.colorScheme) private var scheme
-    let symbol: String
-    let seed: String
-
-    var body: some View {
-        ZStack(alignment: .leading) {
-            Zone.field(scheme)
-            Canvas { context, size in
-                // The bars begin beside the symbol, never behind it.
-                let start: CGFloat = 86
-                let span = max(0, size.width - start - 14)
-                let heights = Self.heights(seed: seed, count: max(8, Int(span / 9)))
-                let step = span / CGFloat(heights.count)
-                let width = max(2, step * 0.42)
-                for (index, height) in heights.enumerated() {
-                    let tall = max(4, CGFloat(height) * size.height * 0.72)
-                    let rect = CGRect(x: start + CGFloat(index) * step + (step - width) / 2, y: (size.height - tall) / 2,
-                                      width: width, height: tall)
-                    // Quiet beside the symbol, fuller toward the trailing edge.
-                    let fade = 0.2 + 0.5 * Double(index) / Double(heights.count)
-                    context.fill(Path(roundedRect: rect, cornerRadius: width / 2),
-                                 with: .color(Zone.accentGraphic(scheme).opacity(fade)))
-                }
-            }
-            Image(systemName: ReleaseSymbol.name(symbol))
-                .font(.system(size: 40, weight: .medium))
-                .foregroundStyle(Zone.accentText(scheme))
-                .frame(width: 50)
-                .padding(.leading, 18)
-                .frame(maxHeight: .infinity)
-        }
-        .overlay(alignment: .bottom) { Rectangle().fill(Zone.rule(scheme)).frame(height: 1) }
-        .accessibilityHidden(true)
-    }
-
-    /// Bar heights from 0 to 1, shaped like speech: swells and pauses, the same for the same seed.
-    static func heights(seed: String, count: Int) -> [Double] {
-        var state = seed.unicodeScalars.reduce(UInt64(0x9E37_79B9_7F4A_7C15)) { ($0 ^ UInt64($1.value)) &* 0x100_0000_01B3 }
-        func next() -> Double {
-            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
-            return Double(state >> 33) / Double(1 << 31)
-        }
-        let phase = next() * .pi * 2
-        return (0..<count).map { index in
-            let position = Double(index) / Double(max(1, count - 1))
-            let swell = 0.5 + 0.5 * sin(position * .pi * 5 + phase)
-            return min(1, 0.12 + swell * (0.35 + 0.65 * next()))
-        }
-    }
-}
-
-/// "Also in this version": the smaller changes as a compact list. A long one shows its first
-/// few lines and opens on a tap.
-private struct ReleaseFixList: View {
-    @Environment(\.colorScheme) private var scheme
-    let fixes: [String]
-    @State private var showsAll = false
-    private static let collapsedCount = 5
-
-    var body: some View {
-        let collapses = fixes.count > Self.collapsedCount + 1
-        let shown = collapses && !showsAll ? Array(fixes.prefix(Self.collapsedCount)) : fixes
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Also in this version")
-                .font(.system(.title3, design: .serif, weight: .semibold))
-                .foregroundStyle(Zone.ink(scheme))
-                .accessibilityAddTraits(.isHeader)
-            VStack(alignment: .leading, spacing: 9) {
-                ForEach(shown, id: \.self) { fix in
-                    HStack(alignment: .firstTextBaseline, spacing: 9) {
-                        Circle()
-                            .fill(Zone.accentGraphic(scheme))
-                            .frame(width: 5, height: 5)
-                            .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 3 }
-                            .accessibilityHidden(true)
-                        Text(fix)
-                            .font(.subheadline)
-                            .foregroundStyle(Zone.muted(scheme))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .accessibilityIdentifier("releaseNotes.fix")
-                }
-                if collapses {
-                    Button(showsAll ? "Show fewer" : "Show all \(fixes.count)") {
-                        withAnimation(Zone.motion) { showsAll.toggle() }
-                    }
-                    .buttonStyle(ZoneLinkButtonStyle())
-                    .padding(.bottom, -8)
-                    .accessibilityIdentifier("releaseNotes.showAll")
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .zoneCard(padding: 18)
-        }
     }
 }

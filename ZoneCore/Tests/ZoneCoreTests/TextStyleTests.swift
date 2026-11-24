@@ -217,4 +217,90 @@ final class TextStyleTests: XCTestCase {
         XCTAssertEqual(TextStyle.formal.apply("Honestly IDK."), "Honestly I don't know.")
         XCTAssertEqual(TextStyle.casual.apply("idk man"), "idk man")
     }
+
+    // MARK: Auto-Capitalization and formal wording (2026-11-19)
+
+    private func casual(_ text: String, autoCapitalization: Bool, opening: DictationOpening = .lowercase,
+                        personalWords: [String] = []) -> String {
+        TextStyle.casual.insertion(of: text, contextBefore: "", fieldCapitalizesSentences: true, personalWords: personalWords,
+                                   opening: opening, autoCapitalization: autoCapitalization)
+    }
+
+    /// Auto-Capitalization off: Casual starts no sentence with a capital, as typing does.
+    func testCasualStartsNoSentenceWithACapitalWhenAutoCapitalizationIsOff() {
+        XCTAssertEqual(casual("Hello, sorry, does later tonight work? Like I don't know. Maybe seven.", autoCapitalization: false),
+                       "hello sorry does later tonight work? like i don't know. maybe 7")
+        XCTAssertEqual(casual("That works. Then we can go.\nAlso bring it", autoCapitalization: false),
+                       "that works. then we can go.\nalso bring it")
+        // On, the sentences inside keep their capitals; only the first word follows Shift.
+        XCTAssertEqual(casual("Hello, sorry, does later tonight work? Like I don't know.", autoCapitalization: true),
+                       "hello sorry does later tonight work? Like I don't know")
+    }
+
+    func testAutoCapitalizationOffLowersNamesAndLinks() {
+        XCTAssertEqual(casual("It works. I'm sure. Zayd said so. NASA agrees. Paris is next.", autoCapitalization: false),
+                       "it works. i'm sure. zayd said so. nasa agrees. paris is next")
+        XCTAssertEqual(casual("Read it. Example.com/Docs has more. iPhone too.", autoCapitalization: false),
+                       "read it. example.com/docs has more. iphone too")
+        XCTAssertEqual(casual("Sure. Hooke is ready.", autoCapitalization: false, personalWords: ["Hooke"]),
+                       "sure. hooke is ready")
+    }
+
+    func testAutoCapitalizationOffOnlyAllowsExplicitCapsLock() {
+        XCTAssertEqual(casual("Hello there. This is it.", autoCapitalization: false, opening: .capital),
+                       "hello there. this is it")
+        XCTAssertEqual(casual("Hello there. This is it.", autoCapitalization: false, opening: .capsLock),
+                       "HELLO THERE. THIS IS IT")
+    }
+
+    func testOnlyCasualFollowsAutoCapitalization() {
+        let said = "Hello there. This is it."
+        func write(_ style: TextStyle) -> String {
+            style.insertion(of: said, contextBefore: "", fieldCapitalizesSentences: true, opening: .capital, autoCapitalization: false)
+        }
+        XCTAssertEqual(write(.formal), "Hello there. This is it.")
+        XCTAssertEqual(write(.excited), "Hello there! This is it!")
+        XCTAssertEqual(write(.veryCasual), "hello there this is it")
+    }
+
+    func testFormalWritesTheWordsThatWereMeant() {
+        let formal = { TextStyle.formal.apply($0) }
+        XCTAssertEqual(formal("I'm gonna be late cuz I gotta finish this"), "I'm going to be late because I have to finish this.")
+        XCTAssertEqual(formal("there's gotta be a way. It's gotta work. he gotta go"),
+                       "There's got to be a way. It's got to work. He has to go.")
+        XCTAssertEqual(formal("it's kinda cold, sorta. lemme check, gimme a sec"),
+                       "It's kind of cold, sort of. Let me check, give me a sec.")
+        XCTAssertEqual(formal("do you wanna go? I wanna a beer. wanna it"), "Do you want to go? I want a beer. Want it.")
+        XCTAssertEqual(formal("I dunno. 'cause it broke. Gonna fix it"), "I don't know. Because it broke. Going to fix it.")
+        XCTAssertEqual(formal("tell 'em we shoulda left, we're outta time, a lotta people are tryna leave"),
+                       "Tell them we should have left, we're out of time, a lot of people are trying to leave.")
+    }
+
+    func testFormalWordingLeavesOtherWordsLiteralsAndOtherStylesAlone() {
+        XCTAssertEqual(TextStyle.formal.apply("the cause was a mesa and a kinda-sorta thing"), "The cause was a mesa and a kinda-sorta thing.")
+        XCTAssertEqual(TextStyle.formal.apply("open gonna.com/wanna now"), "Open gonna.com/wanna now.")
+        XCTAssertEqual(TextStyle.casual.apply("I'm gonna be late cuz I gotta go"), "I'm gonna be late cuz I gotta go")
+        XCTAssertEqual(TextStyle.veryCasual.apply("I'm gonna be late cuz I gotta go"), "i'm gonna be late cuz i gotta go")
+        XCTAssertEqual(TextStyle.excited.apply("I'm gonna be late"), "I'm gonna be late!")
+    }
+
+    /// An opening word of agreement or greeting is not the first item of a list.
+    func testCasualDropsCommasAfterOpeningAsides() {
+        XCTAssertEqual(TextStyle.casual.apply("Yes, sir, to both."), "Yes sir to both")
+        XCTAssertEqual(TextStyle.casual.apply("Kinda, sorta, I don't know."), "Kinda sorta I don't know")
+        XCTAssertEqual(TextStyle.casual.apply("Eggs, milk, and bread."), "Eggs, milk, and bread")
+    }
+
+    /// What Settings > Text style shows under each name.
+    func testTheSettingsExampleShowsEachStyle() {
+        XCTAssertEqual(TextStyle.casual.example(), "Hey sorry does later tonight work? I'm gonna be free around 7 maybe 8")
+        XCTAssertEqual(TextStyle.casual.example(autoCapitalization: false),
+                       "hey sorry does later tonight work? i'm gonna be free around 7 maybe 8")
+        XCTAssertEqual(TextStyle.veryCasual.example(), "hey sorry does later tonight work? i'm gonna be free around 7 maybe 8")
+        XCTAssertEqual(TextStyle.formal.example(autoCapitalization: false),
+                       "Hey, sorry, does later tonight work? I'm going to be free around seven, maybe eight.")
+        XCTAssertEqual(TextStyle.excited.example(), "Hey, sorry, does later tonight work? I'm gonna be free around seven, maybe eight!")
+        // No two styles write it the same way.
+        XCTAssertEqual(Set(TextStyle.allCases.map { $0.example() }).count, TextStyle.allCases.count)
+    }
 }

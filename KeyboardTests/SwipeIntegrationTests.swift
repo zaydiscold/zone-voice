@@ -25,13 +25,26 @@ final class SwipeIntegrationTests: XCTestCase {
         func userTouchedKeyboard() {}
         /// UIKit replaces a selection with the inserted text; the fake keeps the selection apart
         /// from `text` and `tail`, so replacing it is dropping it.
-        func insert(_ text: String) { selection = nil; self.text += text }
+        var nextInsertionEcho: String?
+        var hidesRightContext = false
+        func insert(_ text: String) {
+            selection = nil
+            if let nextInsertionEcho {
+                holdSwipeEcho(before: nextInsertionEcho)
+                self.nextInsertionEcho = nil
+            }
+            self.text += text
+        }
         /// A web view: the move lands, but the context reads stay stale until a later turn.
         var lagsContext = false
         /// UITextView: context stops at the caret's own paragraph (verified Nov 8 on the
         /// simulator: "five six|" reads as "five six" in "one two\nthree four\nfive six").
         var paragraphContext = false
         private var staleContext: (before: String, after: String)?
+        func setShortcodeTestLag(before: String) {
+            staleContext = (before, tail)
+            DispatchQueue.main.async { [weak self] in self?.staleContext = nil }
+        }
         func adjustTextPosition(byCharacterOffset offset: Int) {
             cursorAdjustments.append(offset)
             if defersCursorAdjustments { queuedCursorAdjustments.append(offset); return }
@@ -68,6 +81,7 @@ final class SwipeIntegrationTests: XCTestCase {
             return liveBefore()
         }
         func contextAfter() -> String? {
+            if hidesRightContext { return nil }
             if let staleContext {
                 let after = paragraphContext ? String(staleContext.after.prefix(while: { !$0.isNewline })) : staleContext.after
                 return after.isEmpty && boundaryContextIsNil ? nil : after
@@ -102,8 +116,8 @@ final class SwipeIntegrationTests: XCTestCase {
         var isSearchField = false
         var dimsReturnWhenEmpty = false
         var hasOpenAccess = false
-        var explicitDarkAppearance: Bool? { nil }
-        var needsGlobeKey: Bool { false }
+        var explicitDarkAppearance: Bool?
+        var needsGlobeKey = false
         func advanceToNextInputMode() {}
         func playClick() {}
         func open(_ url: URL) {}
@@ -140,6 +154,38 @@ final class SwipeIntegrationTests: XCTestCase {
         m.handleSwipe(path(word), layout: layout)
         try await waitFor { p.text != before }
     }
+    func testSwipedCatOffersEmojiAndDeleteRestoresWord() async throws {
+        let proxy = Proxy()
+        let model = prepared(proxy)
+        model.apply(KeyboardPreferences(emojiPredictions: false, swipeTypingEnabled: true, swipeLearningEnabled: false))
+        defer { model.keyboardWillDisappear() }
+        try await waitFor { model.isCorrectorReady }
+        try await swipe(model, proxy, "cat")
+        let alternatives = model.suggestions
+        XCTAssertFalse(alternatives.isEmpty)
+        model.apply(KeyboardPreferences(swipeTypingEnabled: true, swipeLearningEnabled: false))
+        XCTAssertEqual(proxy.text, "cat")
+        try await waitFor { model.suggestions.dropFirst().first?.text == "🐱" }
+        XCTAssertEqual(Array(model.suggestions.prefix(1) + model.suggestions.dropFirst(2)), alternatives)
+        model.choose(try XCTUnwrap(model.suggestions.dropFirst().first))
+        XCTAssertEqual(proxy.text, "🐱")
+        model.keyDown(.delete)
+        model.endDeleteRepeat()
+        XCTAssertEqual(proxy.text, "cat")
+    }
+
+    func testSwipedEmojiWithAutocorrectDisabled() async throws {
+        let proxy = Proxy()
+        let model = prepared(proxy)
+        defer { model.keyboardWillDisappear() }
+        model.apply(KeyboardPreferences(autocorrectEnabled: false, swipeTypingEnabled: true, swipeLearningEnabled: false))
+        try await swipe(model, proxy, "cat")
+        try await waitFor { model.suggestions.dropFirst().first?.text == "🐱" }
+        XCTAssertEqual(proxy.text, "cat")
+        model.choose(try XCTUnwrap(model.suggestions.dropFirst().first))
+        XCTAssertEqual(proxy.text, "🐱")
+    }
+
     /// Contacts called "The Old Man" and "Mom And Dad" hand the keyboard "The", "Man" and "And" as
     /// terms. The reported message read "No I have to fight The old Man".
     func testOrdinaryWordsOnContactCardsSwipeLowercase() async throws {
@@ -212,7 +258,8 @@ final class SwipeIntegrationTests: XCTestCase {
         m.hostTextDidChange(); m.hostSelectionDidChange()
         m.keyDown(.delete); m.endDeleteRepeat()
         XCTAssertEqual(p.text, "hi ")
-        try await swipe(m, p)
+        // Trace hello again, ending on its O. A nearby P must not turn it into help.
+        try await swipe(m, p, "hello")
         m.handleTap(.character("x"))
         XCTAssertEqual(p.text, "hi hello x")
         p.unknown = true
@@ -609,6 +656,48 @@ extension SwipeIntegrationTests {
         XCTAssertFalse(next.suggestions.contains { $0.text.lowercased() == "zorbax" }, "Reset removes learned-only words")
         next.keyboardWillDisappear()
     }
+    func testRetryAfterDeletingASwipeDemotesTheDeletedWord() {
+        func c(_ word: String, _ score: Float) -> SwipeCandidate { SwipeCandidate(word: word, score: score, entryIndex: nil) }
+        let close = [c("Their", 0.20), c("there", 0.26), c("three", 0.31), c("tier", 0.9)]
+        XCTAssertEqual(SwipeRetry.alternatives(close, retryOf: nil).map(\.word), ["Their", "there", "three"])
+        // A close rival wins the retry; the deleted word stays one tap away.
+        XCTAssertEqual(SwipeRetry.alternatives(close, retryOf: "their").map(\.word), ["there", "three", "Their"])
+        // A candidate outside the score penalty cannot win on score adjustment alone.
+        let clean = [c("hello", 0.05), c("hell", 0.6), c("help", 0.8)]
+        XCTAssertEqual(SwipeRetry.alternatives(clean, retryOf: "Hello").map(\.word), ["hello", "hell", "help"])
+        XCTAssertEqual(SwipeRetry.alternatives(clean, retryOf: "other").map(\.word), ["hello", "hell", "help"])
+        XCTAssertTrue(SwipeRetry.alternatives([], retryOf: "hello").isEmpty)
+    }
+    /// "to" and "too" share one path (doubled letters collapse), so only the retry rule can
+    /// move the second swipe off the deleted word. Typing in between ends the retry.
+    func testDeleteThenSwipeAgainGivesAnotherWordOnlyAtTheSameSpot() async throws {
+        let p = Proxy(); p.text = "me "
+        let m = prepared(p)
+        try await swipe(m, p, "to")
+        let first = p.text
+        XCTAssertTrue(["me to", "me too"].contains(first))
+        m.keyDown(.delete); m.endDeleteRepeat()
+        XCTAssertEqual(p.text, "me ")
+        // A text field can echo the multi-character delete more than once.
+        for _ in 0..<4 { m.hostTextDidChange() }
+        try await swipe(m, p, "to")
+        XCTAssertTrue(["me to", "me too"].contains(p.text))
+        XCTAssertNotEqual(p.text, first, "the deleted word must not come straight back")
+        // Works with learning off, and teaches nothing by itself.
+        XCTAssertTrue(swipeLearning().rejections.isEmpty)
+        // Delete, type something, delete that: a later swipe is a fresh one, not a retry.
+        let q = Proxy(); q.text = "me "
+        let n = prepared(q)
+        try await swipe(n, q, "to")
+        let fresh = q.text
+        n.keyDown(.delete); n.endDeleteRepeat()
+        n.handleTap(.character("a"))
+        n.keyDown(.delete); n.endDeleteRepeat()
+        XCTAssertEqual(q.text, "me ")
+        try await swipe(n, q, "to")
+        XCTAssertEqual(q.text, fresh)
+        m.keyboardWillDisappear(); n.keyboardWillDisappear()
+    }
     func testDeletionAloneAndDisabledLearningDoNotTrain() async throws {
         let p = Proxy(), m = learningModel(p)
         try await swipe(m, p)
@@ -696,4 +785,110 @@ extension SwipeIntegrationTests {
         XCTAssertEqual(swipeLearning().choices(of: "newword"), 0)
         m.keyboardWillDisappear()
     }
+}
+
+extension SwipeIntegrationTests {
+    func testDelayedSwipeEchoKeepsTheSpaceBeforeATappedLetter() async throws {
+        for read in ["current", "previous", "empty", "nil"] {
+            let proxy = Proxy()
+            proxy.capitalizes = true
+            let model = prepared(proxy)
+            defer { model.keyboardWillDisappear() }
+            try await swipe(model, proxy, "this")
+            let first = proxy.text
+            switch read {
+            case "previous": proxy.nextInsertionEcho = first
+            case "empty": proxy.nextInsertionEcho = ""
+            case "nil":
+                proxy.boundaryContextIsNil = true
+                proxy.nextInsertionEcho = ""
+            default: break
+            }
+            try await swipe(model, proxy, "is")
+            XCTAssertEqual(proxy.text, "This is")
+            model.hostTextDidChange()
+            // Allow the normal 75 ms suggestion and shift refresh to see the same stale text.
+            try await Task.sleep(for: .milliseconds(110))
+            model.handleTap(.character("a"))
+            proxy.releaseSwipeEcho()
+            try await Task.sleep(for: .milliseconds(30))
+            try await swipe(model, proxy, "test")
+            XCTAssertEqual(proxy.text, "This is a test", "Host read: \(read)")
+        }
+    }
+}
+
+extension SwipeIntegrationTests {
+    func testNextSwipeKeepsItsSpaceWhileTheFirstInsertionIsMissingFromTheProxy() async throws {
+        let proxy = Proxy()
+        proxy.capitalizes = true
+        proxy.boundaryContextIsNil = true
+        let model = prepared(proxy)
+        defer { model.keyboardWillDisappear() }
+        var now = 10.0
+        model.swipeUptime = { now }
+        proxy.nextInsertionEcho = ""
+        try await swipe(model, proxy, "this")
+        now += KeyboardModel.echoWindow - 0.01
+        model.hostTextDidChange()
+        XCTAssertTrue(model.canBeginSwipe)
+        model.handleSwipe(path("is"), layout: layout)
+        now += 0.06
+        model.hostTextDidChange()
+        try await waitFor { proxy.text != "This" }
+        proxy.releaseSwipeEcho()
+        XCTAssertEqual(proxy.text, "This is")
+    }
+
+    func testUndoAfterHostEchoDuringDecodeCancelsTheQueuedInsertion() async throws {
+        let proxy = Proxy()
+        proxy.text = "hi "
+        let model = prepared(proxy)
+        defer { model.keyboardWillDisappear() }
+        proxy.nextInsertionEcho = proxy.text
+        try await swipe(model, proxy, "hello")
+        model.handleSwipe(path("world"), layout: layout)
+        proxy.releaseSwipeEcho()
+        model.hostTextDidChange()
+        proxy.text = "hi "
+        model.hostTextDidChange()
+        model.handleTap(.character("x"))
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(proxy.text, "hi x")
+    }
+
+    func testPendingSwipeSpaceEndsOnExternalEditsAndExpiredReads() async throws {
+        for change in ["send", "field", "selection", "move", "hidden right", "undo", "edit", "expired"] {
+            let proxy = Proxy()
+            let model = prepared(proxy)
+            defer { model.keyboardWillDisappear() }
+            if change == "undo" { proxy.text = "hi " }
+            if change == "expired" { proxy.nextInsertionEcho = "" }
+            try await swipe(model, proxy, "hello")
+            switch change {
+            case "undo": proxy.text = "hi "
+            case "hidden right":
+                proxy.hidesRightContext = true
+                proxy.adjustTextPosition(byCharacterOffset: -proxy.text.count)
+                model.hostSelectionDidChange()
+            case "send": proxy.text = ""
+            case "field": proxy.session = "another"; proxy.text = "field"
+            case "selection": proxy.selection = "selected"
+            case "move": proxy.adjustTextPosition(byCharacterOffset: -proxy.text.count)
+            case "edit": proxy.text = "edited"
+            default:
+                try await Task.sleep(for: .seconds(KeyboardModel.echoWindow + 0.1))
+                proxy.setShortcodeTestLag(before: "")
+            }
+            let before = proxy.text
+            model.hostTextDidChange()
+            model.handleTap(.character("x"))
+            XCTAssertEqual(proxy.text, before + "x", change)
+        }
+    }
+}
+
+private extension SwipeIntegrationTests.Proxy {
+    func holdSwipeEcho(before: String) { staleContext = (before, tail) }
+    func releaseSwipeEcho() { staleContext = nil }
 }

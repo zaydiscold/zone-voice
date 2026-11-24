@@ -9,6 +9,8 @@ import ZoneCore
 final class LibraryBackupManager {
     static let shared = LibraryBackupManager()
     private let defaults: UserDefaults
+    private let history: TranscriptHistory?
+    private let vocabulary: PersonalVocabulary?
     private let bookmarkKey = "libraryBackupFolder"
     private(set) var isWorking = false
     private(set) var lastError: String?
@@ -25,7 +27,11 @@ final class LibraryBackupManager {
     @ObservationIgnored private var deferredUntil: Date?
 
     init(defaults: UserDefaults = .standard,
+         history: TranscriptHistory? = .shared,
+         vocabulary: PersonalVocabulary? = .shared,
          minimumInterval: TimeInterval = LibraryBackupSchedule.defaultMinimumInterval) {
+        self.history = history
+        self.vocabulary = vocabulary
         self.defaults = defaults
         schedule = LibraryBackupSchedule(minimumInterval: minimumInterval)
         lastSavedAt = defaults.object(forKey: "libraryBackupLastSaved") as? Date
@@ -38,7 +44,8 @@ final class LibraryBackupManager {
         let bookmark = try await Task.detached(priority: .userInitiated) {
             let accessed = url.startAccessingSecurityScopedResource()
             defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-            return try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+            do { return try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil) }
+            catch { throw BackupScreenFailure(message: "Zone could not open this backup folder. Choose another folder in Files.") }
         }.value
         defaults.set(bookmark, forKey: bookmarkKey)
         defaults.set(url.lastPathComponent, forKey: "libraryBackupFolderName")
@@ -56,7 +63,8 @@ final class LibraryBackupManager {
 
     private func snapshot(notes: NotesStore, meetings: MeetingCoordinator) async throws -> LibraryBackup {
         guard !meetings.isRecording else { throw LibraryBackupError.recording }
-        guard let history = TranscriptHistory.shared else { throw LibraryBackupError.unavailableHistory }
+        guard let history else { throw LibraryBackupError.unavailableHistory }
+        guard let vocabulary else { throw CocoaError(.fileReadNoPermission) }
         let notesURL = notes.fileURL
         let unsavedNotes = notes.notes
         let store = meetings.store
@@ -67,9 +75,11 @@ final class LibraryBackupManager {
             let rawHistory = try history.backupData()
             // Read the unpruned file; expired text still on disk belongs in an export.
             let records = try TranscriptHistory.recordsInBackup(rawHistory)
-            return LibraryBackup(notes: savedNotes, dictations: records,
+            var backup = LibraryBackup(notes: savedNotes, dictations: records,
                                  meetings: try store.backupMeetings(), historyArchive: rawHistory,
                                  historyRecoveryFiles: try history.backupRecoveryFiles())
+            backup.vocabulary = try vocabulary.document()
+            return backup
         }.value
         // Recording may have started while snapshot I/O yielded the main actor.
         guard !meetings.isRecording else { throw LibraryBackupError.recording }
@@ -97,8 +107,9 @@ final class LibraryBackupManager {
             return folder
         } catch {
             if let staging { try? FileManager.default.removeItem(at: staging) }
-            lastError = error.localizedDescription
-            throw error
+            let message = (error as? LibraryBackupError)?.errorDescription ?? "Zone could not create the backup. Free up space and export again."
+            lastError = message
+            throw BackupScreenFailure(message: message)
         }
     }
 
@@ -131,7 +142,8 @@ final class LibraryBackupManager {
     private func save(notes: NotesStore, meetings: MeetingCoordinator, manual: Bool) async {
         guard hasFolder, !isWorking, !checking, !meetings.isRecording else { return }
         var sources = [notes.fileURL, meetings.store.directory]
-        if let history = TranscriptHistory.shared { sources.append(history.directory) }
+        if let vocabulary { sources.append(vocabulary.storeURL) }
+        if let history { sources.append(history.directory) }
         checking = true
         let signature = await Task.detached(priority: .utility) { LibraryBackupSignature.of(sources) }.value
         checking = false
@@ -175,7 +187,7 @@ final class LibraryBackupManager {
             lastError = nil
             schedule.saved(through: change, signature: signature)
         } catch {
-            lastError = "Folder backup needs attention: \(error.localizedDescription)"
+            lastError = (error as? LibraryBackupError)?.errorDescription ?? "Zone could not write the folder backup. Check the folder in Files or choose another one."
             schedule.failed()
         }
         // Access opened on the resolved URL stays open for the whole write, then closes on it.
@@ -197,18 +209,41 @@ final class LibraryBackupManager {
         }
     }
 
+    private static func checkFolder(_ directory: URL) throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let probe = directory.appendingPathComponent(".restore-check-" + UUID().uuidString)
+        try Data().write(to: probe, options: .withoutOverwriting)
+        try manager.removeItem(at: probe)
+    }
+
     func restore(_ url: URL, notes: NotesStore, meetings: MeetingCoordinator) async throws -> String {
         guard !isWorking, !meetings.isRecording else { throw LibraryBackupError.recording }
         isWorking = true
         defer { isWorking = false }
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        var completed: [String] = []
+        var stage = "backup validation"
         do {
             let store = meetings.store
             // Full package validation happens before any live record is touched.
             let backup = try await Task.detached(priority: .userInitiated) { try LibraryBackupFiles.read(url) }.value
-            guard let history = TranscriptHistory.shared else { throw LibraryBackupError.unavailableHistory }
+            guard let history else { throw LibraryBackupError.unavailableHistory }
+            stage = "notes"
             _ = try notes.backupNotes()
+            try Self.checkFolder(notes.fileURL.deletingLastPathComponent())
+            stage = "dictations"
+            try Self.checkFolder(history.directory)
+            stage = "meetings"
+            try Self.checkFolder(store.directory)
+            _ = try store.backupMeetings()
+            if backup.vocabulary != nil {
+                stage = "My words"
+                guard let vocabulary else { throw CocoaError(.fileWriteNoPermission) }
+                try Self.checkFolder(vocabulary.storeURL.deletingLastPathComponent())
+                _ = try vocabulary.document()
+            }
             let historyData: Data
             if let archive = backup.historyArchive {
                 _ = try TranscriptHistory.recordsInBackup(archive)
@@ -219,21 +254,45 @@ final class LibraryBackupManager {
                 encoder.dateEncodingStrategy = .iso8601
                 historyData = try encoder.encode(History(records: backup.dictations))
             }
+            stage = "meetings"
             let meetingCount = try await Task.detached(priority: .userInitiated) {
                 try LibraryBackupFiles.restoreMeetings(backup, from: url, into: store)
             }.value
+            completed.append("\(meetingCount) meetings")
+            stage = "My words"
+            if let words = backup.vocabulary {
+                guard let vocabulary else { throw CocoaError(.fileWriteNoPermission) }
+                try await Task.detached(priority: .userInitiated) { try vocabulary.restore(words) }.value
+                completed.append("My words")
+            }
+            stage = "dictations"
             let historyCount = try history.importBackupData(historyData)
-            try history.importRecoveryFiles(backup.historyRecoveryFiles ?? [:])
+            completed.append("\(historyCount) dictations")
+            stage = "recovery files"
+            let files = try history.importRecoveryFiles(backup.historyRecoveryFiles ?? [:])
+            completed.append("\(files) recovery files")
+            stage = "recovered dictations"
             let recoveredCount = try history.importInFlightText(backup.historyRecoveryFiles ?? [:])
+            completed.append("\(recoveredCount) recovered dictations")
+            stage = "notes"
             let noteCount = try notes.importBackup(backup.notes)
             await meetings.reload()
             lastError = nil
             return "Added \(noteCount) notes, \(historyCount + recoveredCount) dictations and \(meetingCount) meetings. Existing records were kept."
         } catch {
-            lastError = "Import stopped: \(error.localizedDescription) Any records already added are safe. You can retry without creating duplicates."
-            throw error
+            await meetings.reload()
+            let receipt = completed.isEmpty ? "No store finished." : "Finished " + completed.joined(separator: ", ") + "."
+            let reason = (error as? LibraryBackupError)?.errorDescription ?? "Check the backup in Files, then try importing again."
+            let message = "Import stopped during \(stage). \(receipt) \(reason) Any records already added are safe."
+            lastError = message
+            throw BackupScreenFailure(message: message)
         }
     }
+}
+
+private struct BackupScreenFailure: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
 }
 
 /// The chosen backup folder, resolved from its bookmark with security-scoped access open.

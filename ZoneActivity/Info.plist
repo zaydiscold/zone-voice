@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>ZoneBuildAction</key>
+	<string>$(ACTION)</string>
 	<key>CFBundleDisplayName</key>
 	<string>Zone Recording</string>
 	<key>CFBundleExecutable</key>
@@ -21,6 +23,11 @@
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.widgetkit-extension</string>
 	</dict>
+	<key>UIAppFonts</key>
+	<array>
+		<string>ZoneGateOne.ttf</string>
+		<string>ZoneGateEven.ttf</string>
+	</array>
 	<key>ZoneAppGroup</key>
 	<string>$(ZONE_APP_GROUP)</string>
 </dict>

@@ -37,12 +37,44 @@ final class ParakeetEngine: SpeechEngine {
             case .tdtCtc110m:
                 return AsrModels.defaultCacheDirectory(for: .tdtCtc110m)
             case .fluidSpeechMini:
-                return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                    .appendingPathComponent("Models/fluid-speech-mini-coreml", isDirectory: true)
+                guard let shared = SharedMiniModel.directory else { return Self.privateMini }
+                if SharedMiniModel.verified || !FileManager.default.fileExists(atPath: Self.privateMini.path) { return shared }
+                return Self.privateMini
             }
         }
+        static var privateMini: URL {
+            FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Models/fluid-speech-mini-coreml", isDirectory: true)
+        }
+
+        static let initialMigration = Task.detached(priority: .utility) { reconcileMini() }
+
+        static func reconcileMini() {
+            let start = ProcessInfo.processInfo.systemUptime
+            guard let shared = SharedMiniModel.directory else {
+                Journal.log("miniShareCheck", ["reason": "groupUnavailable"]); return
+            }
+            let snapshot = HuggingFaceSnapshot.fluidSpeechMini
+            var fields = ["privatePresent": String(FileManager.default.fileExists(atPath: privateMini.path)),
+                          "sharedPresent": String(FileManager.default.fileExists(atPath: shared.path)),
+                          "previousMarker": String(SharedMiniModel.verified)]
+            let ready: Bool
+            do {
+                ready = try SharedMiniModel.prepareShared(from: privateMini, to: shared, published: SharedMiniModel.verified,
+                    isComplete: snapshot.isComplete, verify: snapshot.verified)
+            } catch { ready = false; fields["code"] = JournalFormat.error(error) }
+            SharedMiniModel.publish(ready)
+            fields["verified"] = String(ready)
+            fields["ms"] = String(Int((ProcessInfo.processInfo.systemUptime - start) * 1000))
+            Journal.log("miniShareCheck", fields)
+            if ready { Task { @MainActor in WorkerCacheClient.modelShared() } }
+        }
+
     }
 
+    private let router = MiniComputeRouter()
+    private var lastRecordingDecoder: MiniComputeRouter.Decode?
+    private var lastRecordingID: UUID?
     private let model: Model
     private let useNeuralEngine: Bool
     private var manager: AsrManager?
@@ -76,18 +108,34 @@ final class ParakeetEngine: SpeechEngine {
     func assetsPresent() -> Bool {
         switch model {
         case .tdtCtc110m: return AsrModels.modelsExist(at: model.directory)
-        case .fluidSpeechMini: return HuggingFaceSnapshot.fluidSpeechMini.isComplete(at: model.directory)
+        case .fluidSpeechMini:
+            let path = model.directory
+            let snapshot = HuggingFaceSnapshot.fluidSpeechMini
+            if snapshot.isComplete(at: path) { return true }
+            // The background move may have renamed the directory during the size checks.
+            guard path == Model.privateMini, let shared = SharedMiniModel.directory else { return false }
+            return snapshot.isComplete(at: shared)
         }
     }
 
     func bytesOnDisk() -> Int64 {
-        DiskUsage.bytes(at: model.directory) + CompiledModelJanitor.bytes(for: model.directory)
+        if model == .fluidSpeechMini { return SpeechModel.fluidSpeechMini.storageBreakdown.total }
+        return DiskUsage.bytes(at: model.directory) + CompiledModelJanitor.bytes(for: model.directory)
     }
 
     func removeAssets() throws {
-        try CompiledModelJanitor.remove(for: model.directory)
-        if FileManager.default.fileExists(atPath: model.directory.path) {
-            try FileManager.default.removeItem(at: model.directory)
+        if model == .fluidSpeechMini {
+            SharedMiniModel.publish(false)
+            try SharedMiniModel.removeCopies([Model.privateMini, SharedMiniModel.directory].compactMap { $0 }, remove: removeDirectory)
+        } else {
+            try removeDirectory(model.directory)
+        }
+    }
+
+    private func removeDirectory(_ directory: URL) throws {
+        try CompiledModelJanitor.remove(for: directory)
+        if FileManager.default.fileExists(atPath: directory.path) {
+            try FileManager.default.removeItem(at: directory)
         }
     }
 
@@ -101,6 +149,7 @@ final class ParakeetEngine: SpeechEngine {
     }
 
     func downloadAssets(progress: @escaping @Sendable (Double, String) -> Void) async throws {
+        if model == .fluidSpeechMini { await Model.initialMigration.value }
         try ensureRoomToPrepare()
         switch model {
         case .tdtCtc110m:
@@ -109,13 +158,23 @@ final class ParakeetEngine: SpeechEngine {
             }
             ModelDownloader.excludeFromBackup(model.directory)
         case .fluidSpeechMini:
-            try await HuggingFaceSnapshot.fluidSpeechMini.download(to: model.directory, progress: progress)
+            _ = try await prepareMiniFiles(progress: progress)
         }
+    }
+
+    private func prepareMiniFiles(progress: @escaping @Sendable (Double, String) -> Void) async throws -> URL {
+        await Model.initialMigration.value
+        let destination = model.directory
+        if destination == SharedMiniModel.directory, SharedMiniModel.verified,
+           HuggingFaceSnapshot.fluidSpeechMini.isComplete(at: destination) { return destination }
+        try await HuggingFaceSnapshot.fluidSpeechMini.download(to: destination, progress: progress)
+        if destination == Model.privateMini { await Task.detached { Model.reconcileMini() }.value }
+        return model.directory
     }
 
     func prepare(progress: @escaping @Sendable (Double, String) -> Void) async throws {
         if isReady { return }
-        let units: MLComputeUnits = useNeuralEngine ? .cpuAndNeuralEngine : .cpuOnly
+        let units = Self.computeUnits(accelerated: useNeuralEngine)
         let configuration = MLModelConfiguration()
         configuration.computeUnits = units
         let models: AsrModels
@@ -131,23 +190,20 @@ final class ParakeetEngine: SpeechEngine {
                 }
             }
         case .fluidSpeechMini:
+            await Model.initialMigration.value
             try ensureRoomToPrepare()
-            let directory = model.directory
-            try await HuggingFaceSnapshot.fluidSpeechMini.download(to: directory, progress: progress)
+            let directory = try await prepareMiniFiles(progress: progress)
             progress(1, "loading")
             let wantsTopK = Self.spelledLetterRepeatMargin != nil
             models = try await Task.detached(priority: .userInitiated) {
                 if wantsTopK { Self.installSpelledLetterJoint(in: directory) }
-                return try AsrModels.loadLocal(
-                    from: directory, version: .v3, configuration: configuration, encoderComputeUnits: units)
+                return try MiniModelLoader.load(at: directory, units: units)
             }.value
         }
         progress(1, "loading")
         // FluidAudio may also fetch Parakeet's CTC head while loading, so exclude after it.
         ModelDownloader.excludeFromBackup(model.directory)
-        let repeatMargin = model == .fluidSpeechMini && FluidMiniJointTopK.isInstalled(in: model.directory)
-            ? Self.spelledLetterRepeatMargin : nil
-        let manager = AsrManager(config: ASRConfig(tdtConfig: TdtConfig(spelledLetterRepeatMargin: repeatMargin)))
+        let manager = MiniModelLoader.manager(at: model.directory, repeatMargin: model == .fluidSpeechMini ? Self.spelledLetterRepeatMargin : nil)
         try await manager.loadModels(models)
         let layers = await manager.decoderLayerCount
         let program = CompiledProgramReadahead.Program(
@@ -164,6 +220,10 @@ final class ParakeetEngine: SpeechEngine {
         // The first inference after a load pays one-time costs (doc 12's "cold first", 8.1 s
         // for Fluid Mini in the simulator). Pay them now, not on the first dictation. Its decode
         // also shows which compiled files are this model's (`Program.learn`).
+        if let reason = takeLoadWarmUpSkipReason() {
+            Journal.log("warmUpSkipped", ["reason": reason])
+            return
+        }
         Self.warmUp(lane: lane, manager: manager, decoderLayers: layers, program: program, model: model,
                     ifIdleFor: 0, reason: "load")
     }
@@ -281,29 +341,100 @@ final class ParakeetEngine: SpeechEngine {
     /// supports FluidAudio's custom-vocabulary boosting for about 1 MB extra; that is the path when this engine needs names.
     func setContextHints(_ text: String) {}
 
+    private let loadWarmUpSkipReason = Locked<String?>(nil)
+
+    func skipPendingLoadWarmUp(reason: String = "pressDuringLoad") {
+        loadWarmUpSkipReason.withLock { $0 = reason }
+    }
+
+    func takeLoadWarmUpSkipReason() -> String? {
+        loadWarmUpSkipReason.withLock { reason in
+            defer { reason = nil }
+            return reason
+        }
+    }
+
     func prewarm() {
         lock.lock()
         defer { lock.unlock() }
-        guard let manager, ready else { return }
+        guard let manager, ready, !router.canAccelerate else { return }
         Self.warmUp(lane: decodeLane, manager: manager, decoderLayers: decoderLayers, program: program, model: model,
                     ifIdleFor: Self.warmUpAfterIdle, reason: "keyboard")
     }
 
+    private static func computeUnits(accelerated: Bool) -> MLComputeUnits {
+        accelerated ? .cpuAndNeuralEngine : .cpuOnly
+    }
+
+    func configureAcceleration(enabled: Bool, foreground: Bool) {
+        guard model == .fluidSpeechMini, !useNeuralEngine else { return }
+        router.configure(enabled: enabled && isReady, foreground: foreground, prepare: { [router] in
+            let directory = Model.fluidSpeechMini.directory
+            let units = Self.computeUnits(accelerated: true)
+            let configuration = MLModelConfiguration()
+            configuration.computeUnits = units
+            let models = try AsrModels.loadLocal(from: directory, version: .v3,
+                                                  configuration: configuration, encoderComputeUnits: units)
+            let manager = AsrManager(config: ASRConfig(tdtConfig: TdtConfig(spelledLetterRepeatMargin:
+                FluidMiniJointTopK.isInstalled(in: directory) ? Self.spelledLetterRepeatMargin : nil)))
+            try await manager.loadModels(models)
+            let layers = await manager.decoderLayerCount
+            var state = TdtDecoderState.make(decoderLayers: layers)
+            try Task.checkCancellation()
+            guard router.isForeground else { throw SpeechEngineError.notReady }
+            _ = try await manager.transcribe([Float](repeating: 0, count: FluidWarmUp.samples), decoderState: &state)
+            Journal.log("miniAccelerationReady")
+            return ParakeetUtterance.decoder(manager: manager, decoderLayers: layers,
+                                             lane: SerialRecognitionDecoder(), allowed: { [weak router] in
+                router?.isForeground == true
+            })
+        }, onFailure: { Journal.log("miniAccelerationPrepareFailed", ["error": JournalFormat.error($0)]) })
+    }
+
+    // Diagnostics times its explicitly selected engine kind. User recordings opt into routing below.
     func beginUtterance() throws -> UtteranceSession {
+        try beginUtterance(recording: nil, allowAcceleration: false)
+    }
+
+    func endRecording(_ id: UUID) {
+        lock.withLock {
+            if lastRecordingID == id {
+                lastRecordingID = nil
+                lastRecordingDecoder = nil
+            }
+        }
+    }
+
+    func beginUtterance(recording: UUID?, allowAcceleration: Bool = true, warmUp: Bool = true, submission: AudioModelSubmission? = nil) throws -> UtteranceSession {
         lock.lock()
         defer { lock.unlock() }
         guard let manager, ready else { throw SpeechEngineError.notReady }
+        if let recording, lastRecordingID == recording, let lastRecordingDecoder {
+            return ParakeetUtterance(decode: lastRecordingDecoder, submission: submission)
+        }
         // Queued before the utterance can queue anything, so its first decode finds a warm model.
-        Self.warmUp(lane: decodeLane, manager: manager, decoderLayers: decoderLayers, program: program, model: model,
-                    ifIdleFor: Self.warmUpAfterIdle, reason: "dictation")
-        return ParakeetUtterance(manager: manager, decoderLayers: decoderLayers, lane: decodeLane)
+        if warmUp && (!allowAcceleration || !router.canAccelerate) {
+            Self.warmUp(lane: decodeLane, manager: manager, decoderLayers: decoderLayers, program: program, model: model,
+                        ifIdleFor: Self.warmUpAfterIdle, reason: "dictation")
+        }
+        let decode = ParakeetUtterance.decoder(manager: manager, decoderLayers: decoderLayers, lane: decodeLane)
+        let id = recording ?? UUID()
+        let routed = router.session(cpu: decode, allowAcceleration: allowAcceleration, report: { [useNeuralEngine] route, elapsed in
+            Journal.log("speechSegmentRecognized", recording: id, [
+                "route": useNeuralEngine ? "cpuAndNeuralEngine" : route, "ms": String(Int(elapsed * 1000))])
+        }, onFailure: { Journal.log("miniAccelerationRetry", recording: id, ["error": JournalFormat.error($0)]) })
+        lastRecordingID = recording
+        lastRecordingDecoder = recording == nil ? nil : routed
+        return ParakeetUtterance(decode: routed, submission: submission)
     }
 
     func unload() {
+        configureAcceleration(enabled: false, foreground: false)
         lock.lock()
         let manager = self.manager
         let lane = decodeLane
         let previous = cleanupTask
+        lastRecordingDecoder = nil
         self.manager = nil
         program = nil
         ready = false
@@ -318,98 +449,19 @@ final class ParakeetEngine: SpeechEngine {
     func unloadAndWait() async {
         unload()
         let cleanup = lock.withLock { cleanupTask }
+        await router.waitForPreparation()
         await cleanup?.value
     }
 }
 
-/// One dictation: buffer while talking, trim silence, decode once on finish.
-/// One dictation for a batch model. Audio is cut into segments of about 20 s at pauses
-/// between words (`RollingSegmenter`) and each segment is decoded in the background while the
-/// person keeps talking, one at a time and in order. Memory stays flat however long the
-/// dictation runs, `textSoFar` grows segment by segment, and the wait after stop covers only
-/// the last segment.
-final class ParakeetUtterance: UtteranceSession {
-    private let session: RollingRecognitionSession
-
-    init(manager: AsrManager, decoderLayers: Int, lane: SerialRecognitionDecoder) {
-        session = RollingRecognitionSession(decodeSegment: { segment in
-            let doubts = SegmentDoubts()
-            let text = try await lane.run {
-            let audio = SilenceTrimmer.trim(segment)
-            guard !audio.isEmpty else { return "" }
-            let padded = audio.count < 16_000 ? audio + [Float](repeating: 0, count: 16_000 - audio.count) : audio
-            // A fresh decoder state per segment, on purpose. Carrying the previous segment's
-            // state across the cut raised WER from 12.96% to 14.65% on 394 of Zayd's dictations
-            // (245 worse, 40 better) and blanked or clipped segment openings; priming with the last
-            // ten pieces was also worse (docs/research/2026-11-18-model-lab.md). FluidAudio ignores
-            // this state anyway for a segment over 15 s, which it decodes in fresh windows.
-            var state = TdtDecoderState.make(decoderLayers: decoderLayers)
-            let result = try await manager.transcribe(padded, decoderState: &state)
-            // The joint's probability for each piece it emitted: the words it was least sure of
-            // can be offered for a one-tap fix in the keyboard (`DoubtfulWords`).
-            let pieces = (result.tokenTimings ?? []).map { (piece: $0.token, confidence: $0.confidence) }
-            doubts.set(DoubtfulWords.candidates(DoubtfulWords.words(pieces: pieces)))
-            return SegmentText.cleaned(result.text)
-            }
-            return RecognizedSegment(text: text, doubts: doubts.value)
-        })
-    }
-
-    var audioSeconds: Double { session.audioSeconds }
-    var textSoFar: String { session.textSoFar }
-    var failure: Error? { session.failure }
-    var doubtfulWords: [DoubtfulWord] { session.doubtfulWords }
-    var availableAudioSamples: Int { session.availableSamples }
-    func feed(_ samples: [Float]) { session.feed(samples) }
-    func finish() async throws -> String { try await session.finish() }
-    func cancel() { session.cancel() }
-}
-
-/// Carries one segment's doubtful words out of the decode lane, which returns only text.
-private final class SegmentDoubts: @unchecked Sendable {
-    private let lock = NSLock()
-    private var words: [DoubtfulWord] = []
-    func set(_ words: [DoubtfulWord]) { lock.withLock { self.words = words } }
-    var value: [DoubtfulWord] { lock.withLock { words } }
-}
-
-/// Drops leading and trailing silence before a batch decode, keeping a margin so soft word
-/// edges survive. Energy gate on 20 ms frames, relative to the loudest frame so a quiet
-/// speaker is not trimmed away, with an absolute floor for true silence.
-enum SilenceTrimmer {
-    static func trim(_ samples: [Float], frame: Int = 320, margin: Int = 4_800) -> [Float] {
-        guard samples.count > frame * 4 else { return samples }
-        let frames = samples.count / frame
-        var energies = [Float](repeating: 0, count: frames)
-        for index in 0..<frames {
-            var sum: Float = 0
-            let base = index * frame
-            for offset in 0..<frame {
-                let value = samples[base + offset]
-                sum += value * value
-            }
-            energies[index] = (sum / Float(frame)).squareRoot()
-        }
-        let loudest = energies.max() ?? 0
-        let threshold = max(loudest * 0.05, 0.003)
-        guard let first = energies.firstIndex(where: { $0 >= threshold }),
-              let last = energies.lastIndex(where: { $0 >= threshold }) else { return [] }
-        let start = max(0, first * frame - margin)
-        let end = min(samples.count, (last + 1) * frame + margin)
-        return Array(samples[start..<end])
-    }
-}
+extension ParakeetUtterance: UtteranceSession {}
 
 /// A pinned Hugging Face model snapshot: exact files at an exact revision, each with the hash
 /// Hugging Face records for it, so the download is reproducible, verified, and nothing beyond
 /// the runtime files (no source packages, no samples) lands. Generate the list with
 /// `scripts/pin_hf_snapshot.py <repo> <revision> [prefixes]`.
 struct HuggingFaceSnapshot: Sendable {
-    struct File: Sendable {
-        let path: String
-        let bytes: Int64
-        let hash: FileDigest
-    }
+    typealias File = SharedMiniModel.File
 
     let repo: String
     let revision: String
@@ -421,40 +473,19 @@ struct HuggingFaceSnapshot: Sendable {
 
     /// FluidVoice-Labs/fluid-speech-mini-coreml, CC BY 4.0.
     static let fluidSpeechMini = HuggingFaceSnapshot(
-        repo: "FluidVoice-Labs/fluid-speech-mini-coreml",
-        revision: "d81c3160dfe5a5e1f8f7267164a07d30617a3a1a",
-        // FluidVoice-Labs/fluid-speech-mini-coreml at d81c3160dfe5a5e1f8f7267164a07d30617a3a1a: 24 files, 252,730,493 bytes.
-        files: [
-            .init(path: "Decoder.mlmodelc/analytics/coremldata.bin", bytes: 243, hash: .sha256("d4beee43a6eab29b2adcc298f2e8582e8fb79d5fe3aa9f1ab692ade681ca369d")),
-            .init(path: "Decoder.mlmodelc/coremldata.bin", bytes: 491, hash: .sha256("6094d06d05c1ca4599c7b13c9a4ca7c00826ee2396796cf3084ce602a9884468")),
-            .init(path: "Decoder.mlmodelc/metadata.json", bytes: 3_373, hash: .gitBlob("a79debb5125b7c1a6a81e6a4445912c96474c0ee")),
-            .init(path: "Decoder.mlmodelc/model.mil", bytes: 13_411, hash: .gitBlob("428742162c9e8b2b1a020e4a47da87adb87e7af0")),
-            .init(path: "Decoder.mlmodelc/weights/weight.bin", bytes: 11_845_120, hash: .sha256("d173e381488d07fd7648e2ccecbfb1bceff0457d75461550b26ba7fa2d23309a")),
-            .init(path: "Encoder.mlmodelc/analytics/coremldata.bin", bytes: 243, hash: .sha256("3a3caa2c6aec983d94a5659eff09a00f77077147ea6726b8ddfdf022f0238ce9")),
-            .init(path: "Encoder.mlmodelc/coremldata.bin", bytes: 427, hash: .sha256("494d8e2ce30b37bcdf494b3ba7ddf6e1bc921b9a59e369a9efd44d013ca3bf7d")),
-            .init(path: "Encoder.mlmodelc/metadata.json", bytes: 2_906, hash: .gitBlob("49b43277d5d42ac49af5a9e6bcec63195acbb76c")),
-            .init(path: "Encoder.mlmodelc/model.mil", bytes: 712_643, hash: .gitBlob("69c0308b882eae9413bd787f757c80ee46a7f2bb")),
-            .init(path: "Encoder.mlmodelc/weights/weight.bin", bytes: 233_096_704, hash: .sha256("cf0b61022de8c698984a8c7185c2d093fa744694621881ff062c46fee2546131")),
-            .init(path: "JointDecision.mlmodelc/analytics/coremldata.bin", bytes: 243, hash: .sha256("9e767d69e1092b27b28d9f236b9cbcded58ff3891e320cba7855e2c24e803d69")),
-            .init(path: "JointDecision.mlmodelc/coremldata.bin", bytes: 462, hash: .sha256("284b235c08cd4769202af017f854deace69c0209c29f2253a2073bb68d58d38d")),
-            .init(path: "JointDecision.mlmodelc/metadata.json", bytes: 2_790, hash: .gitBlob("f838342b52059cd8b06bf6bedd185bb0c7ed1cac")),
-            .init(path: "JointDecision.mlmodelc/model.mil", bytes: 7_547, hash: .gitBlob("18e706e2e2d4a78ad825a1a0542af639f52b3c62")),
-            .init(path: "JointDecision.mlmodelc/weights/weight.bin", bytes: 6_350_284, hash: .sha256("f991f65979c1b3fee3db39a645aa87e6bef1a304ed1816d074b17479bea797fc")),
-            .init(path: "LICENSE", bytes: 18_657, hash: .gitBlob("da6ab6cc8f333d7e89a99812866df8f24374d47c")),
-            .init(path: "NOTICE", bytes: 690, hash: .gitBlob("ab1383ddb9427e377b5752cea97d2a0a3411dbc9")),
-            .init(path: "Preprocessor.mlmodelc/analytics/coremldata.bin", bytes: 243, hash: .sha256("c9beeb989c8d66f8be11df59bc6df277ec76cee404f6865b46243835ef562f6d")),
-            .init(path: "Preprocessor.mlmodelc/coremldata.bin", bytes: 486, hash: .sha256("dbde3f2300842c1fd51ef3ff948a0bcffe65ffd2dca10707f2509f32c1d65b1d")),
-            .init(path: "Preprocessor.mlmodelc/metadata.json", bytes: 2_841, hash: .gitBlob("06162c58cf2f5343a0e60f36f843bcdf3cc58527")),
-            .init(path: "Preprocessor.mlmodelc/model.mil", bytes: 28_181, hash: .gitBlob("f987e2479228436c49189aa47edb376db74dcff5")),
-            .init(path: "Preprocessor.mlmodelc/weights/weight.bin", bytes: 491_072, hash: .sha256("129b76e3aeafa8afa3ea76d995b964b145fe83700d579f6ff42c4c38fa0968ea")),
-            .init(path: "config.json", bytes: 314, hash: .gitBlob("88cccfe091f2335ba8f3af8d91bf378a35314b93")),
-            .init(path: "parakeet_vocab.json", bytes: 151_122, hash: .gitBlob("c684822ec3b671ebc449c433a7012398d39b8bb0")),
-        ],
+        repo: SharedMiniModel.identifier,
+        revision: SharedMiniModel.revision,
+        files: SharedMiniModel.files,
         // FluidAudio's v3 loader opens JointDecisionv3.mlmodelc. Fluid Mini's joint has the
         // same required outputs (token_id, token_prob, duration) without the top-K pair. This
         // copy is the fallback; `prepare` replaces it with `FluidMiniJointTopK`, the same joint
         // plus the top-K pair the spelled-letter rule reads.
         aliases: [("JointDecision.mlmodelc", "JointDecisionv3.mlmodelc")])
+
+    func verified(at directory: URL) throws -> Bool {
+        guard isComplete(at: directory) else { return false }
+        return try files.allSatisfy { try $0.hash.matches(fileAt: directory.appendingPathComponent($0.path)) }
+    }
 
     func isComplete(at directory: URL) -> Bool {
         aliases.allSatisfy { FileManager.default.fileExists(atPath: directory.appendingPathComponent($0.1).path) }
@@ -480,6 +511,12 @@ struct HuggingFaceSnapshot: Sendable {
             try manager.copyItem(at: directory.appendingPathComponent(source), to: target)
         }
         ModelDownloader.excludeFromBackup(directory)
+        if directory == SharedMiniModel.directory, revision == SharedMiniModel.revision {
+            let ready = try verified(at: directory)
+            SharedMiniModel.publish(ready)
+            Journal.log("miniShareCheck", ["verified": String(ready), "source": "download"])
+            if ready { Task { @MainActor in WorkerCacheClient.modelShared() } }
+        }
         progress(1, "loading")
     }
 }

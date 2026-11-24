@@ -9,7 +9,18 @@ import ZoneCore
 struct ModelStorageBreakdown: Sendable {
     let modelFiles: Int64
     let preparedFiles: Int64
+    /// The part of `preparedFiles` that sits in the keyboard helper's own folder, and the part
+    /// of that left behind by preparations iOS stopped. Shown on a line of its own with Clear.
+    var helperFiles: Int64 = 0
+    var helperLeftovers: Int64 = 0
     var total: Int64 { modelFiles + preparedFiles }
+
+    init(modelFiles: Int64, preparedFiles: Int64, helperFiles: Int64 = 0, helperLeftovers: Int64 = 0) {
+        self.modelFiles = modelFiles
+        self.preparedFiles = preparedFiles
+        self.helperFiles = helperFiles
+        self.helperLeftovers = helperLeftovers
+    }
 
     init(directory: URL?, preparedFiles: Int64) {
         modelFiles = directory.map { DiskUsage.bytes(at: $0) } ?? 0
@@ -26,6 +37,12 @@ extension SpeechModel {
             prepared = directory.map { CompiledModelJanitor.bytes(for: $0) } ?? 0
         default:
             prepared = 0
+        }
+        if self == .fluidSpeechMini {
+            let paths = [ParakeetEngine.Model.privateMini, SharedMiniModel.directory].compactMap { $0 }
+            return ModelStorageBreakdown(modelFiles: paths.reduce(0) { $0 + DiskUsage.bytes(at: $1) },
+                                         preparedFiles: prepared + WorkerStorage.bytes,
+                                         helperFiles: WorkerStorage.bytes, helperLeftovers: WorkerStorage.strandedBytes)
         }
         return ModelStorageBreakdown(directory: directory, preparedFiles: prepared)
     }
@@ -45,6 +62,15 @@ extension SpeechModel {
         }
     }
 
+    /// Retired models whose old download is still on disk: what launch has to delete. Empty on
+    /// an iPhone that never had them or already lost them, so launch then deletes nothing.
+    static func retiredLeftovers(fileManager: FileManager = .default) -> [SpeechModel] {
+        retired.filter { model in
+            guard let directory = model.assetDirectory else { return false }
+            return fileManager.fileExists(atPath: directory.path)
+        }
+    }
+
     private static func moonshineDirectory(_ key: String) -> URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("MoonshineModels", isDirectory: true)
@@ -61,6 +87,7 @@ struct ModelLibraryInventory: Sendable {
     let entries: [SpeechModel: Entry]
 
     static func read(scan: @escaping @Sendable () -> [SpeechModel: Entry] = { scanDisk() }) async -> Self {
+        await WorkerCacheClient.contact(clear: false)
         let task = Task.detached(priority: .utility) { Self(entries: scan()) }
         return await withTaskCancellationHandler {
             await task.value

@@ -12,15 +12,24 @@ import notify
 /// and posts; the keyboard reads it in the post's handler, one sample per post, and wakes only
 /// when one exists. If the keyboard's main thread stalls, the handlers it owes run late and all
 /// read the newest level, which is the right thing for a meter. The level is the low 32 bits,
-/// a Float's bit pattern, clamped to 0...1 on read.
+/// a Float's bit pattern, clamped to 0...1 on read. The next 8 bits carry Finish when quiet's
+/// countdown (whole seconds left, 0 for none), so the keyboard counts down with the app.
 enum LevelChannel {
     static let name = "wtf.zayd.zone.level"
 
-    static func encode(_ level: Float) -> UInt64 { UInt64(level.bitPattern) }
+    static func encode(_ level: Float, finishIn: Int? = nil) -> UInt64 {
+        UInt64(level.bitPattern) | UInt64(min(max(finishIn ?? 0, 0), 255)) << 32
+    }
 
     static func decode(_ state: UInt64) -> Float {
         let level = Float(bitPattern: UInt32(truncatingIfNeeded: state))
         return level.isFinite ? min(max(level, 0), 1) : 0
+    }
+
+    /// Seconds until Finish when quiet ends the recording, or nil when it is not counting down.
+    static func decodeFinishIn(_ state: UInt64) -> Int? {
+        let seconds = Int((state >> 32) & 0xFF)
+        return seconds > 0 ? seconds : nil
     }
 
     /// The app's end. One token for the process; registering is the expensive part.
@@ -34,24 +43,24 @@ enum LevelChannel {
             }
         }
 
-        func send(_ level: Float) {
+        func send(_ level: Float, finishIn: Int? = nil) {
             guard token != NOTIFY_TOKEN_INVALID else { return }
-            notify_set_state(token, LevelChannel.encode(level))
+            notify_set_state(token, LevelChannel.encode(level, finishIn: finishIn))
             notify_post(LevelChannel.name)
         }
     }
 
-    /// The keyboard's end: calls `onLevel` on the main queue for every level the app posts,
-    /// until `cancel()` or deinit.
+    /// The keyboard's end: calls `onLevel` on the main queue for every level the app posts, with
+    /// the quiet countdown, until `cancel()` or deinit.
     final class Subscription {
         private var token: Int32 = NOTIFY_TOKEN_INVALID
 
-        init(onLevel: @escaping @MainActor (Float) -> Void) {
+        init(onLevel: @escaping @MainActor (Float, Int?) -> Void) {
             let status = notify_register_dispatch(LevelChannel.name, &token, .main) { token in
                 var state: UInt64 = 0
                 notify_get_state(token, &state)
-                let level = LevelChannel.decode(state)
-                MainActor.assumeIsolated { onLevel(level) }
+                let level = LevelChannel.decode(state), finishIn = LevelChannel.decodeFinishIn(state)
+                MainActor.assumeIsolated { onLevel(level, finishIn) }
             }
             if status != NOTIFY_STATUS_OK { token = NOTIFY_TOKEN_INVALID }
         }

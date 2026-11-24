@@ -11,8 +11,14 @@ public enum MeetingSpeakerSamples {
     /// exists. Each clip starts a fifth of a second into its segment, past the cut.
     public static func clips(for speaker: String, in segments: [MeetingSegment], count: Int = 3,
                              length: Double = 4, minimum: Double = 1.5) -> [ClosedRange<Double>] {
+        clips(for: [speaker], in: segments, count: count, length: length, minimum: minimum)
+    }
+
+    /// The same for a person with several voices (`Meeting.voices(of:)`).
+    public static func clips(for voices: Set<String>, in segments: [MeetingSegment], count: Int = 3,
+                             length: Double = 4, minimum: Double = 1.5) -> [ClosedRange<Double>] {
         let theirs = segments
-            .filter { $0.speaker == speaker && $0.end > $0.start }
+            .filter { $0.speaker.map(voices.contains) == true && $0.end > $0.start }
             .sorted { $0.start < $1.start }
         guard !theirs.isEmpty, count > 0 else { return [] }
         let long = theirs.filter { $0.end - $0.start >= minimum }
@@ -42,7 +48,10 @@ public enum MeetingEstimate {
     /// Simulator runs measured 0.25 to 0.4 for Moonshine Small (since retired); a phone is slower.
     public static let defaultRate = 0.6
     /// Diarization: published 60x real time on Apple silicon; budgeted at 20x plus model load.
-    public static let speakerRate = 0.05
+    /// The second look (`MeetingSecondLook`) added 0.23 s per audio minute on an M4 Pro's Neural
+    /// Engine and about 0.57 s on its CPU, against 0.60 s for the first pass on the CPU (AMI, 2026-11-18):
+    /// budgeted at 60% more.
+    public static let speakerRate = 0.08
     public static let speakerOverhead = 5.0
 
     public static func seconds(forAudio audio: Double, rate: Double?, labelsSpeakers: Bool) -> Double {
@@ -74,19 +83,24 @@ public enum MeetingEstimate {
 
 /// 16 kHz mono float samples as a 16-bit PCM WAV file in memory, for AVAudioPlayer.
 public enum PCMWave {
-    public static func data(samples: [Float], sampleRate: Int = 16_000) -> Data {
+    static func header(bytes: Int, sampleRate: Int) -> Data {
         var data = Data()
-        let bytes = samples.count * 2
         func append<T: FixedWidthInteger>(_ value: T) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
         data.append(contentsOf: Array("RIFF".utf8)); append(UInt32(36 + bytes))
         data.append(contentsOf: Array("WAVE".utf8))
         data.append(contentsOf: Array("fmt ".utf8)); append(UInt32(16)); append(UInt16(1)); append(UInt16(1))
         append(UInt32(sampleRate)); append(UInt32(sampleRate * 2)); append(UInt16(2)); append(UInt16(16))
         data.append(contentsOf: Array("data".utf8)); append(UInt32(bytes))
+        return data
+    }
+
+    public static func data(samples: [Float], sampleRate: Int = 16_000) -> Data {
+        let bytes = samples.count * 2
+        var data = header(bytes: bytes, sampleRate: sampleRate)
         data.reserveCapacity(44 + bytes)
         for sample in samples {
             let clamped = sample.isFinite ? min(max(sample, -1), 1) : 0
-            append(Int16(clamped * Float(Int16.max)))
+            withUnsafeBytes(of: Int16(clamped * Float(Int16.max)).littleEndian) { data.append(contentsOf: $0) }
         }
         return data
     }

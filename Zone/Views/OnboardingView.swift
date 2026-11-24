@@ -28,6 +28,7 @@ struct OnboardingView: View {
     @Environment(\.scenePhase) private var scenePhase
     /// Leaves the walkthrough for this launch; it comes back next launch until a first dictation.
     var onLater: () -> Void = {}
+    var onQuickSetup: () -> Void = {}
 
     @State private var micPermission: AVAudioApplication.recordPermission = AVAudioApplication.shared.recordPermission
     @State private var practiceText = ""
@@ -44,7 +45,10 @@ struct OnboardingView: View {
 
     private var modelDone: Bool { coordinator.modelIsReady }
     private var micDone: Bool { micPermission == .granted }
-    private var keyboardDone: Bool { coordinator.keyboardPresence?.hasFullAccess == true }
+    @State private var keyboardCheckBegan = Date()
+    private var keyboardDone: Bool {
+        coordinator.keyboardPresence?.seenDuringSetup(since: keyboardCheckBegan)?.hasFullAccess == true
+    }
     private var dictateDone: Bool {
         if skippedDictation { return true }
         guard settings.wordsDictated > 0 else { return false }
@@ -153,8 +157,12 @@ struct OnboardingView: View {
             .padding(.top, 8)
             if current != .done {
                 DisplayText("Talk anywhere you type.", size: 32)
-                Text("Setup takes a minute. No account, and your audio stays on this iPhone.")
+                Text("No account. Zone transcribes on this iPhone by default.")
                     .font(.subheadline).foregroundStyle(Zone.muted(scheme))
+                ShortcutHelpLink()
+                Button("Set up one step at a time", action: onQuickSetup)
+                    .buttonStyle(ZoneLinkButtonStyle())
+                    .accessibilityIdentifier("setup.openLog")
             }
         }
     }
@@ -173,7 +181,7 @@ struct OnboardingView: View {
                         .font(.body.weight(active ? .semibold : .medium))
                         .foregroundStyle(active || done ? Zone.ink(scheme) : Zone.muted(scheme))
                     if done {
-                        Text(doneLine(step)).font(.footnote).foregroundStyle(Zone.accentText(scheme))
+                        Text(doneLine(step)).font(.footnote).foregroundStyle(Zone.ink(scheme))
                     }
                 }
             }
@@ -189,10 +197,10 @@ struct OnboardingView: View {
     private func marker(_ step: Step, done: Bool, active: Bool) -> some View {
         ZStack {
             Circle()
-                .fill(done ? Zone.accent : (active ? Zone.ink(scheme) : Color.clear))
+                .fill(done ? Zone.controlFill(scheme) : (active ? Zone.ink(scheme) : Color.clear))
                 .overlay(Circle().strokeBorder(active || done ? .clear : Zone.rule(scheme), lineWidth: 1.5))
             if done {
-                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(Zone.onAccent)
+                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(Zone.controlInk(scheme))
             } else {
                 Text("\(step.rawValue + 1)")
                     .font(.system(size: 12, weight: .semibold))
@@ -249,18 +257,18 @@ struct OnboardingView: View {
             switch coordinator.modelState {
             case .downloading(let progress, _):
                 why("Downloading from \(model.downloadHost). Next step unlocks automatically.")
-                ProgressView(value: progress).tint(Zone.accentGraphic).scaleEffect(x: 1, y: 1.8, anchor: .center).padding(.vertical, 2)
+                ProgressView(value: progress).tint(Zone.accentTone(scheme)).scaleEffect(x: 1, y: 1.8, anchor: .center).padding(.vertical, 2)
                 Text("\(Int(progress * 100))% of \(model.sizeLabel)")
                     .font(.footnote.monospacedDigit()).foregroundStyle(Zone.muted(scheme))
             case .loading:
                 why("Loading model into memory.")
-                ProgressView().tint(Zone.accentGraphic)
+                ProgressView().tint(Zone.accentTone(scheme))
             case .failed(let message):
                 why("Download stopped: \(message)")
                 Text("Check your connection and try again.").font(.footnote).foregroundStyle(Zone.live)
             default:
                 why(model.needsDownload
-                    ? "One \(model.sizeLabel) download from \(model.downloadHost). Everything runs offline after this."
+                    ? "One \(model.sizeLabel) download from \(model.downloadHost). This model works offline after download."
                     : "Uses Apple's built-in speech model. Nothing to download.")
             }
         }
@@ -273,7 +281,7 @@ struct OnboardingView: View {
         if micPermission == .denied {
             why("Microphone access is off. Turn it on in Settings, then come back.")
         } else {
-            why("iOS prompts next. While standby is on, the orange status dot shows the mic is ready. Audio stays on your iPhone.")
+            why("iPhone asks for the mic next. An orange dot means the mic is in use.")
         }
     }
 
@@ -281,12 +289,13 @@ struct OnboardingView: View {
 
     private var keyboardDetail: some View {
         VStack(alignment: .leading, spacing: 12) {
-            why("Full Access lets the keyboard receive dictated text from the Zone app. iOS shows its standard warning. Zone's keyboard has no network code and never goes online.")
+            why("Full Access lets the keyboard receive your words from Zone. If you choose a GPU server in Keyboard recognition, the keyboard can send finished recordings there.")
             VStack(alignment: .leading, spacing: 0) {
                 instruction(1, "Open Settings → Apps → Zone.")
                 instruction(2, "Tap Keyboards.")
-                instruction(3, "Turn on Zone and Allow Full Access.")
-                instruction(4, "Come back and tap the box below.")
+                instruction(3, "Turn on Zone.")
+                instruction(4, "Turn on Allow Full Access.")
+                instruction(5, "Tap the box. Hold the globe key. Tap Zone.")
             }
             .zoneCard(padding: 12)
             practiceField(prompt: "Tap here, then 🌐 to switch to Zone")
@@ -297,7 +306,7 @@ struct OnboardingView: View {
                     .font(.footnote).foregroundStyle(Zone.live)
             }
             if fieldFocused {
-                Text("Using Zone's keys? Give it a second. If it asks for Full Access above the keys, check step 3.")
+                Text("Using Zone's keys? Give it a second. If it asks for Full Access above the keys, check step 4.")
                     .font(.footnote).foregroundStyle(Zone.muted(scheme))
             }
         }
@@ -305,7 +314,7 @@ struct OnboardingView: View {
 
     private func instruction(_ number: Int, _ text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text("\(number)").font(.subheadline.weight(.semibold).monospacedDigit()).foregroundStyle(Zone.accentText(scheme))
+            Text("\(number)").font(.subheadline.weight(.semibold).monospacedDigit()).foregroundStyle(Zone.ink(scheme))
             Text(text).font(.subheadline).foregroundStyle(Zone.ink(scheme))
         }
         .padding(.vertical, 5)
@@ -315,7 +324,7 @@ struct OnboardingView: View {
 
     private var dictateDetail: some View {
         VStack(alignment: .leading, spacing: 12) {
-            why("Tap the mic key on the right of Zone's strip, say a sentence, then tap Stop.")
+            why("Tap the mic key on the right of Zone's strip, say a sentence, then tap Stop (■).")
             practiceField(prompt: practicePrompt)
         }
     }
@@ -323,7 +332,7 @@ struct OnboardingView: View {
     /// The empty box narrates the dictation, so talking into it never looks ignored.
     private var practicePrompt: String {
         switch coordinator.activity {
-        case .recording: return "Listening… tap Stop when done"
+        case .recording: return "Listening… tap Stop (■) when done"
         case .transcribing: return "Transcribing…"
         default: return "Tap here to dictate"
         }
@@ -339,14 +348,14 @@ struct OnboardingView: View {
             .frame(minHeight: 52)
             .background(Zone.field(scheme), in: Zone.fieldShape)
             .overlay(Zone.fieldShape
-                .strokeBorder(fieldFocused ? Zone.accentGraphic : Zone.rule(scheme), lineWidth: fieldFocused ? 1.5 : 1))
+                .strokeBorder(fieldFocused ? Zone.accentStroke(scheme) : Zone.rule(scheme), lineWidth: fieldFocused ? 1.5 : 1))
     }
 
     // Step 5
 
     private var finishStep: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Image(systemName: "checkmark.circle.fill").font(.system(size: 44)).foregroundStyle(Zone.accentText(scheme))
+            Image(systemName: "checkmark.circle.fill").font(.system(size: 44)).foregroundStyle(Zone.accentTone(scheme))
             DisplayText("You're set.", size: 38)
             if !practiceText.isEmpty {
                 Text(practiceText).font(.body).foregroundStyle(Zone.ink(scheme)).zoneCard()
@@ -357,9 +366,9 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 0) {
                 instruction(1, "Open any app and tap a text field.")
                 instruction(2, "Hold 🌐 to switch to Zone.")
-                instruction(3, "Tap the mic key, talk, tap Stop.")
+                instruction(3, "Tap the mic key, talk, tap Stop (■).")
             }
-            Text("The mic stays ready for \(settings.inactivityPolicy.label) after each dictation so it starts instantly. Opening Zone turns it back on.")
+            Text(settings.inactivityPolicy.micReadySummary)
                 .font(.footnote).foregroundStyle(Zone.muted(scheme))
         }
     }
@@ -423,6 +432,7 @@ struct OnboardingView: View {
 
     private func openSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        keyboardCheckBegan = Date()
         UIApplication.shared.open(url)
     }
 }
@@ -453,9 +463,9 @@ struct DemoBubble: View {
                 .overlay(alignment: .trailing) {
                     Image(systemName: speaking ? "stop.fill" : "mic.fill")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Zone.onAccent)
+                        .foregroundStyle(Zone.controlInk(scheme))
                         .frame(width: 36, height: 36)
-                        .background(Zone.accent, in: Circle())
+                        .background(Zone.controlFill(scheme), in: Circle())
                         .padding(.trailing, 4)
                 }
         }

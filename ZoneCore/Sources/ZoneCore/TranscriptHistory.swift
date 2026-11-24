@@ -119,6 +119,7 @@ public struct TranscriptRecord: Codable, Identifiable, Equatable, Sendable {
     /// Set when this text came from retrying a saved recording: when that recording was made.
     /// `createdAt` is then when it was transcribed, so a retried recording sorts as the newest
     /// item and still says which moment it came from.
+    public var finishedAt: Date?
     public var recoveredFrom: Date?
     /// How many times iOS took the microphone during the recording (an alarm, a call) and Zone
     /// picked it back up. Nil when it never happened.
@@ -162,6 +163,9 @@ public struct TranscriptRecord: Codable, Identifiable, Equatable, Sendable {
 /// that changes nothing writes nothing.
 public final class TranscriptHistory: @unchecked Sendable {
     public let directory: URL
+    // Shared by the app and keyboard, outside the backup-excluded History directory.
+    private let transferDefaults: UserDefaults?
+    private static let transferKey = "zone.stats.transferTotals"
     private let fileURL: URL
     private let inflightURL: URL
     private let lock = NSLock()
@@ -195,10 +199,12 @@ public final class TranscriptHistory: @unchecked Sendable {
             return nil
         }
         let directory = container.appendingPathComponent("Library/Application Support/History", isDirectory: true)
-        return TranscriptHistory(directory: directory, keepsDecodedFile: Bundle.main.bundleURL.pathExtension != "appex")
+        return TranscriptHistory(directory: directory, keepsDecodedFile: Bundle.main.bundleURL.pathExtension != "appex",
+                                 transferDefaults: UserDefaults(suiteName: ZoneContract.appGroup))
     }()
 
-    public init(directory: URL, keepsDecodedFile: Bool = true) {
+    public init(directory: URL, keepsDecodedFile: Bool = true, transferDefaults: UserDefaults? = nil) {
+        self.transferDefaults = transferDefaults
         self.directory = directory
         self.keepsDecodedFile = keepsDecodedFile
         fileURL = directory.appendingPathComponent("history.json")
@@ -236,6 +242,38 @@ public final class TranscriptHistory: @unchecked Sendable {
 
     public func recent(limit: Int, now: Date = Date()) -> [TranscriptRecord] {
         Array(records(now: now).prefix(limit))
+    }
+
+    /// If the latest finish produced no readable words, the shortcut must not fall
+    /// back to an earlier recording. Older history files have no finish receipt.
+    public func lastFinishedRecording(now: Date = Date()) -> TranscriptRecord? {
+        lastRecordingEvent(now: now)?.record
+    }
+
+    /// The ID and time remain when editing a saved note removes its raw History row.
+    public func lastRecordingEvent(now: Date = Date()) -> (id: UUID, at: Date, isNote: Bool?, record: TranscriptRecord?)? {
+        let file = read()
+        guard file.retention != .off else { return nil }
+        let records = Self.pruned(file.records, retention: file.retention, now: now)
+        guard let last = file.lastFinish else {
+            // Older versions saved the words without a finish receipt.
+            guard let record = records.first(where: { $0.status != .recording }) else { return nil }
+            return (record.id, record.finishedAt ?? record.createdAt, record.status == .note, record)
+        }
+        let record = records.first { $0.id == last.id }
+        return (last.id, last.at, last.isNote ?? record.map { $0.status == .note }, record)
+    }
+
+    public func recentDictations(limit: Int, now: Date = Date()) -> [TranscriptRecord] {
+        Array(records(now: now).lazy.filter { $0.status != .note }.prefix(limit))
+    }
+
+    func records(withIDs ids: Set<UUID>) -> [UUID: TranscriptRecord] {
+        var matches: [UUID: TranscriptRecord] = [:]
+        for record in read().records where ids.contains(record.id) && matches[record.id] == nil {
+            matches[record.id] = record
+        }
+        return matches
     }
 
     public func record(id: UUID) -> TranscriptRecord? {
@@ -285,12 +323,25 @@ public final class TranscriptHistory: @unchecked Sendable {
     @discardableResult
     public func finish(id: UUID, text: String, audioSeconds: Double, status: TranscriptStatus = .finished,
                        engine: String? = nil, source: TranscriptSource? = nil, recoveredFrom: Date? = nil,
-                       interruptions: Int? = nil, now: Date = Date()) -> Bool {
+                       interruptions: Int? = nil, statsStartedAt: Date? = nil, now: Date = Date()) -> Bool {
+        finishOutcome(id: id, text: text, audioSeconds: audioSeconds, status: status, engine: engine,
+                      source: source, recoveredFrom: recoveredFrom, interruptions: interruptions,
+                      statsStartedAt: statsStartedAt, now: now) == .stored
+    }
+
+    public enum FinishOutcome { case stored, retentionOff, empty, failed }
+
+    @discardableResult
+    public func finishOutcome(id: UUID, text: String, audioSeconds: Double, status: TranscriptStatus = .finished,
+                       engine: String? = nil, source: TranscriptSource? = nil, recoveredFrom: Date? = nil,
+                       interruptions: Int? = nil, statsStartedAt: Date? = nil, now: Date = Date()) -> FinishOutcome {
         let inflight = readInflight(id)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let receipt = FinishReceipt(id: id, at: now, isNote: !trimmed.isEmpty && status == .note)
         guard !trimmed.isEmpty else {
+            coordinate { $0.remember(receipt) }
             removeInflight(id)
-            return false
+            return .empty
         }
         var original: Date?
         if let recoveredFrom {
@@ -298,30 +349,40 @@ public final class TranscriptHistory: @unchecked Sendable {
             let earlier = [recoveredFrom, inflight?.createdAt, previous?.createdAt, previous?.recoveredFrom]
             original = earlier.compactMap { $0 }.min()
         }
-        let record = TranscriptRecord(
+        var record = TranscriptRecord(
             id: id, text: trimmed, createdAt: original == nil ? (inflight?.createdAt ?? now) : now, updatedAt: now,
             audioSeconds: audioSeconds,
             engine: engine ?? inflight?.engine ?? "", source: source ?? inflight?.source ?? .app,
             status: status, destination: inflight?.destination, recoveredFrom: original,
             interruptions: interruptions ?? inflight?.interruptions)
-        let keepsFinished = retention != .off || status == .cutOff
+        record.finishedAt = now
+        var keepsFinished = retention != .off || status == .cutOff
         // The final decoder flush can contain words absent from the last progress save.
         // Make those words recoverable before committing the consolidated history file.
         if keepsFinished { writeInflight(record) }
-        let saved = modify(now: now) { records in
-            records.removeAll { $0.id == id }
-            records.insert(record, at: 0)
+        let saved = coordinate { file in
+            keepsFinished = file.retention != .off || status == .cutOff
+            file.remember(receipt)
+            if let statsStartedAt {
+                file.stats.finish(id: id, start: statsStartedAt, words: record.wordCount, seconds: audioSeconds,
+                                  recoveryDate: recoveredFrom == nil ? nil : now, awaitingNote: status == .note || record.source == .note)
+            }
+            file.records.removeAll { $0.id == id }
+            file.records.insert(record, at: 0)
+            file.records = Self.pruned(file.records, retention: file.retention, now: now)
+            file.pruneUnreadable(retention: file.retention, now: now)
         }
         // Preserve the crash-recovery copy if the final write fails. Repeating finish is safe
         // because its record replaces the same id.
         if saved || !keepsFinished { removeInflight(id) }
-        return saved && keepsFinished
+        guard saved else { return .failed }
+        return keepsFinished ? .stored : .retentionOff
     }
 
     /// Drops a dictation the user cancelled. Cancelling is a choice, so nothing is kept.
     public func cancel(id: UUID) {
         // Cancellation can arrive while final persistence is queued. Remove either form.
-        delete(id: id)
+        _ = delete(ids: [id], previouslyLinked: false, discardingRecording: true)
     }
 
     /// Turns every in-flight file left behind (crash, kill, timeout) into a `.cutOff` record with
@@ -339,7 +400,8 @@ public final class TranscriptHistory: @unchecked Sendable {
         for file in files where file.pathExtension == "json" {
             guard let data = try? Data(contentsOf: file),
                   var record = try? JSONDecoder.history.decode(TranscriptRecord.self, from: data) else {
-                try? FileManager.default.removeItem(at: file)
+                // A locked file or a newer format can become readable later. Backup
+                // also includes these bytes until the person explicitly deletes them.
                 continue
             }
             let window = record.status == .paused ? max(activeWindow, pausedWindow) : activeWindow
@@ -368,13 +430,56 @@ public final class TranscriptHistory: @unchecked Sendable {
     }
 
     /// Records where a dictation went (inserted, dismissed, sent).
-    public func mark(id: UUID, status: TranscriptStatus, destination: String? = nil, now: Date = Date()) {
-        modify(now: now) { records in
-            guard let index = records.firstIndex(where: { $0.id == id }) else { return }
-            records[index].status = status
-            records[index].updatedAt = now
-            if let destination { records[index].destination = destination }
+    public func mark(id: UUID, status: TranscriptStatus, destination: String? = nil, keptWords: Int? = nil, now: Date = Date()) {
+        coordinate { file in
+            if let keptWords { file.stats.delivery(id: id, kept: keptWords) }
+            if let index = file.records.firstIndex(where: { $0.id == id }) {
+                file.records[index].status = status
+                file.records[index].updatedAt = now
+                if let destination { file.records[index].destination = destination }
+            }
+            file.records = Self.pruned(file.records, retention: file.retention, now: now)
+            file.pruneUnreadable(retention: file.retention, now: now)
         }
+    }
+
+    public func confirmKept(id: UUID, words: Int) {
+        confirmKept([(id, words)])
+    }
+
+    public func confirmKept(_ counts: [(UUID, Int)]) {
+        coordinate { file in
+            for (id, count) in counts { file.stats.delivery(id: id, kept: count, permanent: true) }
+        }
+    }
+
+    public func resetStats(now: Date = Date()) -> Bool {
+        coordinate { $0.stats.clear(at: now) }
+    }
+
+    public func stats(legacyWords: Int, legacySeconds: Double, since: Date?, transferred: DictationTotals? = nil) -> (DictationTotals, DictationTotals)? {
+        withStats(legacyWords: legacyWords, legacySeconds: legacySeconds, transferred: transferred) { stats in
+            (stats.totals(), since.map { stats.totals(since: $0) } ?? DictationTotals())
+        }
+    }
+
+    public func islandStats(legacyWords: Int, legacySeconds: Double, since: Date?, transferred: DictationTotals?) -> (DictationTotals, DictationTotals, IslandGardenProgress)? {
+        withStats(legacyWords: legacyWords, legacySeconds: legacySeconds, transferred: transferred) { stats in
+            (stats.totals(), since.map { stats.totals(since: $0) } ?? DictationTotals(), stats.garden(on: Date(), calendar: .current))
+        }
+    }
+
+    private func withStats<T>(legacyWords: Int, legacySeconds: Double, transferred: DictationTotals?, totals: (DictationReceipts) -> T) -> T? {
+        let existing = read()
+        let needsTransferCache = transferDefaults.map { $0.data(forKey: Self.transferKey) == nil } ?? false
+        if existing.stats.unmatchedWords != nil, !existing.differsFromDisk, !needsTransferCache { return totals(existing.stats) }
+        var result: T?
+        let saved = coordinate(recoverUndecodable: false) { file in
+            file.stats.seedIfEmpty(from: transferred)
+            file.stats.migrate(words: legacyWords, seconds: legacySeconds, history: file.records)
+            result = totals(file.stats)
+        }
+        return saved ? result : nil
     }
 
     // MARK: Deleting and settings
@@ -408,7 +513,7 @@ public final class TranscriptHistory: @unchecked Sendable {
         let fm = FileManager.default
         if fm.fileExists(atPath: directory.path) {
             for url in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey])
-                where url.lastPathComponent.hasPrefix("history.unreadable-") || url.lastPathComponent.hasPrefix("history.imported-recovery-") {
+                where Self.isRecoveryFileName(url.lastPathComponent) {
                 let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
                 guard values.isRegularFile == true, values.isSymbolicLink != true else {
                     throw LibraryBackupError.invalidDocument
@@ -416,7 +521,9 @@ public final class TranscriptHistory: @unchecked Sendable {
                 result[url.lastPathComponent] = try Data(contentsOf: url)
             }
         }
-        if fm.fileExists(atPath: inflightURL.path) {
+        if (try? inflightURL.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true {
+            throw LibraryBackupError.invalidDocument
+        } else if fm.fileExists(atPath: inflightURL.path) {
             for url in try fm.contentsOfDirectory(at: inflightURL, includingPropertiesForKeys: [.isRegularFileKey]) where url.pathExtension == "json" {
                 guard try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { throw LibraryBackupError.invalidDocument }
                 result["inflight-" + url.lastPathComponent] = try Data(contentsOf: url)
@@ -469,6 +576,7 @@ public final class TranscriptHistory: @unchecked Sendable {
         var added = 0
         let saved = coordinate { file in
             var ids = Set(file.records.map { $0.id.uuidString.uppercased() })
+            file.stats.restore(incoming.stats)
             ids.formUnion(file.unreadable.compactMap { $0.string("id")?.uppercased() })
             for record in incoming.records where ids.insert(record.id.uuidString.uppercased()).inserted {
                 file.records.append(record)
@@ -488,39 +596,135 @@ public final class TranscriptHistory: @unchecked Sendable {
         return added
     }
 
-    public func delete(id: UUID) {
-        removeInflight(id)
+    @discardableResult
+    public func delete(id: UUID) -> Bool {
+        delete(ids: [id], previouslyLinked: false)
+    }
+
+    @discardableResult
+    public func delete(ids: Set<UUID>, previouslyLinked: Bool) -> Bool {
+        delete(ids: ids, previouslyLinked: previouslyLinked, discardingRecording: false)
+    }
+
+    private func delete(ids: Set<UUID>, previouslyLinked: Bool, discardingRecording: Bool) -> Bool {
+        guard !ids.isEmpty else { return true }
         var deleted: [UUID] = []
         let saved = coordinate { file in
-            deleted = file.records.filter { $0.id == id }.map(\.id)
-            file.records.removeAll { $0.id == id }
-            file.unreadable.removeAll { $0.string("id")?.uppercased() == id.uuidString }
+            deleted = file.records.filter { ids.contains($0.id) }.map(\.id)
+            if discardingRecording {
+                for id in ids { file.stats.entries.removeValue(forKey: id.uuidString) }
+            }
+            file.records.removeAll { ids.contains($0.id) }
+            file.unreadable.removeAll { entry in
+                guard let raw = entry.string("id"), let id = UUID(uuidString: raw) else { return false }
+                return ids.contains(id)
+            }
         }
-        if saved { reportDeleted(deleted) }
+        if saved {
+            for id in ids { removeInflight(id) }
+            reportDeleted(previouslyLinked ? Array(ids) : deleted)
+        }
+        return saved
     }
 
     /// Deletes finished records created within `range` (Settings > Your data). Unreadable entries
     /// carry no trustworthy date, so only "delete everything" removes them.
-    public func delete(createdIn range: ClosedRange<Date>) {
+    @discardableResult
+    public func delete(createdIn range: ClosedRange<Date>) -> Bool {
         var deleted: [UUID] = []
         let saved = coordinate { file in
             deleted = file.records.filter { range.contains($0.createdAt) }.map(\.id)
             file.records.removeAll { range.contains($0.createdAt) }
         }
         if saved { reportDeleted(deleted) }
+        return saved
     }
 
-    /// Deletes every finished record, including entries this build cannot read. In-flight files
-    /// of a dictation running right now stay, so a recording in progress is not lost; it is
-    /// dropped or kept by retention when it finishes.
+    /// "Delete all" from History. The same as `deleteAllWithRecovery()`, for a caller that does
+    /// not show whether it worked.
     public func deleteAll() {
+        _ = deleteAllWithRecovery()
+    }
+
+    /// Deletes every finished record, including entries this build cannot read, and every copy a
+    /// backup would otherwise still export: quarantined history bytes (`history.unreadable-*`),
+    /// recovery files imported from a backup (`history.imported-recovery-*`) and in-flight files
+    /// a crash or kill left behind. Only a person's explicit "delete all" may call this; history
+    /// retention never does, so aging out and Off never erase recovery material.
+    ///
+    /// The in-flight file of a dictation running right now stays (the same windows as
+    /// `recoverCutOff`), so a recording in progress is not lost; retention keeps or drops it when
+    /// it finishes. Backups the person already saved elsewhere are theirs and are not touched.
+    ///
+    /// - Returns: true only when the history file was saved empty and no recovery file is left.
+    @discardableResult
+    public func deleteAllWithRecovery(clearingStats: Bool = false, now: Date = Date(), activeWindow: TimeInterval = 30,
+                                      pausedWindow: TimeInterval = InterruptionPolicy.holdLimit + 60) -> Bool {
         var deleted: [UUID] = []
+        // First the history file: an undecodable one is set aside as a quarantine copy here,
+        // which the sweep below then removes.
         let saved = coordinate { file in
             deleted = file.records.map(\.id)
+            if clearingStats { file.stats.clear(at: now) }
             file.records.removeAll()
+            file.lastFinish = nil
             file.unreadable.removeAll()
         }
         if saved { reportDeleted(deleted) }
+        let swept = removeRecoveryFiles(now: now, activeWindow: activeWindow, pausedWindow: pausedWindow)
+        return saved && swept
+    }
+
+    /// Removes the recovery files `backupRecoveryFiles()` would export, except the in-flight file
+    /// of a live dictation. Only regular files and symbolic links (the link, never its target) are
+    /// removed, one by one; nothing else in the directory is. True when none is left.
+    private func removeRecoveryFiles(now: Date, activeWindow: TimeInterval, pausedWindow: TimeInterval) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let fm = FileManager.default
+        var clean = true
+        func remove(_ url: URL) {
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values?.isRegularFile == true || values?.isSymbolicLink == true else {
+                // A folder or something else under a recovery name: not ours to delete wholesale,
+                // and a backup refuses it, so report it rather than claim it is gone.
+                clean = false
+                return
+            }
+            do { try fm.removeItem(at: url) } catch { clean = false }
+        }
+        if fm.fileExists(atPath: directory.path) {
+            do {
+                for url in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                    where Self.isRecoveryFileName(url.lastPathComponent) {
+                    remove(url)
+                }
+            } catch {
+                clean = false
+            }
+        }
+        if (try? inflightURL.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true {
+            remove(inflightURL)
+        } else if fm.fileExists(atPath: inflightURL.path) {
+            do {
+                for url in try fm.contentsOfDirectory(at: inflightURL, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                    where url.pathExtension == "json" {
+                    let isLink = (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
+                    if !isLink, let data = try? Data(contentsOf: url),
+                       let record = try? JSONDecoder.history.decode(TranscriptRecord.self, from: data) {
+                        let window = record.status == .paused ? max(activeWindow, pausedWindow) : activeWindow
+                        if now.timeIntervalSince(record.updatedAt) <= window { continue }
+                    }
+                    remove(url)
+                }
+            } catch {
+                clean = false
+            }
+        }
+        return clean
+    }
+
+    static func isRecoveryFileName(_ name: String) -> Bool {
+        name.hasPrefix("history.unreadable-") || name.hasPrefix("history.imported-recovery-")
     }
 
     /// Changing to a shorter retention prunes at once; `.off` clears the history.
@@ -528,6 +732,7 @@ public final class TranscriptHistory: @unchecked Sendable {
         coordinate { file in
             file.retention = retention
             file.retentionChosen = true
+            if retention == .off { file.lastFinish = nil }
             file.records = retention == .off ? [] : Self.pruned(file.records, retention: retention, now: now)
             file.pruneUnreadable(retention: retention, now: now)
         }
@@ -555,7 +760,20 @@ public final class TranscriptHistory: @unchecked Sendable {
     /// build's source or field, a damaged entry) is carried through untouched as raw JSON
     /// instead of failing the whole file. Before, one unreadable record made the file decode as
     /// empty and the next dictation's write replaced every record with just itself.
+    struct FinishReceipt: Codable, Equatable {
+        let id: UUID
+        let at: Date
+        var isNote: Bool?
+    }
+
     struct File: Codable, Equatable {
+        var lastFinish: FinishReceipt?
+
+        mutating func remember(_ receipt: FinishReceipt) {
+            if retention != .off, receipt.at >= (lastFinish?.at ?? .distantPast) { lastFinish = receipt }
+        }
+
+        var stats = DictationReceipts()
         var retention: HistoryRetention = .default
         /// True once the user has picked a retention on the History screen. Files written before
         /// this flag existed stored the old thirty-day default whether or not anyone chose it.
@@ -570,11 +788,18 @@ public final class TranscriptHistory: @unchecked Sendable {
 
         init() {}
 
-        private enum CodingKeys: String, CodingKey { case retention, retentionChosen, records }
+        private enum CodingKeys: String, CodingKey { case retention, retentionChosen, records, stats, lastFinish }
+
+        private enum LegacyStatsKeys: String, CodingKey { case prefixes }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let statsFields = try? container.nestedContainer(keyedBy: LegacyStatsKeys.self, forKey: .stats) {
+                differsFromDisk = statsFields.contains(.prefixes)
+            }
+            stats = (try? container.decode(DictationReceipts.self, forKey: .stats)) ?? DictationReceipts()
             retention = (try? container.decode(HistoryRetention.self, forKey: .retention)) ?? .default
+            lastFinish = try? container.decode(FinishReceipt.self, forKey: .lastFinish)
             retentionChosen = (try? container.decode(Bool.self, forKey: .retentionChosen)) ?? false
             // Through 1.0.1 every new history file was written with the thirty-day default, and
             // the picker could not re-select the value it already showed, so an unflagged
@@ -597,6 +822,8 @@ public final class TranscriptHistory: @unchecked Sendable {
 
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeIfPresent(lastFinish, forKey: .lastFinish)
+            if stats != DictationReceipts() { try container.encode(stats, forKey: .stats) }
             try container.encode(retention, forKey: .retention)
             try container.encode(retentionChosen, forKey: .retentionChosen)
             var list = container.nestedUnkeyedContainer(forKey: .records)
@@ -613,8 +840,16 @@ public final class TranscriptHistory: @unchecked Sendable {
             var data = Data()
             data.append(contentsOf: Array(#"{"retention":"#.utf8))
             data.append(try encoder.encode(retention))
+            if stats != DictationReceipts() {
+                data.append(contentsOf: Array(#", "stats":"#.utf8))
+                try stats.appendJSON(to: &data, encoder: encoder)
+            }
             data.append(contentsOf: Array(#","retentionChosen":"#.utf8))
             data.append(try encoder.encode(retentionChosen))
+            if let lastFinish {
+                data.append(contentsOf: #","lastFinish":"#.utf8)
+                data.append(try encoder.encode(lastFinish))
+            }
             data.append(contentsOf: Array(#","records":["#.utf8))
             var first = true
             for record in records {
@@ -738,20 +973,28 @@ public final class TranscriptHistory: @unchecked Sendable {
     }
 
     @discardableResult
-    private func modify(now: Date = Date(), keepingDespiteOff keeping: Set<UUID> = [], _ change: (inout [TranscriptRecord]) -> Void) -> Bool {
+    private func modify(now: Date = Date(), keepingDespiteOff keeping: Set<UUID> = [], finish: FinishReceipt? = nil, _ change: (inout [TranscriptRecord]) -> Void) -> Bool {
         coordinate { file in
+            if let finish { file.remember(finish) }
             change(&file.records)
             file.records = Self.pruned(file.records, retention: file.retention, now: now, keeping: keeping)
             file.pruneUnreadable(retention: file.retention, now: now)
         }
     }
 
+    private func cacheForTransfer(_ stats: DictationReceipts) {
+        guard let transferDefaults, stats.unmatchedWords != nil,
+              let data = try? JSONEncoder().encode(stats.totals()) else { return }
+        transferDefaults.set(data, forKey: Self.transferKey)
+    }
+
     @discardableResult
-    private func coordinate(_ change: (inout File) -> Void) -> Bool {
+    private func coordinate(recoverUndecodable: Bool = true, _ change: (inout File) -> Void) -> Bool {
         lock.lock()
         var error: NSError?
         var saved = false
         var changed = false
+        var statsChanged = false
         NSFileCoordinator().coordinate(writingItemAt: fileURL, options: .forMerging, error: &error) { url in
             var file = File()
             var original: File?
@@ -762,6 +1005,7 @@ public final class TranscriptHistory: @unchecked Sendable {
                 file = saved
                 original = saved
             case .undecodable(let data):
+                guard recoverUndecodable else { return }
                 // Not even the outline is readable. Keep the bytes beside it before starting
                 // over, rather than overwriting the only copy of someone's history.
                 let aside = url.deletingLastPathComponent()
@@ -772,18 +1016,31 @@ public final class TranscriptHistory: @unchecked Sendable {
                 // this change. The caller keeps its recovery file and retries later.
                 return
             }
+            if file.stats.entries.isEmpty, file.stats.unmatchedWords == nil,
+               let data = transferDefaults?.data(forKey: Self.transferKey) {
+                // Even the first keyboard finish or backup import may precede opening Home.
+                let cache = try? JSONDecoder().decode(DictationTotals.self, from: data)
+                file.stats.seedIfEmpty(from: cache)
+                if cache == DictationTotals() {
+                    // A committed zero snapshot supersedes a stale app display cache.
+                    file.stats.migrate(words: 0, seconds: 0, history: [])
+                }
+            }
             change(&file)
             // A change that changes nothing (marking a record already gone, a purge with nothing
             // to purge) leaves the file as it is. Compared as values, not bytes: the encoder's key
             // order differs from process to process, so the bytes of an unchanged library written
             // by the keyboard, or by the app's previous launch, never matched.
             if let original, file == original, !original.differsFromDisk {
+                if transferDefaults?.data(forKey: Self.transferKey) == nil { cacheForTransfer(file.stats) }
                 saved = true
                 return
             }
             do {
                 let data = try file.encoded()
                 try data.write(to: url, options: Self.writeOptions)
+                statsChanged = (original?.stats ?? DictationReceipts()) != file.stats
+                if statsChanged || transferDefaults?.data(forKey: Self.transferKey) == nil { cacheForTransfer(file.stats) }
                 changed = true
                 saved = true
             } catch {
@@ -797,6 +1054,7 @@ public final class TranscriptHistory: @unchecked Sendable {
         // otherwise the writer waits for main while main waits for the writer forever.
         lock.unlock()
         if saved && changed && error == nil {
+            if statsChanged { DarwinNotifier.post(.statsChanged) }
             NotificationCenter.default.post(name: .init("ZoneLibraryDidChange"), object: nil)
         }
         return saved && error == nil

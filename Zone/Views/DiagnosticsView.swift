@@ -6,6 +6,7 @@ import ZoneCore
 /// Developer-facing checks, kept out of the normal flow. The test clip run is the
 /// "offline ASR validated" evidence: a known 16 kHz recording through the exact dictation path.
 struct DiagnosticsView: View {
+    @Environment(\.colorScheme) private var scheme
     @Environment(DictationCoordinator.self) private var coordinator
     @State private var clipText = ""
     @State private var clipLatency: TimeInterval?
@@ -40,6 +41,7 @@ struct DiagnosticsView: View {
             } footer: {
                 Text("For measurement only. Choose your everyday model and manage its downloads in Model size.")
             }
+            .listRowBackground(Zone.card(scheme))
 
             Section {
                 Button(clipRunning ? "Running…" : "Transcribe test clip") {
@@ -62,12 +64,14 @@ struct DiagnosticsView: View {
             } footer: {
                 Text("Runs a bundled 6-second clip (\"The meeting is at three thirty, not four…\") through the same streaming path the keyboard uses. Works in airplane mode once the model is downloaded.")
             }
+            .listRowBackground(Zone.card(scheme))
 
             Section {
                 NavigationLink("Recording log") { RecordingLogView() }
             } footer: {
                 Text("Every recording's starts, pauses for calls or alarms, resumes, stops and saves, from the app and the keyboard. Kept on this iPhone for two weeks; no words are in it.")
             }
+            .listRowBackground(Zone.card(scheme))
 
             Section {
                 LabeledContent("Stored MetricKit reports", value: "\(MetricsRecorder.shared.storedReportCount)")
@@ -76,6 +80,7 @@ struct DiagnosticsView: View {
             } footer: {
                 Text("iOS 27 reports keyboard memory terminations here. Reports land in Application Support/Diagnostics.")
             }
+            .listRowBackground(Zone.card(scheme))
 
             Section("Shared state") {
                 Button("Read App Group state") { sharedSummary = coordinator.sharedStateSummary() }
@@ -87,6 +92,7 @@ struct DiagnosticsView: View {
                     sharedSummary = coordinator.sharedStateSummary()
                 }
             }
+            .listRowBackground(Zone.card(scheme))
         }
         .scrollContentBackground(.hidden)
         .navigationTitle("Diagnostics")

@@ -333,9 +333,11 @@ public final class LexiconRecognitionSession: RecognitionSession {
     private let base: RecognitionSession
     private let systemWords: [String]
     private let personalWords: [String]
+    private let onAudioSubmitted: (() -> Void)?
     private let mentions: Bool
 
-    public init(base: RecognitionSession, systemWords: [String], personalWords: [String], mentions: Bool) {
+    public init(base: RecognitionSession, systemWords: [String], personalWords: [String], mentions: Bool, onAudioSubmitted: (() -> Void)? = nil) {
+        self.onAudioSubmitted = onAudioSubmitted
         self.base = base; self.systemWords = systemWords; self.personalWords = personalWords; self.mentions = mentions
     }
 
@@ -348,7 +350,10 @@ public final class LexiconRecognitionSession: RecognitionSession {
     /// wrapper). A word the lexicon respelled is no longer in the text and is dropped by
     /// `DoubtfulWords.place`, never guessed at.
     public var doubtfulWords: [DoubtfulWord] { base.doubtfulWords }
-    public func feed(_ samples: [Float]) { base.feed(samples) }
+    public func feed(_ samples: [Float]) {
+        base.feed(samples)
+        if !samples.isEmpty { onAudioSubmitted?() }
+    }
     public func cancel() { base.cancel() }
     public func finish() async throws -> String {
         let text = try await base.finish()

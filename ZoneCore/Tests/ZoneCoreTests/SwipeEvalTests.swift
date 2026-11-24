@@ -165,6 +165,67 @@ final class SwipeEvalTests: XCTestCase {
     }
 }
 
+/// What should a swipe do right after the user deleted the last swiped word and swiped again?
+///
+/// `ZONE_SWIPE_RESWIPE=0,0.05,0.1,inf` (with `ZONE_SWIPE_FIXTURES`) pairs two different people's
+/// swipes of the same word: the first is the swipe that was deleted, the second the retry. Each
+/// value is a penalty added to the deleted word's score on the retry (`inf` leaves it out).
+/// "Fixed" is how often the retry is right after a wrong first guess; "kept" is how often it is
+/// still right when the first guess was right and the person deleted it anyway.
+extension SwipeEvalTests {
+    func testReswipeEval() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let paths = env["ZONE_SWIPE_FIXTURES"], !paths.isEmpty, let list = env["ZONE_SWIPE_RESWIPE"], !list.isEmpty else {
+            throw XCTSkip("set ZONE_SWIPE_FIXTURES and ZONE_SWIPE_RESWIPE to measure retries")
+        }
+        let penalties = list.split(separator: ",").compactMap { Float($0 == "inf" ? "infinity" : String($0)) }
+        let words = try XCTUnwrap(WordList.loadBundled())
+        var tuning = SwipeTuning()
+        if let json = env["ZONE_SWIPE_TUNING"], let data = json.data(using: .utf8) { tuning = try SwipeTuning.overriding(tuning, with: data) }
+        let pairs = try env["ZONE_SWIPE_PAIRS"].flatMap { $0.isEmpty ? nil : $0 }.map {
+            try XCTUnwrap(WordPairs(url: URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath), words: words))
+        }
+        let neural = env["ZONE_SWIPE_NEURAL"] == "1" ? SwipeNeuralScorer() : nil
+        let decoder = SwipeDecoder(words: words, tuning: tuning, context: pairs)
+        for path in paths.split(separator: ",").map({ ($0.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath }) {
+            let fixture = try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+            var decoded: [String: [(ranked: [SwipeCandidate], end: UInt8?)]] = [:]
+            for row in fixture.rows {
+                let target = row.word.trimmingCharacters(in: .punctuationCharacters)
+                guard let entry = words.lookup(target), entry.isSuggestible,
+                      Set(target.lowercased().filter(\.isLetter)).count >= 2, row.w > 0, row.h > 0 else { continue }
+                let ratio = (row.h / 3) / (row.w / 10)
+                var centers: [Character: SwipePoint] = [:]
+                for (letter, c) in fixture.layout where c.count == 2 {
+                    centers[Character(letter)] = SwipePoint(x: Float(c[0] * 10), y: Float(c[1] * 3 * ratio))
+                }
+                let layout = SwipeLayout(centers: centers, rowPitch: Float(ratio))
+                let points = row.points.map { SwipePoint(x: Float($0[0] * 10), y: Float($0[1] * 3 * ratio), t: Float($0[2]) / 1000) }
+                let geometric = decoder.decode(points, layout: layout, context: SwipeContext(previousWord: row.prev), limit: neural == nil ? 10 : 96)
+                let ranked = neural?.rank(geometric, points: points, layout: layout) ?? geometric
+                decoded[target.lowercased(), default: []].append((ranked, SwipeRetry.endLetter(points.last, layout: layout)))
+            }
+            for penalty in penalties {
+                var wrongFirst = 0, fixed = 0, rightFirst = 0, kept = 0
+                for (target, attempts) in decoded where attempts.count >= 2 {
+                    for (i, first) in attempts.enumerated() {
+                        // One retry per first swipe: the next person's swipe of the same word.
+                        let retry = attempts[(i + 1) % attempts.count]
+                        guard let deleted = first.ranked.first?.word.lowercased() else { continue }
+                        let best = SwipeRetry.alternatives(retry.ranked, retryOf: deleted, endLetter: retry.end,
+                                                          penalty: penalty, limit: 1).first
+                        let right = best?.word.lowercased() == target && best?.score.isFinite == true
+                        if deleted == target { rightFirst += 1; if right { kept += 1 } } else { wrongFirst += 1; if right { fixed += 1 } }
+                    }
+                }
+                print(String(format: "SWIPE RESWIPE %@ penalty %.3f: wrong first %d, retry fixed %.2f%%; right first %d, retry kept %.2f%%",
+                             (path as NSString).lastPathComponent, penalty, wrongFirst, 100 * Double(fixed) / Double(max(wrongFirst, 1)),
+                             rightFirst, 100 * Double(kept) / Double(max(rightFirst, 1))))
+            }
+        }
+    }
+}
+
 extension SwipeTuning {
     /// `base` with every field present in a JSON object replaced.
     static func overriding(_ base: SwipeTuning, with data: Data) throws -> SwipeTuning {

@@ -499,7 +499,7 @@ final class BakeoffRunner {
             outcome.text = try await session.finish()
             outcome.stopToText = Date().timeIntervalSince(stop)
         } catch {
-            outcome.error = error.localizedDescription
+            outcome.error = RecordingProblem.transcribe.message(for: error)
         }
         outcome.cpu = ResourceProbe.cpuSeconds() - cpuStart
         return outcome
@@ -540,7 +540,7 @@ final class BakeoffRunner {
         do {
             try await coordinator.armSession()
         } catch {
-            status = "Could not arm: \(error.localizedDescription)"
+            status = RecordingProblem.microphone.message(for: error)
             return
         }
         if mode == .background {

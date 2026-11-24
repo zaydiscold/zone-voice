@@ -41,7 +41,7 @@ import Testing
     @Test func usesTheLearnedRateWhenThereIsOne() {
         #expect(MeetingEstimate.seconds(forAudio: 600, rate: 0.25, labelsSpeakers: false) == 150)
         #expect(MeetingEstimate.seconds(forAudio: 600, rate: nil, labelsSpeakers: false) == 360)
-        #expect(MeetingEstimate.seconds(forAudio: 600, rate: 0.25, labelsSpeakers: true) == 150 + 30 + 5)
+        #expect(MeetingEstimate.seconds(forAudio: 600, rate: 0.25, labelsSpeakers: true) == 150 + 48 + 5)
     }
 
     @Test func labels() {

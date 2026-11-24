@@ -2,7 +2,7 @@
 
 import UIKit
 
-/// What a key shows: a word or character in the system font, or an SF Symbol.
+/// A key label in the system font or an SF Symbol.
 struct KeyGlyphSpec: Hashable {
     enum Kind: Hashable { case text, symbol }
     let kind: Kind
@@ -20,6 +20,8 @@ struct KeyGlyphSpec: Hashable {
     static func symbol(_ name: String, size: CGFloat = 19) -> KeyGlyphSpec {
         KeyGlyphSpec(kind: .symbol, value: name, pointSize: size, lift: 0, maxWidth: .greatestFiniteMagnitude)
     }
+
+
 }
 
 /// Pre-rendered key labels. Each glyph is drawn once per appearance and scale and then reused as

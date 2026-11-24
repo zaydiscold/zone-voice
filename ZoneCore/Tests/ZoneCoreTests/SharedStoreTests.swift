@@ -52,6 +52,16 @@ final class SharedStoreTests: XCTestCase {
         XCTAssertEqual(reader.level, 0.42, accuracy: 0.001)
     }
 
+    func testKeyboardCueChoiceAndSwitchSurviveASecondReader() throws {
+        store.keyboardPreferences = KeyboardPreferences(soundsEnabled: false, soundSet: "kalimba")
+        let other = UserDefaultsSharedStore(suiteName: suite).keyboardPreferences
+        XCTAssertFalse(other.soundsEnabled)
+        XCTAssertEqual(other.soundSet, "kalimba")
+        let old = try JSONDecoder().decode(KeyboardPreferences.self, from: Data("{}".utf8))
+        XCTAssertTrue(old.soundsEnabled)
+        XCTAssertEqual(old.soundSet, "wood")
+    }
+
     func testMissingValuesReadAsNilAndEmptyLedger() {
         XCTAssertNil(store.request)
         XCTAssertNil(store.status)

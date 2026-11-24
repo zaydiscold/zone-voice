@@ -8,6 +8,8 @@ import WatchConnectivity
 final class WatchNotesModel: NSObject, ObservableObject, WCSessionDelegate {
     @Published private(set) var notes: [WatchSavedNote] = []
     @Published private(set) var error: String?
+    @Published private(set) var accent = UserDefaults.standard.string(forKey: AccentChoice.defaultsKey)
+        .flatMap(AccentChoice.init(rawValue:)) ?? .defaultChoice
     private var ledger: WatchNoteLedger?
     var canSave: Bool { ledger != nil }
 
@@ -73,7 +75,50 @@ final class WatchNotesModel: NSObject, ObservableObject, WCSessionDelegate {
         Task { @MainActor in
             if let error { self.error = "Saved notes are on this Watch. \(error.localizedDescription)" }
             guard activationState == .activated else { return }
+            self.applyContext(session.receivedApplicationContext, session: session)
             for saved in self.notes where saved.delivery != .receivedOnPhone { self.queue(saved.note) }
+        }
+    }
+
+    private func receiveAccent(_ rawValue: String?) {
+        guard let rawValue, let choice = AccentChoice(rawValue: rawValue), choice != accent else { return }
+        UserDefaults.standard.set(rawValue, forKey: AccentChoice.defaultsKey)
+        accent = choice
+    }
+
+    nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
+        Task { @MainActor in self.applyContext(applicationContext, session: session) }
+    }
+
+    private func applyContext(_ context: [String: Any], session: WCSession) {
+        receiveAccent(context[AccentChoice.defaultsKey] as? String)
+        if let cutoff = context["eraseNotesThrough"] as? Date {
+            _ = erase(through: cutoff, session: session)
+        }
+    }
+
+    private func erase(through cutoff: Date, session: WCSession) -> Bool {
+        guard let ledger else { return false }
+        do {
+            try ledger.erase(through: cutoff)
+            for transfer in session.outstandingUserInfoTransfers {
+                if let note = try? CompanionNoteEnvelope.receive(transfer.userInfo), note.createdAt <= cutoff {
+                    transfer.cancel()
+                }
+            }
+            notes = ledger.notes
+            return true
+        } catch {
+            self.error = "Some notes could not be removed. Open Zone again to retry."
+            return false
+        }
+    }
+
+    nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any],
+                             replyHandler: @escaping ([String: Any]) -> Void) {
+        guard let cutoff = message["eraseNotesThrough"] as? Date else { replyHandler(["erased": false]); return }
+        Task { @MainActor in
+            replyHandler(["erased": self.erase(through: cutoff, session: session)])
         }
     }
 

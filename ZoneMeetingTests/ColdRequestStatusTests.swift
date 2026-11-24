@@ -19,6 +19,9 @@ final class ColdRequestStatusTests: XCTestCase {
         let suite = "cold-status-test-" + UUID().uuidString
         suites.append(suite)
         let store = UserDefaultsSharedStore(suiteName: suite)
+        // The keyboard writes the request and its status together (`MicController.requestDictation`).
+        store.request = DictationRequest(id: status.requestID, generation: status.generation, createdAt: status.updatedAt,
+                                         inputSession: nil, contextBefore: nil)
         store.status = status
         let settings = AppSettings(defaults: UserDefaults(suiteName: suite)!, store: store, vocabulary: nil, systemLexicon: nil)
         let coordinator = DictationCoordinator(settings: settings, store: store, engine: ColdStatusEngine(), reviews: .forTests)

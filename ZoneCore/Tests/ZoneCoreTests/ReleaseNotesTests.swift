@@ -41,28 +41,21 @@ final class ReleaseNotesParserTests: XCTestCase {
     private let sample = """
     # 1.2.3
     date: 2026-11-15
-    summary: Two cards and a short list.
+    name: Sample
+    summary: Two groups and a few changes.
 
-    ## The first card
-    symbol: mic.fill
-    tag: Beta
-    where: Settings > Somewhere
-
-    A sentence that runs
-    over two lines. And a second one.
-
-    A second paragraph.
-
-    ## The second card
+    ## Keyboard
     symbol: keyboard
-    Straight into the text.
 
-    ## Also in this version
+    * Next word: Finish a word and the row
+      offers the next one.
+    - Hold space to talk (Beta): Hold, speak, let go.
+    - A plain fix with no name.
 
-    - One fix.
-    - A fix that wraps
-      onto the next line.
-    * A third, with a star.
+    ## Dictation
+    symbol: waveform
+    - Settings > Keyboard: this colon follows a path, so the line is all sentence.
+    * Learns your fixes: Retype a word once.
     """
 
     private func failure(_ text: String, file: StaticString = #filePath, line: UInt = #line) -> ReleaseNotesParser.Failure? {
@@ -82,84 +75,69 @@ final class ReleaseNotesParserTests: XCTestCase {
         let note = try ReleaseNotesParser.parse(sample)
         XCTAssertEqual(note.version, AppVersion("1.2.3"))
         XCTAssertEqual(note.day, ReleaseDay("2026-11-15"))
-        XCTAssertEqual(note.summary, "Two cards and a short list.")
-        XCTAssertEqual(note.features, [
-            ReleaseFeature(title: "The first card", symbol: "mic.fill", tag: "Beta", location: "Settings > Somewhere",
-                           body: "A sentence that runs over two lines. And a second one.\n\nA second paragraph."),
-            ReleaseFeature(title: "The second card", symbol: "keyboard", body: "Straight into the text."),
+        XCTAssertEqual(note.name, "Sample")
+        XCTAssertEqual(note.summary, "Two groups and a few changes.")
+        XCTAssertEqual(note.groups, [
+            ReleaseGroup(title: "Keyboard", symbol: "keyboard", items: [
+                ReleaseItem(title: "Next word", text: "Finish a word and the row offers the next one.", isHighlight: true),
+                ReleaseItem(title: "Hold space to talk", tag: "Beta", text: "Hold, speak, let go."),
+                ReleaseItem(text: "A plain fix with no name."),
+            ]),
+            ReleaseGroup(title: "Dictation", symbol: "waveform", items: [
+                ReleaseItem(text: "Settings > Keyboard: this colon follows a path, so the line is all sentence."),
+                ReleaseItem(title: "Learns your fixes", text: "Retype a word once.", isHighlight: true),
+            ]),
         ])
-        XCTAssertEqual(note.fixes, ["One fix.", "A fix that wraps onto the next line.", "A third, with a star."])
+        XCTAssertEqual(note.count, 5)
+        XCTAssertEqual(note.highlights.map(\.item.title), ["Next word", "Learns your fixes"])
+        XCTAssertEqual(note.highlights.map(\.group.title), ["Keyboard", "Dictation"])
     }
 
-    func testBriefIsTheSheetLineAndTheFirstSentenceStandsIn() throws {
-        let note = try ReleaseNotesParser.parse("""
-        # 1.0
-        summary: s
-
-        ## With a brief
-        symbol: mic
-        brief: The short line.
-
-        A long body. With more.
-
-        ## Without one
-        symbol: mic
-
-        Get zone at github.com/zaydiscold/zone-mcp, version 2.5 or later. Then pair it.
-
-        ## One sentence
-        symbol: mic
-
-        No period at the end
-        """)
-        XCTAssertEqual(note.features.map(\.brief), ["The short line.", nil, nil])
-        XCTAssertEqual(note.features.map(\.headline), [
-            "The short line.",
-            "Get zone at github.com/zaydiscold/zone-mcp, version 2.5 or later.",
-            "No period at the end",
-        ])
-        XCTAssertEqual(note.features[0].body, "A long body. With more.")
+    func testANameIsShortAndHasNoSentenceInIt() {
+        func item(_ text: String) -> ReleaseItem { ReleaseNotesParser.item(text, starred: false) }
+        XCTAssertEqual(item("Colors: Pick one."), ReleaseItem(title: "Colors", text: "Pick one."))
+        XCTAssertEqual(item("My words, one key per word: Tap to fix."), ReleaseItem(title: "My words, one key per word", text: "Tap to fix."))
+        // A sentence, a quotation or a path before the colon is not a name.
+        XCTAssertNil(item("It works. Then: it stops.").title)
+        XCTAssertNil(item("Saying \"at sign\": writes @.").title)
+        XCTAssertNil(item("Settings > Dynamic Island > Times: Live counts by itself.").title)
+        XCTAssertNil(item(String(repeating: "long ", count: 9) + "name: text").title)
+        XCTAssertNil(item("No colon here.").title)
+        XCTAssertNil(item("Ends with a colon:").title)
+        // A time is not a name and a sentence: the colon has no space after it.
+        XCTAssertNil(item("Times like 7:30 are digits.").title)
+        // The label is one word in brackets at the end of the name.
+        XCTAssertEqual(item("Computers (Beta): Pair one.").tag, "Beta")
+        XCTAssertEqual(item("Zone (on iOS 26): Lasts longer.").title, "Zone (on iOS 26)")
+        XCTAssertNil(item("Zone (on iOS 26): Lasts longer.").tag)
     }
 
-    func testDateIsOptionalAndWindowsLineEndingsRead() throws {
-        let note = try ReleaseNotesParser.parse("# 2.0\r\nsummary: No date yet.\r\n\r\n## Also in this version\r\n- Only a fix.\r\n")
+    func testDateAndNameAreOptionalAndWindowsLineEndingsRead() throws {
+        let note = try ReleaseNotesParser.parse("# 2.0\r\nsummary: No date yet.\r\n\r\n## Fixes\r\nsymbol: wrench\r\n- Only a fix.\r\n")
         XCTAssertNil(note.day)
-        XCTAssertEqual(note.features, [])
-        XCTAssertEqual(note.fixes, ["Only a fix."])
+        XCTAssertNil(note.name)
+        XCTAssertEqual(note.groups.map(\.title), ["Fixes"])
+        XCTAssertEqual(note.groups[0].items, [ReleaseItem(text: "Only a fix.")])
+        XCTAssertEqual(note.highlights, [])
     }
 
     func testCommentsAreForEditorsOnly() throws {
         let note = try ReleaseNotesParser.parse("""
         # 1.0
         summary: Comments vanish. <!-- even here -->
-        <!-- TODO(integrator): add the card
+        <!-- TODO(integrator): add the line
              when the branch merges. ## Not a heading
         -->
 
-        ## A card
+        ## A group
         symbol: mic
-        Text before <!-- inline --> and after.
+        - Text before <!-- inline --> and after.
         <!-- a whole line -->
-        More text.
+        - More text.
         """)
         XCTAssertEqual(note.summary, "Comments vanish.")
-        XCTAssertEqual(note.features.map(\.body), ["Text before and after. More text."])
-        XCTAssertEqual(failure("# 1.0\nsummary: s\n<!-- never closed\n## A\nsymbol: mic\nText.")?.message, "a comment is never closed")
-    }
-
-    func testASentenceWithAColonIsNotAKey() throws {
-        let note = try ReleaseNotesParser.parse("""
-        # 1.0
-        summary: Colons are fine: really.
-
-        ## A card
-        symbol: mic
-
-        note: this line follows a blank line, so it is a sentence.
-        Ask: what did I say?
-        """)
-        XCTAssertEqual(note.summary, "Colons are fine: really.")
-        XCTAssertEqual(note.features.first?.body, "note: this line follows a blank line, so it is a sentence. Ask: what did I say?")
+        XCTAssertEqual(note.groups[0].items.map(\.text), ["Text before and after.", "More text."])
+        XCTAssertEqual(failure("# 1.0\nsummary: s\n<!-- never closed\n## A\nsymbol: mic\n- Text.")?.message, "a comment is never closed")
     }
 
     func testMistakesAreErrorsWithTheirLine() {
@@ -167,32 +145,38 @@ final class ReleaseNotesParserTests: XCTestCase {
         XCTAssertEqual(failure("Hello\n# 1.0")?.line, 1)
         XCTAssertEqual(failure("# one point oh\nsummary: s")?.message, "\"one point oh\" is not a version like 1.0.4")
         XCTAssertEqual(failure("# 1.0\nsummary: s\n\n# 1.1")?.message, "one version per file")
-        XCTAssertEqual(failure("# 1.0\n\n## A\nsymbol: mic\nText.")?.message, "the version needs a summary: line before its first section")
+        XCTAssertEqual(failure("# 1.0\n\n## A\nsymbol: mic\n- Text.")?.message, "the version needs a summary: line before its first group")
         XCTAssertEqual(failure("# 1.0\nsummary: s")?.message, "the version has no notes")
         XCTAssertEqual(failure("# 1.0\ndate: tomorrow\nsummary: s")?.message, "\"tomorrow\" is not a date like 2026-11-15")
-        XCTAssertEqual(failure("# 1.0\nsummary: s\nauthor: someone")?.message, "\"author:\" is not known here (date, summary)")
+        XCTAssertEqual(failure("# 1.0\nsummary: s\nauthor: someone")?.message, "\"author:\" is not known here (date, name, summary)")
         XCTAssertEqual(failure("# 1.0\nsummary: s\nsummary: t")?.message, "summary: appears twice")
-        XCTAssertEqual(failure("# 1.0\nsummary: s\nLoose text.")?.message, "text must sit under a \"## \" section")
+        XCTAssertEqual(failure("# 1.0\nname: a\nname: b\nsummary: s")?.message, "name: appears twice")
+        XCTAssertEqual(failure("# 1.0\nsummary: s\nLoose text.")?.message, "text must sit under a \"## \" group")
+        XCTAssertEqual(failure("# 1.0\nsummary: s\n- A change with no group.")?.message, "a change must sit under a \"## \" group")
 
-        let noSymbol = failure("# 1.0\nsummary: s\n\n## A card\nText.")
-        XCTAssertEqual(noSymbol?.message, "\"A card\" needs a symbol: line (an SF Symbol name)")
+        let noSymbol = failure("# 1.0\nsummary: s\n\n## A group\n- Text.")
+        XCTAssertEqual(noSymbol?.message, "\"A group\" needs a symbol: line (an SF Symbol name)")
         XCTAssertEqual(noSymbol?.line, 4)
-        XCTAssertEqual(failure("# 1.0\nsummary: s\n\n## A card\nsymbol: mic\n\n## Another\nsymbol: mic\nText.")?.message,
-                       "\"A card\" has no text under it")
-        XCTAssertEqual(failure("# 1.0\nsummary: s\n\n## A\nsymbol: mic\nicon: mic\nText.")?.message,
-                       "\"icon:\" is not known here (symbol, tag, where, brief)")
-        XCTAssertEqual(failure("# 1.0\nsummary: s\n\n## A\nsymbol: mic\nText.\n\n## A\nsymbol: mic\nText.")?.message, "\"A\" appears twice")
-        XCTAssertEqual(failure("# 1.0\nsummary: s\n\n## A\nsymbol: mic\nText.\n### Deeper")?.message, "use \"## \" for a section")
-        XCTAssertEqual(failure("# 1.0\nsummary: s\n\n## Also in this version\nNot a bullet.")?.message,
-                       "lines under \"Also in this version\" start with \"- \"")
-        XCTAssertEqual(failure("# 1.0\nsummary: s\n\n## Also in this version\n- A fix.\n\n## Late card\nsymbol: mic\nText.")?.message,
-                       "\"Also in this version\" must be the last section")
+        XCTAssertEqual(failure("# 1.0\nsummary: s\n\n## A group\nsymbol: mic\n\n## Another\nsymbol: mic\n- Text.")?.message,
+                       "\"A group\" has no changes under it")
+        XCTAssertEqual(failure("# 1.0\nsummary: s\n\n## A\nsymbol: mic\nicon: mic\n- Text.")?.message,
+                       "\"icon:\" is not known here (symbol)")
+        XCTAssertEqual(failure("# 1.0\nsummary: s\n\n## A\nsymbol: mic\n- Text.\n\n## a\nsymbol: mic\n- Text.")?.message, "\"a\" appears twice")
+        XCTAssertEqual(failure("# 1.0\nsummary: s\n\n## A\nsymbol: mic\n- Text.\n### Deeper")?.message, "use \"## \" for a group")
+        // The old card format, a paragraph under a heading, is refused rather than half read.
+        let paragraph = failure("# 1.0\nsummary: s\n\n## A\nsymbol: mic\n\nA paragraph, as a card had.")
+        XCTAssertEqual(paragraph?.message, "a change starts with \"- \", or \"* \" for a highlight")
+        XCTAssertEqual(paragraph?.line, 7)
+        let star = failure("# 1.0\nsummary: s\n\n## A\nsymbol: mic\n- Fine.\n* A highlight with no name.")
+        XCTAssertEqual(star?.message, "a starred change needs a name and a colon before its sentence")
+        XCTAssertEqual(star?.line, 7)
     }
 }
 
 final class ReleaseNotesLibraryTests: XCTestCase {
     private func note(_ version: String) throws -> ReleaseNote {
-        ReleaseNote(version: try XCTUnwrap(AppVersion(version)), day: nil, summary: "s", features: [], fixes: ["f"])
+        ReleaseNote(version: try XCTUnwrap(AppVersion(version)), day: nil, summary: "s",
+                    groups: [ReleaseGroup(title: "g", symbol: "mic", items: [ReleaseItem(text: "f")])])
     }
 
     func testNewestFirstAndOnlyUpToTheInstalledVersion() throws {
@@ -218,7 +202,7 @@ final class ReleaseNotesLibraryTests: XCTestCase {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("zone-notes-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
-        let good = "summary: s\n\n## Also in this version\n- f\n"
+        let good = "summary: s\n\n## Fixes\nsymbol: wrench\n- f\n"
         try "# 1.0\n\(good)".write(to: folder.appendingPathComponent("1.0.md"), atomically: true, encoding: .utf8)
         try "# 1.1\n\(good)".write(to: folder.appendingPathComponent("1.1.md"), atomically: true, encoding: .utf8)
         try "# 1.3\n\(good)".write(to: folder.appendingPathComponent("1.2.md"), atomically: true, encoding: .utf8)
@@ -230,7 +214,11 @@ final class ReleaseNotesLibraryTests: XCTestCase {
         XCTAssertEqual(problems.count, 2)
         XCTAssertTrue(problems.contains("1.2.md: holds the notes for 1.3"), "\(problems)")
         XCTAssertTrue(problems.contains { $0.hasPrefix("2.0.md: line 1") }, "\(problems)")
-        XCTAssertEqual(ReleaseNotesLibrary.load(folder: folder.appendingPathComponent("missing")).library.notes, [])
+        let missing = folder.appendingPathComponent("missing")
+        XCTAssertFalse(ReleaseNotesLibrary.load(folder: missing).problems.isEmpty)
+        try FileManager.default.createDirectory(at: missing, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: folder.appendingPathComponent("1.0.md"), to: missing.appendingPathComponent("1.0.md"))
+        XCTAssertEqual(ReleaseNotesLibrary.load(folder: missing).library.notes.map(\.id), ["1.0"])
     }
 }
 
@@ -260,20 +248,18 @@ final class ShippedReleaseNotesTests: XCTestCase {
                         "Zone \(version) has no release notes. Add Zone/ReleaseNotes/\(version).md (see next-build/README.md).")
     }
 
-    /// The What's New sheet shows one line per card. The version about to ship writes each line on
-    /// purpose (`brief:`), so the sheet never falls back to the first sentence of a long card.
-    func testTheShippingVersionGivesEveryCardABrief() throws {
+    /// The version about to ship stars a few changes for the What's New sheet: enough to say what
+    /// the update is, few enough that the sheet stays one short list.
+    func testTheShippingVersionStarsAFewChanges() throws {
         let project = try String(contentsOf: Self.root.appendingPathComponent("project.yml"), encoding: .utf8)
         let line = try XCTUnwrap(project.components(separatedBy: "\n").first { $0.contains("MARKETING_VERSION:") })
         let text = line.components(separatedBy: "MARKETING_VERSION:")[1].trimmingCharacters(in: CharacterSet(charactersIn: " \"'\t"))
         let note = try XCTUnwrap(library.note(for: AppVersion(text)), "no notes for \(text)")
-        for feature in note.features {
-            XCTAssertFalse((feature.brief ?? "").isEmpty, "\(note.id): \"\(feature.title)\" needs a brief: line for the What's New sheet")
-        }
+        XCTAssertGreaterThanOrEqual(note.highlights.count, 3, "\(note.id): star three to six changes with \"* \"")
     }
 
     func testEveryPublicVersionSoFarIsThere() {
-        for version in ["1.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5"] {
+        for version in ["1.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5", "1.0.6"] {
             XCTAssertNotNil(library.note(for: AppVersion(version)), version)
         }
     }
@@ -286,25 +272,34 @@ final class ShippedReleaseNotesTests: XCTestCase {
         }
     }
 
-    /// The rules in `next-build/README.md` that a test can check: plain punctuation, and cards
-    /// short enough to read as cards.
-    func testNotesAreShortAndPlain() {
+    /// The rules in `next-build/README.md` that a test can check: a few groups, one short line per
+    /// change, plain punctuation. From 1.0.5 on a sentence is at most 110 characters, so a line is
+    /// two or three rows on an iPhone, and a starred one at most 90, so the What's New sheet fits a
+    /// screen. The versions before it were written as cards and keep their longer lines.
+    func testNotesAreShortAndPlain() throws {
+        let tight = try XCTUnwrap(AppVersion("1.0.5"))
         for note in library.notes {
-            var texts = [note.summary] + note.fixes
+            var texts = [note.summary, note.name ?? ""]
             XCTAssertLessThanOrEqual(note.summary.count, 150, "\(note.id) summary")
-            XCTAssertFalse(note.features.isEmpty, "\(note.id) has no cards")
-            for feature in note.features {
-                XCTAssertLessThanOrEqual(feature.title.count, 44, "\(note.id): \(feature.title)")
-                XCTAssertLessThanOrEqual(feature.body.count, 360, "\(note.id): \(feature.title) is too long for a card")
-                XCTAssertFalse(feature.body.contains("\n"), "\(note.id): \(feature.title) is one paragraph")
-                XCTAssertLessThanOrEqual(feature.tag?.count ?? 0, 14, "\(note.id): \(feature.title) tag")
-                // The What's New sheet lists every card as one line, so that line must stay short.
-                XCTAssertLessThanOrEqual(feature.headline.count, 90,
-                                         "\(note.id): \(feature.title) needs a brief: line of 90 characters or fewer")
-                texts += [feature.title, feature.body, feature.tag ?? "", feature.location ?? "", feature.brief ?? ""]
-            }
-            for fix in note.fixes {
-                XCTAssertLessThanOrEqual(fix.count, 170, "\(note.id): \(fix)")
+            XCTAssertLessThanOrEqual(note.name?.count ?? 0, 16, "\(note.id) name")
+            XCTAssertFalse(note.name?.contains(" ") ?? false, "\(note.id): the name is one word, shown as \"The \(note.name ?? "") update\"")
+            XCTAssertLessThanOrEqual(note.groups.count, 8, "\(note.id) has too many groups to scan")
+            XCTAssertLessThanOrEqual(note.highlights.count, 6, "\(note.id): the What's New sheet shows every starred change")
+            XCTAssertGreaterThanOrEqual(note.highlights.count, 1, "\(note.id) stars nothing for the What's New sheet")
+            let limit = note.version >= tight ? 110 : 170
+            for group in note.groups {
+                XCTAssertLessThanOrEqual(group.title.count, 24, "\(note.id): \(group.title)")
+                texts.append(group.title)
+                for item in group.items {
+                    XCTAssertLessThanOrEqual(item.title?.count ?? 0, note.version >= tight ? 32 : ReleaseNotesParser.titleLimit,
+                                             "\(note.id): \(item.title ?? "")")
+                    XCTAssertLessThanOrEqual(item.text.count, limit, "\(note.id): \(item.title ?? item.text) is too long for one line")
+                    if item.isHighlight, note.version >= tight {
+                        XCTAssertLessThanOrEqual(item.text.count, 90, "\(note.id): \(item.title ?? "") is starred, so it is shorter")
+                    }
+                    XCTAssertLessThanOrEqual(item.tag?.count ?? 0, 14, "\(note.id): \(item.title ?? "") tag")
+                    texts += [item.title ?? "", item.text, item.tag ?? ""]
+                }
             }
             for text in texts {
                 for dash in ["\u{2014}", "\u{2013}", " - ", "--"] {
@@ -316,9 +311,9 @@ final class ShippedReleaseNotesTests: XCTestCase {
         }
     }
 
-    /// Each change is told once: in one version, as a card or as a line, never both. This catches
-    /// the copy and paste kind of repeat (the same sentence in two places); a change reworded in a
-    /// second place still needs a person to notice it.
+    /// Each change is told once: in one version, in one group. This catches the copy and paste
+    /// kind of repeat (the same sentence in two places); a change reworded in a second place still
+    /// needs a person to notice it.
     func testNothingIsSaidTwice() {
         var seen: [String: String] = [:]
         func check(_ text: String, _ place: String) {
@@ -334,21 +329,13 @@ final class ShippedReleaseNotesTests: XCTestCase {
         }
         for note in library.notes {
             var titles = Set<String>()
-            for feature in note.features {
-                XCTAssertTrue(titles.insert(feature.title.lowercased()).inserted, "\(note.id): two cards called \(feature.title)")
-                check(feature.body, "\(note.id), \(feature.title)")
-            }
-            for fix in note.fixes { check(fix, "\(note.id), Also in this version") }
-        }
-    }
-
-    /// A card's short line is for the What's New sheet, where the body is not shown, so it may
-    /// say the same thing as the body. It must not be the body itself: then it adds nothing.
-    func testABriefIsShorterThanItsCard() {
-        for note in library.notes {
-            for feature in note.features {
-                guard let brief = feature.brief else { continue }
-                XCTAssertLessThan(brief.count, feature.body.count, "\(note.id): \(feature.title) brief repeats its whole card")
+            for group in note.groups {
+                for item in group.items {
+                    if let title = item.title {
+                        XCTAssertTrue(titles.insert(title.lowercased()).inserted, "\(note.id): two changes called \(title)")
+                    }
+                    check(item.text, "\(note.id), \(group.title)")
+                }
             }
         }
     }
@@ -356,9 +343,9 @@ final class ShippedReleaseNotesTests: XCTestCase {
     #if canImport(AppKit)
     func testEverySymbolExists() {
         for note in library.notes {
-            for feature in note.features {
-                XCTAssertNotNil(NSImage(systemSymbolName: feature.symbol, accessibilityDescription: nil),
-                                "\(note.id): \"\(feature.symbol)\" is not an SF Symbol (\(feature.title))")
+            for group in note.groups {
+                XCTAssertNotNil(NSImage(systemSymbolName: group.symbol, accessibilityDescription: nil),
+                                "\(note.id): \"\(group.symbol)\" is not an SF Symbol (\(group.title))")
             }
         }
     }

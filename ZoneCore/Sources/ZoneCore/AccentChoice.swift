@@ -3,8 +3,7 @@
 import Foundation
 
 /// The one accent color, chosen in Settings and read by the app and the keyboard from the App
-/// Group, so a change recolors both. `hex` is the bright tone for dark surfaces and fills;
-/// `textHexOnLight` is a deeper tone of the same hue that keeps 4.5:1 on Zone's cream paper.
+/// Group on iPhone, and mirrored to Watch through WatchConnectivity.
 public enum AccentChoice: String, CaseIterable, Sendable {
     case violet, ice, ember, mint, rose
 
@@ -18,49 +17,53 @@ public enum AccentChoice: String, CaseIterable, Sendable {
         }
     }
 
-    public var hex: UInt32 {
+    public var lightHex: UInt32 {
         switch self {
-        case .violet: return 0x9B7DFF
-        case .ice: return 0x8EE8FF   // frost: pale, luminous cyan
-        case .ember: return 0xFF9A6B  // rich pastel coral-orange
-        case .mint: return 0xA9DEC4
-        case .rose: return 0xF2B8CF
-        }
-    }
-
-    public var textHexOnLight: UInt32 {
-        switch self {
-        case .violet: return 0x6A4BDB
-        case .ice: return 0x0A6B84
-        case .ember: return 0xA6461E
-        case .mint: return 0x32644D
-        case .rose: return 0x923D61
-        }
-    }
-
-    /// The accent as a shape on a light surface (the live wave, the level bars, the swipe trail):
-    /// the same hue, saturated and lowered until it holds 3:1 against the light keyboard backdrop
-    /// (#D1D3D9) and Zone's cream paper. The pale `hex` reads 1.1 to 2.4:1 there, a tint and not a
-    /// color; `textHexOnLight` is tuned for text and goes dull on a filled shape.
-    public var graphicHexOnLight: UInt32 {
-        switch self {
-        case .violet: return 0x7A52FF
+        case .violet: return 0x7149E8
         case .ice: return 0x007D9D
         case .ember: return 0xD14200
-        case .mint: return 0x16844E
-        case .rose: return 0xDB246D
+        case .mint: return 0x0E8657
+        case .rose: return 0xC44068
         }
     }
 
-    /// Dark ink stays readable on every pastel fill, in both appearances.
+    public var darkHex: UInt32 {
+        switch self {
+        case .violet: return 0xC48AFF
+        case .ice: return 0xA5D6E4
+        case .ember: return 0xFFA341
+        case .mint: return 0x8CE6BE
+        case .rose: return 0xF6ACBE
+        }
+    }
+
+    /// Broad colored controls share a fill and ink pair. Outlines and text still use the
+    /// surface-specific graphic accent so they stay readable on light paper.
+    public func controlFillHex(isDark: Bool) -> UInt32 {
+        switch (self, isDark) {
+        case (.ice, false): 0x8EE8FF
+        case (.ice, true): 0x9BC9D5
+        case (.ember, false): 0xFF9A6B
+        case (.violet, true): 0xAA73FF
+        default: isDark ? darkHex : lightHex
+        }
+    }
+
+    public func controlInkHex(isDark: Bool) -> UInt32 {
+        isDark || self == .ice || self == .ember ? foregroundHex : 0xFFFFFF
+    }
+
+    /// Label ink on dark-mode accent fills.
     public var foregroundHex: UInt32 { 0x262626 }
+
+    public static let defaultChoice: Self = .violet
 
     public static let defaultsKey = "zone.settings.accent"
 
-    private static let shared = UserDefaults(suiteName: ZoneContract.appGroup)
+    private static let shared = UserDefaults(suiteName: AppGroup.identifier)
 
     public static var current: AccentChoice {
-        get { stored ?? .violet }
+        get { stored ?? defaultChoice }
         set { shared?.set(newValue.rawValue, forKey: defaultsKey) }
     }
 
@@ -70,11 +73,13 @@ public enum AccentChoice: String, CaseIterable, Sendable {
     }
 }
 
-/// The keyboard's own copy of the last accent it read, in the keyboard's container. A fresh
-/// keyboard process whose first App Group read comes back empty keeps the color the person chose
-/// instead of drawing violet for that appearance (the same fault as `LastKeyboardPreferences`).
+/// The last choice read by an extension, kept in its own container so an empty App Group
+/// read can preserve the person's color while access is settling.
 public struct LastAccentChoice {
+    // Preserve the key shipped by the keyboard. Each extension has its own defaults domain.
     static let key = "zone.keyboard.lastAccent"
+
+    public static var current: AccentChoice { Self().resolve(stored: AccentChoice.stored) }
     private let defaults: UserDefaults
 
     public init(defaults: UserDefaults = .standard) {
@@ -83,32 +88,8 @@ public struct LastAccentChoice {
 
     public func resolve(stored: AccentChoice?) -> AccentChoice {
         let last = defaults.string(forKey: Self.key).flatMap(AccentChoice.init(rawValue:))
-        guard let stored else { return last ?? .violet }
+        guard let stored else { return last ?? AccentChoice.defaultChoice }
         if stored != last { defaults.set(stored.rawValue, forKey: Self.key) }
         return stored
-    }
-}
-
-/// The keyboard's face (keys or the compact dictation surface), kept in the keyboard's own
-/// container. Only the keyboard reads or writes it, and the App Group is out of reach without Full
-/// Access and can read empty in a fresh process, which opened the keys and then jumped to the
-/// compact face. The App Group copy is still written, and read once for a keyboard that has no
-/// local value yet.
-public struct LocalKeyboardMode {
-    static let key = "zone.keyboard.mode"
-    private let defaults: UserDefaults
-    private let store: SharedStore
-
-    public init(store: SharedStore, defaults: UserDefaults = .standard) {
-        self.store = store
-        self.defaults = defaults
-    }
-
-    public var mode: KeyboardMode {
-        get { defaults.string(forKey: Self.key).flatMap(KeyboardMode.init(rawValue:)) ?? store.keyboardMode }
-        nonmutating set {
-            defaults.set(newValue.rawValue, forKey: Self.key)
-            store.keyboardMode = newValue
-        }
     }
 }

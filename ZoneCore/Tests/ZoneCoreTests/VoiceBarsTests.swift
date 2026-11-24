@@ -78,3 +78,19 @@ final class VoiceBarsTests: XCTestCase {
         }
     }
 }
+
+extension VoiceBarsTests {
+    func testEnvelopeAttackReleaseAndRestAtBothRefreshRates() {
+        for hz in [60.0, 120.0] {
+            var value = 0.0
+            let attack = VoiceEnvelope.response(seconds: 1 / hz, rising: true)
+            let release = VoiceEnvelope.response(seconds: 1 / hz, rising: false)
+            for _ in 0..<Int(hz / 10) { value += (1 - value) * attack }
+            XCTAssertGreaterThan(value, 0.95)
+            for _ in 0..<Int(hz / 10) { value *= 1 - release }
+            XCTAssertEqual(value, 0.456, accuracy: 0.01)
+            for _ in 0..<Int(hz) { value *= 1 - release }
+            XCTAssertLessThan(value, 0.0005)
+        }
+    }
+}

@@ -4,6 +4,14 @@ import XCTest
 @testable import ZoneCore
 
 final class IslandMeterTests: XCTestCase {
+    func testDisplayLiftIsBoundedAndPreservesSilence() {
+        XCTAssertEqual(VoiceDisplayLevel.map(.nan), 0)
+        XCTAssertEqual(VoiceDisplayLevel.map(-1), 0)
+        XCTAssertEqual(VoiceDisplayLevel.map(2), 1)
+        XCTAssertEqual(VoiceDisplayLevel.map(0.5), 0.54, accuracy: 0.0001)
+        XCTAssertGreaterThan(VoiceDisplayLevel.map(0.08), 0.08)
+    }
+
     func testStartsSilentAtCapacity() {
         let meter = IslandMeter(samplesPerBar: 3, capacity: 13)
         XCTAssertEqual(meter.bars, Array(repeating: 0, count: 13))

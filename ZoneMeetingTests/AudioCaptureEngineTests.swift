@@ -9,6 +9,64 @@ import ZoneCore
 /// timing and the failures can be forced without a microphone.
 @MainActor
 final class AudioCaptureEngineTests: XCTestCase {
+    func testWarmDictationInterruptsPlaybackThenReleasesBeforeRearmingStandby() async throws {
+        let hardware = FakeCaptureHardware()
+        let capture = AudioCaptureEngine(hardware: hardware)
+        try await capture.arm()
+        defer { capture.disarm() }
+        XCTAssertEqual(hardware.snapshot.events, ["activate"])
+        capture.startRecording(pausingMusic: true)
+        await AudioHardwareQueue.drain()
+        XCTAssertEqual(hardware.snapshot.events.last, "interruptPlayback")
+        capture.stopRecording()
+        await AudioHardwareQueue.drain()
+        XCTAssertEqual(Array(hardware.snapshot.events.suffix(2)), ["deactivate", "activate"])
+        XCTAssertTrue(hardware.isRunning)
+    }
+
+    func testCancelledColdPressReleasesMusicButOrdinaryStandbyAndMeetingsMix() async throws {
+        let hardware = FakeCaptureHardware()
+        let capture = AudioCaptureEngine(hardware: hardware)
+        capture.recordOnArm { _ in }
+        try await capture.arm()
+        defer { capture.disarm() }
+        XCTAssertEqual(hardware.snapshot.events.first, "interruptPlayback")
+        capture.cancelRecordingOnArm()
+        await AudioHardwareQueue.drain()
+        capture.startRecording()
+        capture.stopRecording()
+        await AudioHardwareQueue.drain()
+        XCTAssertEqual(hardware.snapshot.events, ["interruptPlayback", "deactivate", "activate"])
+    }
+
+    func testEndingStandbyWhilePlaybackReleaseIsQueuedCannotRearmTheMic() async throws {
+        let hardware = FakeCaptureHardware()
+        let capture = AudioCaptureEngine(hardware: hardware)
+        try await capture.arm()
+        capture.startRecording(pausingMusic: true)
+        await AudioHardwareQueue.drain()
+        AudioHardwareQueue.async { Thread.sleep(forTimeInterval: 0.05) }
+        capture.stopRecording()
+        capture.disarm()
+        await AudioHardwareQueue.drain()
+        XCTAssertFalse(hardware.isRunning)
+        XCTAssertEqual(hardware.snapshot.events, ["activate", "interruptPlayback", "deactivate"])
+    }
+
+    func testColdDictationCanStillRecordWhenIOSRefusesAnInterruption() async throws {
+        let hardware = FakeCaptureHardware()
+        hardware.refusesMusicInterruption = true
+        let capture = AudioCaptureEngine(hardware: hardware)
+        capture.recordOnArm { _ in }
+        try await capture.arm()
+        defer { capture.disarm() }
+        XCTAssertTrue(hardware.isRunning)
+        XCTAssertEqual(hardware.snapshot.events, ["activate"])
+        capture.cancelRecordingOnArm()
+        await AudioHardwareQueue.drain()
+        XCTAssertEqual(hardware.snapshot.events, ["activate", "deactivate", "activate"])
+    }
+
     func testConcurrentArmsShareOneActivationOffTheMainThread() async throws {
         let hardware = FakeCaptureHardware()
         hardware.activationDelay = 0.2
@@ -231,6 +289,7 @@ final class FakeCaptureHardware: CaptureHardware, @unchecked Sendable {
     private let state = Locked(Snapshot())
     private let settings = Locked((delay: TimeInterval(0), exceptions: 0, started: false, onMain: false))
     private let failingStarts = Locked(0)
+    var refusesMusicInterruption = false
     /// How many `start` calls throw -10868 before one succeeds.
     var startErrors: Int {
         get { failingStarts.withLock { $0 } }
@@ -238,7 +297,10 @@ final class FakeCaptureHardware: CaptureHardware, @unchecked Sendable {
     }
     private let tap = Locked<AVAudioNodeTapBlock?>(nil)
     private let callback = Locked<(@Sendable () -> Void)?>(nil)
-    private let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 1, interleaved: false)!
+    private let format: AVAudioFormat
+    init(sampleRate: Double = 48_000) {
+        format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false)!
+    }
 
     var snapshot: Snapshot { state.withLock { $0 } }
     var activationDelay: TimeInterval {
@@ -258,7 +320,8 @@ final class FakeCaptureHardware: CaptureHardware, @unchecked Sendable {
         set { callback.withLock { $0 = newValue } }
     }
 
-    func activateSession() throws {
+    func activateSession(mixing: Bool) throws {
+        if !mixing, refusesMusicInterruption { throw NSError(domain: NSOSStatusErrorDomain, code: -1) }
         let delay = settings.withLock { value -> TimeInterval in
             value.started = true
             value.onMain = Thread.isMainThread
@@ -268,7 +331,7 @@ final class FakeCaptureHardware: CaptureHardware, @unchecked Sendable {
         state.withLock {
             $0.activations += 1
             $0.sessionActive = true
-            $0.events.append("activate")
+            $0.events.append(mixing ? "activate" : "interruptPlayback")
         }
     }
 
@@ -299,6 +362,7 @@ final class FakeCaptureHardware: CaptureHardware, @unchecked Sendable {
     func removeTap() { tap.withLock { $0 = nil } }
     func prepare() {}
 
+    var deliverFirstBufferOnStart = false
     func start() throws {
         state.withLock { $0.starts += 1 }
         let fails = failingStarts.withLock { left -> Bool in
@@ -308,6 +372,7 @@ final class FakeCaptureHardware: CaptureHardware, @unchecked Sendable {
         }
         if fails { throw NSError(domain: "com.apple.coreaudio.avfaudio", code: -10868) }
         state.withLock { $0.running = true }
+        if deliverFirstBufferOnStart { deliverBuffer(value: 0.25, synchronous: true) }
     }
 
     func stop() { state.withLock { $0.running = false } }
@@ -332,13 +397,14 @@ final class FakeCaptureHardware: CaptureHardware, @unchecked Sendable {
     }
 
     /// One 2048-frame buffer of a quiet tone through the installed tap.
-    func deliverBuffer() {
+    func deliverBuffer(value: Float? = nil, synchronous: Bool = false) {
         guard let block = tap.withLock({ $0 }),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2048) else { return }
         buffer.frameLength = 2048
         for index in 0..<Int(buffer.frameLength) {
-            buffer.floatChannelData![0][index] = 0.1 * sin(Float(index) * 0.05)
+            buffer.floatChannelData![0][index] = value ?? (0.1 * sin(Float(index) * 0.05))
         }
-        AudioHardwareQueue.async { block(buffer, AVAudioTime(hostTime: 0)) }
+        if synchronous { block(buffer, AVAudioTime(hostTime: 0)) }
+        else { AudioHardwareQueue.async { block(buffer, AVAudioTime(hostTime: 0)) } }
     }
 }

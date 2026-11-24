@@ -226,7 +226,9 @@ public enum LinkEncoding {
 
     /// The whole library as items, in no particular order.
     public static func library(dictations: [TranscriptRecord], notes: [LibraryNote], meetings: [Meeting]) -> [LinkItem] {
-        dictations.compactMap { item($0) } + notes.compactMap { item($0) } + meetings.compactMap { item($0) }
+        let saved = Set(notes.compactMap(\.recordingID))
+        let history = dictations.filter { $0.status != .note && !saved.contains($0.id) }
+        return history.compactMap { item($0) } + notes.compactMap { item($0) } + meetings.compactMap { item($0) }
     }
 
     /// Unix seconds, the protocol's clock.

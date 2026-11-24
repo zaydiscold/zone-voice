@@ -16,7 +16,7 @@ struct SignalLevelMeter: UIViewRepresentable {
 
     let levels: [Float]
     var barCount = 32
-    var color: UIColor = .systemPurple
+    var color: UIColor
     /// Bar plus gap, in points. When set, the width decides the bar count instead of `barCount`.
     var barPitch: CGFloat? = nil
     var shape = Shape.trail
@@ -34,7 +34,7 @@ struct SignalLevelMeter: UIViewRepresentable {
         private var fixedCount = 32
         private var pitch: CGFloat?
         private var shape = Shape.trail
-        private var color: UIColor = .systemPurple
+        private var color: UIColor = .clear
 
         /// The fixed count, or what fits the current width at the requested pitch.
         private var resolvedCount: Int {
@@ -51,7 +51,7 @@ struct SignalLevelMeter: UIViewRepresentable {
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
         func update(levels: [Float], count: Int, pitch: CGFloat?, shape: Shape = .trail, color: UIColor, animated: Bool) {
-            let finiteLevels = levels.map { $0.isFinite ? min(max($0, 0), 1) : 0 }
+            let finiteLevels = levels.map(VoiceDisplayLevel.map)
             fixedCount = count
             self.pitch = pitch
             let reshaped = shape != self.shape

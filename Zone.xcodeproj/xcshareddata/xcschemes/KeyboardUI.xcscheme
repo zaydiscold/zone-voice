@@ -21,6 +21,20 @@
                ReferencedContainer = "container:Zone.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "EE076C2D2BBAEF739886F9CB"
+               BuildableName = "Zone.app"
+               BlueprintName = "Zone"
+               ReferencedContainer = "container:Zone.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction

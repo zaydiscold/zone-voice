@@ -1,11 +1,17 @@
 // by zayd/cold @ zayd.wtf
 
 import Messages
+import notify
 import SwiftUI
 import UIKit
 
 final class MessagesViewController: MSMessagesAppViewController {
     private let model = MessagesNotesModel()
+    private var cacheToken: Int32 = -1
+    deinit {
+        if cacheToken >= 0 { notify_cancel(cacheToken) }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         let controller = UIHostingController(rootView: MessagesNotesView(model: model, insert: { [weak self] item in
@@ -23,6 +29,9 @@ final class MessagesViewController: MSMessagesAppViewController {
             controller.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
         controller.didMove(toParent: self)
+        notify_register_dispatch(CompanionShareCache.clearedNotification, &cacheToken, .main) { [weak self] _ in
+            self?.model.reload()
+        }
         model.reload()
     }
     override func willBecomeActive(with conversation: MSConversation) { model.reload() }
@@ -36,6 +45,8 @@ final class MessagesViewController: MSMessagesAppViewController {
     }
     private func insert(_ item: CompanionShareItem) {
         guard !model.isInserting else { return }
+        model.reload()
+        guard model.items.contains(item) else { return }
         guard let conversation = activeConversation else {
             model.message = "Open a conversation, then choose a note."
             return
@@ -60,7 +71,9 @@ final class MessagesNotesModel: ObservableObject {
     @Published var items: [CompanionShareItem] = []
     @Published var message: String?
     @Published var isInserting = false
+    @Published private(set) var accent = LastAccentChoice.current
     func reload() {
+        accent = LastAccentChoice.current
         do {
             guard let url = CompanionShareCache.url else { throw CompanionNoteError.invalidPayload }
             let cache = try CompanionShareCache.read(from: url)
@@ -75,6 +88,7 @@ final class MessagesNotesModel: ObservableObject {
 
 private struct MessagesNotesView: View {
     @ObservedObject var model: MessagesNotesModel
+    @Environment(\.colorScheme) private var scheme
     let insert: (CompanionShareItem) -> Void
     let openZone: () -> Void
     @State private var search = ""
@@ -129,6 +143,6 @@ private struct MessagesNotesView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .tint(.purple)
+        .tint(Color(hex: scheme == .dark ? model.accent.darkHex : model.accent.lightHex))
     }
 }

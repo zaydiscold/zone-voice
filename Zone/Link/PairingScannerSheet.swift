@@ -72,7 +72,7 @@ struct PairingScannerSheet: View {
                 access = await AVCaptureDevice.requestAccess(for: .video) ? .authorized : .denied
             }
         }
-        .tint(Zone.accentText(scheme))
+        .tint(Zone.inlineInk(scheme))
     }
 
     private func unavailable(_ title: String, _ detail: String) -> some View {

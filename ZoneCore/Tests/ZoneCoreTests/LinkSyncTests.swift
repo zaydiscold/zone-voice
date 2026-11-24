@@ -505,6 +505,67 @@ final class LinkStoreTests: XCTestCase {
         XCTAssertEqual(store.delivery(for: "a"), LinkDeliveryState())
     }
 
+    func testUnreadableDeletionLogPreservesBytesAndRetriesAfterRepair() throws {
+        let url = directory.appendingPathComponent("deletions.json")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let damaged = Data("unreadable".utf8)
+        try damaged.write(to: url)
+        let id = UUID()
+        let log = LinkDeletionLog(fileURL: url)
+        log.record([id], kind: .note)
+        XCTAssertEqual(try Data(contentsOf: url), damaged)
+        XCTAssertEqual(LinkDeletionLog(fileURL: url).all().map(\.id), [id.uuidString])
+        try Data("[]".utf8).write(to: url)
+        XCTAssertEqual(log.all().map(\.id), [id.uuidString])
+        XCTAssertEqual(LinkDeletionLog(fileURL: url).all().map(\.id), [id.uuidString])
+    }
+
+    func testSpareAndPruneWhileTheDeletionLogIsDamaged() throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("deletions.json")
+        try Data("damaged".utf8).write(to: url)
+        let log = LinkDeletionLog(fileURL: url)
+        let first = UUID(), second = UUID()
+        log.record([first, second], kind: .note)
+        log.spare("desktop")
+        log.prune { $0.id == first.uuidString }
+        try Data("[]".utf8).write(to: url)
+        let reopened = LinkDeletionLog(fileURL: url).all()
+        XCTAssertEqual(reopened.map(\.id), [first.uuidString])
+        XCTAssertEqual(reopened.first?.keptBy, ["desktop"])
+    }
+
+    func testTwoDeletionLogsKeepAllConcurrentRequests() {
+        let url = directory.appendingPathComponent("deletions.json")
+        let ids = (0..<24).map { _ in UUID() }
+        DispatchQueue.concurrentPerform(iterations: ids.count) { index in
+            LinkDeletionLog(fileURL: url).record([ids[index]], kind: .note)
+        }
+        XCTAssertEqual(Set(LinkDeletionLog(fileURL: url).all().map(\.id)), Set(ids.map(\.uuidString)))
+    }
+
+    func testBrokenRetryBytesDoNotBlockNewComputerDeletions() throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("deletions.json")
+        let broken = Data("broken".utf8)
+        try broken.write(to: file.appendingPathExtension("retry"))
+        let log = LinkDeletionLog(fileURL: file)
+        let id = UUID()
+        XCTAssertTrue(log.record([id], kind: .note))
+        XCTAssertEqual(log.all().map(\.id), [id.uuidString])
+        let saved = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        XCTAssertTrue(saved.contains { $0.lastPathComponent.contains("damaged") && (try? Data(contentsOf: $0)) == broken })
+    }
+
+    func testOfflineDeletionsSurviveMoreThanTwentyThousandRecords() {
+        let url = directory.appendingPathComponent("deletions.json")
+        let ids = (0..<20_001).map { _ in UUID() }
+        LinkDeletionLog(fileURL: url).record(ids, kind: .note)
+        let saved = LinkDeletionLog(fileURL: url).all()
+        XCTAssertEqual(saved.count, ids.count)
+        XCTAssertEqual(saved.first?.id, ids.first?.uuidString)
+    }
+
     func testDeletionLogKeepsOneEntryPerRecordAndClears() {
         let log = LinkDeletionLog(fileURL: directory.appendingPathComponent("deletions.json"))
         let id = UUID()

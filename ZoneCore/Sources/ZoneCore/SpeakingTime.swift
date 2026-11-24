@@ -2,11 +2,8 @@
 
 import Foundation
 
-/// How long a recording spent on speech, for words per minute. Recording time also holds the
-/// start, the thinking pauses and the quiet before Stop: measured on 1,501 dictations that dead
-/// time was 18% of all recording, about 2.4 s per dictation however much was said, so a short
-/// reply scored half the speed of a long one. Wispr Flow measures the same way ("speech duration
-/// excludes silence when available"), so the two numbers compare.
+/// Estimates voiced time for offline comparisons. Home and the standby session use recorded
+/// minutes instead, including time spent thinking. This gate is not Wispr Flow's detector.
 ///
 /// The audio is cut into 100 ms frames, and a frame is speech when it clears the bars
 /// `TrailingSilenceGate` uses: an absolute floor, 5% of a decaying peak, and three times the

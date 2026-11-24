@@ -2,68 +2,119 @@
 
 import SwiftUI
 
-/// Home's two spaces.
+/// Declaration order is the order of both the keys and the swipe destinations.
 enum HomeMode: String, CaseIterable {
-    case transcribe, meeting, cleanup
+    case transcribe, meeting
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .transcribe: "Transcribe"
+        case .meeting: "Meeting"
+        }
+    }
+
+    var hint: LocalizedStringKey {
+        switch self {
+        case .transcribe: "Dictation"
+        case .meeting: "Record a meeting and get a transcript"
+        }
+    }
 }
 
-/// Home navigation. The meeting indicator remains visible while another page is open.
+/// Only the switch observes frame-by-frame travel. Home commits page ownership at rest.
+@Observable final class HomePageTravel {
+    var position: CGFloat?
+}
+
+/// Home navigation. An ongoing recording is marked on its key while another page is open.
 struct HomeModeSwitch: View {
     @Binding var mode: HomeMode
-    var recording = false
+    @ScaledMetric(relativeTo: .footnote) private var keyWidth: CGFloat = 80
+    let travel: HomePageTravel
+    var meetingRecording = false
+    var dictationRecording = false
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Namespace private var fill
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         HStack(spacing: 0) {
-            segment(.transcribe) { Text("Transcribe") }
-            segment(.meeting) {
-                HStack(spacing: 6) {
-                    if recording && mode != .meeting {
-                        Circle().fill(Zone.accentGraphic).frame(width: 7, height: 7)
-                            .accessibilityLabel("Recording")
-                    }
-                    Text("Meeting")
+            ForEach(HomeMode.allCases, id: \.self) { value in
+                segment(value)
+            }
+        }
+        .foregroundStyle(Zone.muted(scheme))
+        .background { movingKey.foregroundStyle(Zone.ink(scheme)) }
+        .overlay {
+            HStack(spacing: 0) {
+                ForEach(HomeMode.allCases, id: \.self) { value in
+                    keyLabel(value)
                 }
             }
-            segment(.cleanup) { Text("Cleanup") }
+            .foregroundStyle(Zone.onInk(scheme))
+            .mask { movingKey }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
-        .padding(3)
-        .background(Zone.card(scheme), in: Capsule())
-        .overlay(Capsule().strokeBorder(Zone.rule(scheme), lineWidth: 1))
-        // Like the system's tab bars and segmented controls, the switch stops growing at the
-        // largest standard size; past it the labels would push History and Settings off screen.
-        // VoiceOver and Large Content still read every segment.
-        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        // The 32-point track sits inside two full-height tap targets.
+        .padding(.horizontal, 2)
+        .background {
+            Zone.cardShape.fill(Zone.card(scheme)).sunShadow(scale: 0.6)
+                .padding(.vertical, 6)
+        }
+        .overlay {
+            if contrast == .increased {
+                Zone.cardShape.strokeBorder(Zone.rule(scheme), lineWidth: 1)
+                    .padding(.vertical, 6)
+                    .allowsHitTesting(false)
+            }
+        }
         .accessibilityElement(children: .contain)
     }
 
-    private func segment<Label: View>(_ value: HomeMode, @ViewBuilder label: () -> Label) -> some View {
+    private var movingKey: some View {
+        GeometryReader { bounds in
+            let width = bounds.size.width / CGFloat(HomeMode.allCases.count)
+            let position = travel.position ?? CGFloat(HomeMode.allCases.firstIndex(of: mode) ?? 0)
+            HStack(spacing: 0) {
+                Color.clear.frame(width: position * width)
+                RoundedRectangle(cornerRadius: Zone.cardRadius - 2, style: .continuous)
+                    .frame(width: width)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.vertical, 8)
+        .transaction { $0.animation = nil }
+    }
+
+    private func keyLabel(_ value: HomeMode) -> some View {
+        let recording = (value == .meeting && meetingRecording) || (value == .transcribe && dictationRecording)
+        return HStack(spacing: 4) {
+            if recording && mode != value {
+                Circle().fill(Zone.accentTone(scheme)).frame(width: 7, height: 7)
+                    .accessibilityLabel("Recording")
+            }
+            Text(value.title)
+        }
+        .font(.footnote.weight(.semibold))
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        .padding(.horizontal, 6)
+        .frame(width: keyWidth)
+        .frame(minHeight: 44)
+    }
+
+    private func segment(_ value: HomeMode) -> some View {
         let selected = mode == value
         return Button {
-            guard !selected else { return }
-            Haptics.tap()
-            withAnimation(reduceMotion ? nil : .timingCurve(0.22, 1, 0.36, 1, duration: 0.35)) { mode = value }
+            if !selected { Haptics.tap() }
+            withAnimation(reduceMotion ? nil : .snappy(duration: 0.28)) { mode = value }
         } label: {
-            label()
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(selected ? Zone.onInk(scheme) : Zone.muted(scheme))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .padding(.horizontal, 6)
-                // Equal thirds: the switch runs from the page's margin to the icons, like every
-                // other block on Home, instead of ending wherever its labels do.
-                .frame(maxWidth: .infinity, minHeight: 38)
-                .background {
-                    if selected {
-                        Capsule().fill(Zone.ink(scheme)).matchedGeometryEffect(id: "fill", in: fill)
-                    }
-                }
-                .contentShape(Capsule())
+            keyLabel(value).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? [.isSelected] : [])
-        .accessibilityHint(value == .meeting ? "Record a meeting and get a transcript" : value == .cleanup ? "Review a cleaned version of your words" : "Dictation")
+        .accessibilityHint(value.hint)
+        .accessibilityIdentifier("home.mode." + value.rawValue)
     }
 }

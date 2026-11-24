@@ -43,6 +43,125 @@ final class LibraryBackupManagerTests: XCTestCase {
         return (dictation, meetings)
     }
 
+    func testExportKeepsNotesAndExcludesSavedClipboardText() async throws {
+        let clipboard = try XCTUnwrap(ClipboardHistory.shared)
+        let marker = UUID().uuidString
+        guard case .saved(let copy) = clipboard.add(marker, route: .saved) else { return XCTFail("Seed copy") }
+        defer { XCTAssertTrue(clipboard.delete(id: copy.id)) }
+        let notes = NotesStore(url: try temporaryFolder().appendingPathComponent("notes.json"))
+        let note = try XCTUnwrap(notes.add("Included in the export"))
+        let (_, meetings) = try makeCoordinators()
+        let package = try await LibraryBackupManager(defaults: defaults(), history: TranscriptHistory(directory: try temporaryFolder()))
+            .export(notes: notes, meetings: meetings)
+        roots.append(package)
+        XCTAssertTrue(try LibraryBackupFiles.read(package).notes.contains { $0.id == note.id })
+        let files = try XCTUnwrap(FileManager.default.enumerator(at: package, includingPropertiesForKeys: [.isRegularFileKey]))
+        for case let file as URL in files.allObjects where try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+            XCTAssertNil(try Data(contentsOf: file).range(of: Data(marker.utf8)), file.lastPathComponent)
+        }
+    }
+
+    func testVocabularySurvivesMovingToAnEmptyPhone() async throws {
+        let source = PersonalVocabulary(fileURL: try temporaryFolder().appendingPathComponent("words.json"))
+        let target = PersonalVocabulary(fileURL: try temporaryFolder().appendingPathComponent("words.json"))
+        try source.add(["QuillBerry"])
+        try source.addHandles(["quillberry"])
+        try source.learnCorrection("FernSpark", heard: "furnsparc")
+        var choices = DoubtMemory()
+        choices.record(heard: "kwill", chosen: "QuillBerry")
+        _ = try source.exchangeKeyboard(typed: ["fernPod"], previously: [], choices: choices)
+        let (_, meetings) = try makeCoordinators()
+        let sourceNotes = NotesStore(url: try temporaryFolder().appendingPathComponent("notes.json"))
+        let targetNotes = NotesStore(url: try temporaryFolder().appendingPathComponent("notes.json"))
+        let package = try await LibraryBackupManager(defaults: defaults(), history: TranscriptHistory(directory: try temporaryFolder()), vocabulary: source)
+            .export(notes: sourceNotes, meetings: meetings)
+        roots.append(package)
+        let importer = LibraryBackupManager(defaults: defaults(), history: TranscriptHistory(directory: try temporaryFolder()), vocabulary: target)
+        for _ in 0..<2 {
+            _ = try await importer.restore(package, notes: targetNotes, meetings: meetings)
+            XCTAssertEqual(try target.document(), try source.document())
+        }
+    }
+
+    func testRestoreChecksTheNotesDestinationBeforeImporting() async throws {
+        let root = try temporaryFolder()
+        let row = TranscriptRecord(id: UUID(), text: "restore check", createdAt: Date(), updatedAt: Date(),
+                                   audioSeconds: 1, engine: "test", source: .app, status: .finished)
+        let backup = LibraryBackup(notes: [LibraryNote(text: "synthetic")], dictations: [row], meetings: [])
+        try LibraryBackupFiles.write(backup, to: root, meetingDirectory: root)
+        let blocker = try temporaryFolder().appendingPathComponent("file")
+        try Data().write(to: blocker)
+        let history = TranscriptHistory(directory: try temporaryFolder())
+        let manager = LibraryBackupManager(defaults: defaults(), history: history)
+        defer { XCTAssertNil(history.record(id: row.id)) }
+        let notes = NotesStore(url: blocker.appendingPathComponent("notes.json"))
+        let (_, meetings) = try makeCoordinators()
+        do {
+            _ = try await manager.restore(root, notes: notes, meetings: meetings)
+            XCTFail("The notes destination refused the write")
+        } catch {
+            XCTAssertTrue(manager.lastError?.contains("No store finished") == true)
+            XCTAssertTrue(manager.lastError?.contains("notes") == true)
+        }
+    }
+
+    func testRestoreReportsWhichStoresFinishedBeforeNotesFailed() async throws {
+        let root = try temporaryFolder()
+        let row = TranscriptRecord(id: UUID(), text: "first", createdAt: Date(), updatedAt: Date(), audioSeconds: 1,
+                                   engine: "test", source: .app, status: .finished)
+        let backup = LibraryBackup(notes: [LibraryNote(text: "synthetic")], dictations: [row], meetings: [])
+        try LibraryBackupFiles.write(backup, to: root, meetingDirectory: root)
+        let folder = try temporaryFolder()
+        let destination = folder.appendingPathComponent("notes.json")
+        let history = TranscriptHistory(directory: try temporaryFolder())
+        let manager = LibraryBackupManager(defaults: defaults(), history: history)
+        let notes = NotesStore(url: destination)
+        let token = NotificationCenter.default.addObserver(forName: .init("ZoneLibraryDidChange"), object: nil, queue: nil) { _ in
+            guard history.record(id: row.id) != nil else { return }
+            try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+        let (_, meetings) = try makeCoordinators()
+        do {
+            _ = try await manager.restore(root, notes: notes, meetings: meetings)
+            XCTFail("The notes destination refused the write")
+        } catch {
+            XCTAssertTrue(manager.lastError?.contains("0 meetings") == true)
+            XCTAssertTrue(manager.lastError?.contains("1 dictation") == true)
+            XCTAssertTrue(manager.lastError?.contains("notes") == true)
+        }
+    }
+
+    func testLegacyBackupRestoresAlongsideExistingVocabulary() async throws {
+        let root = try temporaryFolder()
+        let source = LibraryBackup(notes: [LibraryNote(text: "Synthetic note")], dictations: [], meetings: [])
+        try LibraryBackupFiles.write(source, to: root, meetingDirectory: root)
+        let words = PersonalVocabulary(fileURL: try temporaryFolder().appendingPathComponent("words.json"))
+        try words.add(["FernSpark"])
+        let manager = LibraryBackupManager(defaults: defaults(), history: TranscriptHistory(directory: try temporaryFolder()), vocabulary: words)
+        let notes = NotesStore(url: try temporaryFolder().appendingPathComponent("notes.json"))
+        let (_, meetings) = try makeCoordinators()
+        _ = try await manager.restore(root, notes: notes, meetings: meetings)
+        XCTAssertEqual(notes.notes.map(\.text), ["Synthetic note"])
+        XCTAssertEqual(try words.words(), ["FernSpark"])
+    }
+
+    func testFolderBackupDetectsVocabularyOnlyChanges() async throws {
+        let folder = try temporaryFolder()
+        let words = PersonalVocabulary(fileURL: try temporaryFolder().appendingPathComponent("words.json"))
+        let manager = LibraryBackupManager(defaults: defaults(), history: TranscriptHistory(directory: try temporaryFolder()),
+                                          vocabulary: words, minimumInterval: 0)
+        let notes = NotesStore(url: try temporaryFolder().appendingPathComponent("notes.json"))
+        let (_, meetings) = try makeCoordinators()
+        try await manager.selectFolder(folder)
+        try words.add(["QuillBerry"])
+        await manager.saveNow(notes: notes, meetings: meetings)
+        try words.save(["FernSpark"], replacing: ["QuillBerry"])
+        await manager.saveAutomatically(notes: notes, meetings: meetings)
+        let backup = try LibraryBackupFiles.read(folder.appendingPathComponent("Zone library.zonebackup"))
+        XCTAssertEqual(backup.vocabulary?.words, ["FernSpark", "QuillBerry"])
+    }
+
     private func written(_ folder: URL) -> Date? {
         let manifest = folder.appendingPathComponent("Zone library.zonebackup/library.json")
         return try? manifest.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate

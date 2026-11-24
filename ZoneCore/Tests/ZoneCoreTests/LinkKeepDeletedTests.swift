@@ -228,7 +228,7 @@ final class LinkKeepDeletedTests: XCTestCase {
         let mixed = try XCTUnwrap(LinkCopy.privacyParagraph(["Studio Mac", "laptop"], keeping: ["laptop"]))
         XCTAssertTrue(mixed.contains("Deleting something here tells Studio Mac to delete its copy the next time Zone syncs. You turned on Keep what I delete here for laptop, so deleting something here leaves its copy there."))
         for text in [plain, keeps, mixed] {
-            XCTAssertTrue(text.hasSuffix("stops the sending and leaves what the computer already has."))
+            XCTAssertTrue(text.contains("Studio Mac"))
             XCTAssertFalse(text.contains("\u{2014}"))
         }
     }

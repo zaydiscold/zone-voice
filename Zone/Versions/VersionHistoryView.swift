@@ -3,7 +3,7 @@
 import SwiftUI
 import ZoneCore
 
-/// Settings > Version: every version of Zone up to the installed one, newest first, as a
+/// Settings > About > Version: every version of Zone up to the installed one, newest first, as a
 /// timeline. The installed version is marked, and each row opens that version's notes.
 struct VersionHistoryView: View {
     @Environment(WhatsNewGate.self) private var gate
@@ -25,7 +25,7 @@ struct VersionHistoryView: View {
                     .padding(.bottom, 24)
                 if let unwritten {
                     VersionTimelineRow(isInstalled: true, isLast: notes.isEmpty) {
-                        VersionCard(version: unwritten.description, date: nil, isInstalled: true,
+                        VersionCard(version: unwritten.description, name: nil, date: nil, isInstalled: true,
                                     summary: "The notes for this version are not written yet.", symbols: [], opens: false)
                     }
                     .accessibilityIdentifier("versionHistory.unwritten")
@@ -36,8 +36,9 @@ struct VersionHistoryView: View {
                         NavigationLink {
                             ReleaseNotesView(note: note)
                         } label: {
-                            VersionCard(version: note.version.description, date: note.day?.date(), isInstalled: installed,
-                                        summary: note.summary, symbols: note.features.map(\.symbol), opens: true)
+                            VersionCard(version: note.version.description, name: note.name, date: note.day?.date(),
+                                        isInstalled: installed, summary: note.summary, symbols: note.groups.map(\.symbol),
+                                        opens: true)
                         }
                         .buttonStyle(ScaleButtonStyle())
                         .accessibilityHint("Opens the notes for this version")
@@ -64,6 +65,7 @@ struct VersionHistoryView: View {
         }
         .scrollIndicators(.hidden)
         .navigationTitle("Version history")
+        .onAppear { gate.readLibraryIfNeeded() }
         .zoneBackButton()
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -86,8 +88,8 @@ private struct VersionTimelineRow<Content: View>: View {
         HStack(alignment: .top, spacing: 12) {
             VStack(spacing: 0) {
                 Circle()
-                    .fill(isInstalled ? Zone.accentGraphic(scheme) : Zone.paper(scheme))
-                    .overlay(Circle().strokeBorder(isInstalled ? Zone.accentGraphic(scheme) : Zone.muted(scheme).opacity(0.6), lineWidth: 1.5))
+                    .fill(isInstalled ? Zone.accentTone(scheme) : Zone.paper(scheme))
+                    .overlay(Circle().strokeBorder(isInstalled ? Zone.accentStroke(scheme) : Zone.muted(scheme).opacity(0.6), lineWidth: 1.5))
                     .frame(width: 11, height: 11)
                     .padding(.top, 24)
                 if !isLast {
@@ -102,11 +104,13 @@ private struct VersionTimelineRow<Content: View>: View {
     }
 }
 
-/// A version in the list: its number in the serif, the date, one sentence, and the pictures of
-/// its features as a hint of what is inside.
+/// A version in the list: its number in the serif, the date and name, one sentence, and the
+/// pictures of its groups as a hint of what is inside.
 private struct VersionCard: View {
     @Environment(\.colorScheme) private var scheme
     let version: String
+    /// What the update is called, when it has a name.
+    let name: String?
     let date: Date?
     let isInstalled: Bool
     let summary: String
@@ -130,8 +134,8 @@ private struct VersionCard: View {
                         .accessibilityHidden(true)
                 }
             }
-            if let date {
-                Text(date.formatted(date: .long, time: .omitted))
+            if let line = dateLine {
+                Text(line)
                     .font(.footnote)
                     .foregroundStyle(Zone.muted(scheme))
             }
@@ -145,7 +149,7 @@ private struct VersionCard: View {
                     ForEach(Array(symbols.prefix(6).enumerated()), id: \.offset) { _, symbol in
                         Image(systemName: ReleaseSymbol.name(symbol))
                             .font(.footnote.weight(.medium))
-                            .foregroundStyle(Zone.accentText(scheme))
+                            .foregroundStyle(Zone.accentTone(scheme))
                             .frame(width: 18, height: 18)
                     }
                     if symbols.count > 6 {
@@ -161,7 +165,7 @@ private struct VersionCard: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background { shape.fill(Zone.card(scheme)).sunShadow(scale: 0.8) }
-        .overlay(shape.strokeBorder(isInstalled ? Zone.accentGraphic(scheme).opacity(0.7) : Zone.rule(scheme), lineWidth: 1))
+        .overlay(shape.strokeBorder(isInstalled ? Zone.accentStroke(scheme).opacity(0.7) : Zone.rule(scheme), lineWidth: 1))
         .contentShape(shape)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(label)
@@ -174,10 +178,17 @@ private struct VersionCard: View {
         if isInstalled { InstalledPill() }
     }
 
+    /// "November 20, 2026 · The Curate update", or whichever half the version has.
+    private var dateLine: String? {
+        let parts = [date?.formatted(date: .long, time: .omitted), name.map { "The \($0) update" }].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " \u{00B7} ")
+    }
+
     private var label: String {
         var parts = ["Version \(version)"]
         if isInstalled { parts.append("installed on this iPhone") }
         if let date { parts.append(date.formatted(date: .long, time: .omitted)) }
+        if let name { parts.append("the \(name) update") }
         return parts.joined(separator: ", ") + ". " + summary
     }
 }

@@ -1,12 +1,15 @@
 // by zayd/cold @ zayd.wtf
 
+import AVFAudio
 import Foundation
 import Observation
 import ZoneCore
 import UIKit
 
-/// The mic button's state machine. It never records: it writes a request for the app, waits
-/// for the app's status, and inserts the result exactly once when the field still matches.
+/// The mic button's state machine. It writes a request for the app, waits for the app's status,
+/// and inserts the result exactly once when the field still matches. With Zone not keeping the
+/// microphone ready it may record in the keyboard instead (`LocalDictationHost`), whose text
+/// comes back through the same result path.
 @MainActor
 @Observable
 final class MicController {
@@ -25,17 +28,45 @@ final class MicController {
         case undone(text: String)
         case error(String)
 
-        /// The states that show the style pill, so the style row may open over them.
+        var offeredResult: DictationResult? {
+            switch self {
+            case .pendingInsert(let result, _), .recovery(let result): return result
+            default: return nil
+            }
+        }
+
+        var ownsTypingStrip: Bool {
+            switch self {
+            case .idle, .inserted, .undone:
+                return false
+            case .needsFullAccess, .requesting, .recording, .transcribing, .inApp, .pendingInsert, .recovery, .error:
+                return true
+            }
+        }
+
+        var allowsPanel: Bool {
+            switch self {
+            case .idle, .inserted, .undone, .error, .needsFullAccess, .inApp: return true
+            default: return false
+            }
+        }
+
         var allowsStyleChoice: Bool {
             switch self {
-            case .idle, .inserted, .undone, .error: return true
+            case .idle, .inserted, .undone: return true
             default: return false
             }
         }
     }
 
+    private(set) var pressMessage: String?
     private(set) var state: State = .idle {
         didSet {
+            if oldValue != state { pressMessage = nil }
+            if !state.allowsPanel { panelSection = nil }
+            if state.ownsTypingStrip != oldValue.ownsTypingStrip {
+                onTypingStripOwnershipChanged?(state.ownsTypingStrip)
+            }
             if case .recording = state {} else { isPaused = false }
             // Unsure words belong to the insert on screen; anything else ends them.
             if case .inserted = state {} else if !doubts.isEmpty || doubtReview != nil {
@@ -63,6 +94,9 @@ final class MicController {
     private(set) var levels: [Float] = Array(repeating: 0, count: 32)
     /// A gentle hint after eight continuous seconds of low input; it never stops recording.
     private(set) var hearsNothing = false
+    /// Seconds until Finish when quiet ends the recording, from the app with each level; nil when
+    /// it is off or not counting down. The strip shows it in place of the clock.
+    private(set) var quietFinishIn: Int?
     /// The current recording is held: the app drops audio until Resume.
     private(set) var isPaused = false
     /// The app's level posts while a recording is on screen (see `LevelChannel`).
@@ -81,10 +115,44 @@ final class MicController {
     private(set) var mode: KeyboardMode = .type
     /// The controller animates its height constraint here.
     var onModeChanged: ((KeyboardMode) -> Void)?
+    /// The view a dictation recorded in the keyboard puts its hidden web view in (`LocalDictation`).
+    var captureHost: () -> UIView? = { nil }
+    /// Records in the keyboard when Zone is not keeping the microphone ready. Process-wide, so a
+    /// dictation outlives the controller that started it (`LocalDictationHost`).
+    private let localHost: LocalDictationHost
+    /// The request the keyboard itself is recording or recognizing, and this controller shows.
+    /// Nothing in the shared store describes it until its text is ready, so the app can never
+    /// mistake it for its own. While it is set the local path is authoritative: no app status
+    /// changes this controller's state.
+    private var localRequest: DictationRequest?
+    private var localProbe: Task<Void, Never>?
+    /// The app's switches as the keyboard last read them (`LastKeyboardPreferences`), wired by
+    /// the controller; an unreadable record must not read as defaults.
+    let preferenceReader: KeyboardSettingReader
+    func readPreferences() -> KeyboardPreferences { preferenceReader.current() }
+    /// Whether this iPhone can record here at all: iOS 26 and Zone's microphone permission.
+    private var microphoneObservation = KeyboardCapture.PermissionObservation()
+    var localCapability: () -> (systemSupports: Bool, microphoneGranted: Bool?) = {
+        let permission = AVAudioApplication.shared.recordPermission
+        return (LocalDictation.systemSupports, permission == .undetermined ? nil : permission == .granted)
+    }
+    /// My words, learned fixes and handles, and the contact and app names iOS knows, as read at
+    /// each insertion. The same for every dictation, whoever recorded it.
+    var readVocabulary: () -> PersonalVocabulary.Document? = { try? PersonalVocabulary.shared?.document() }
+    var readSystemWords: () -> [String] = { (try? SystemLexiconStore.shared?.snapshot().speechWords) ?? [] }
+    /// Memory left below iOS's limit for this keyboard, nil where the system gives none.
+    var memoryAvailable: () -> UInt64? = { MemoryFootprint.available() }
+    private var preloadTask: Task<Void, Never>?
+    static let preloadDelay: Duration = .milliseconds(450)
     /// The typing model's Shift, read at insertion; `.automatic` until the controller wires it.
     var dictationOpening: () -> DictationOpening = { .automatic }
     /// Tells the typing model a dictation used the cursor, so a one-shot Shift is spent.
     var onDictationInserted: ((String) -> Void)?
+    var onTypingStripOwnershipChanged: ((Bool) -> Void)?
+    /// A dictation was taken out of the field again (Undo, a spoken "Scratch that"), so Shift
+    /// follows the text that is left. Without it an emptied field kept a lowercase Shift, and the
+    /// next thing typed or dictated started without its capital (seen on the simulator, 2026-11-20).
+    var onDictationRemoved: (() -> Void)?
     #if DEBUG && targetEnvironment(simulator)
     /// Locks the typing model's Shift (fixture `capslock`), wired by the controller.
     var lockShift: (() -> Void)?
@@ -96,6 +164,7 @@ final class MicController {
 
     private func setMode(_ next: KeyboardMode, persist: Bool) {
         guard next != mode else { return }
+        panelSection = nil
         history = nil
         mode = next
         if persist { savedMode.mode = next }
@@ -127,17 +196,64 @@ final class MicController {
     /// The panel takes the keys' place unless a dictation's own surface needs it.
     var showsHistory: Bool { history != nil && !showsSurface }
 
+    enum PanelSection: Hashable { case home, styles }
+    var panelSection: PanelSection? {
+        didSet {
+            if mode == .dictate, (panelSection == nil) != (oldValue == nil) {
+                onModeChanged?(displayMode)
+            }
+        }
+    }
+
+    /// The menu borrows the tall face without changing the person's keyboard preference.
+    var displayMode: KeyboardMode { panelSection == nil ? mode : .type }
+
+    func showPanel(_ section: PanelSection) {
+        guard state.allowsPanel else { return }
+        hideHistory()
+        panelSection = section
+    }
+
+    func choosePanelStyle(_ choice: TextStyle) {
+        guard panelSection != nil, state.allowsStyleChoice else { return }
+        chooseStyle(choice)
+        panelSection = nil
+    }
+
+    /// Navigation can also be invoked by VoiceOver. Check at the tap, even if the strip has changed.
+    func openDestination(_ destination: ZoneContract.Destination) {
+        guard state.allowsPanel else { return }
+        panelSection = nil
+        proxy?.open(destination.url)
+    }
+
     static let historyPanelLimit = 30
 
     private let store: SharedStore
     private weak var proxy: TextProxyActions?
     private let feedback: KeyFeedback
     private var ownedRequestID: UUID?
-    private var isVisible = false
+    private(set) var isVisible = false
     private var requiresExplicitInsert = false
     /// The last dictation this keyboard inserted, for a spoken "Scratch that" that arrives as its
     /// own dictation. Checked against the text before the cursor, like Undo, before anything goes.
     private var lastInsertedDictation: String?
+    private var lastInsertionID: UUID?
+    var deliveryHistory: @Sendable () -> TranscriptHistory? = { .shared }
+    static let deliveryQueue = DispatchQueue(label: "wtf.zayd.zone.keyboard.delivery", qos: .utility)
+    /// The same dictation with what was said and how it was written, so picking another style can
+    /// write it again in place (`RestylePlan`). It counts only while `lastInsertedDictation` is
+    /// still its text: a word fixed from the strip or a scratch makes it stale.
+    private var lastDictation: InsertedDictation?
+    /// The dictation as it read before the last style rewrite. Undo puts this back first, so a
+    /// rewrite nobody wanted costs one tap and the dictation itself is never lost to it.
+    private(set) var beforeRestyle: InsertedDictation?
+
+    /// Undo would put back the previous style's wording instead of removing the dictation.
+    var undoRevertsRestyle: Bool {
+        guard case .inserted(let text) = state, beforeRestyle != nil else { return false }
+        return lastDictation?.inserted == text
+    }
 
     /// Up to three words of the last insert the engine was least sure of, shown beside Undo
     /// (`DoubtfulWords`, Beta). Each is one tap from its alternatives.
@@ -173,6 +289,8 @@ final class MicController {
     /// How long the warm path waits for a live app to report `recording` before opening it.
     /// The heartbeat already proved the process is alive, so this only bounds a stuck app.
     static let warmPathTimeout: Duration = .seconds(3)
+    /// How long a Zone that looks alive may stay silent before the keyboard records by itself.
+    static let silentAppGrace: Duration = .seconds(1)
     /// Extra time granted once the app acknowledges with `starting`.
     static let startingGrace: Duration = .seconds(5)
     static let transcriptionWatchdog: Duration = .seconds(20)
@@ -193,13 +311,39 @@ final class MicController {
         #endif
     }
 
-    init(store: SharedStore, proxy: TextProxyActions, feedback: KeyFeedback) {
+    var quickSettingsReachable: () -> Bool = { AppGroup.isReachable }
+
+    func submitQuickSetting(_ value: QuickSetting) async -> String? {
+        guard proxy?.hasOpenAccess == true else { return "Open Settings > Apps > Zone > Keyboards and turn on Allow Full Access." }
+        guard quickSettingsReachable(), let inbox = store.quickSettingInbox else { return Self.unreachableMessage }
+        do {
+            try await preferenceReader.submit(value, inbox: inbox)
+            DarwinNotifier.post(.quickSettingChanged)
+            return nil
+        } catch {
+            return "Could not save this setting. Try again."
+        }
+    }
+
+    var alternateSpeechReady: () -> Bool = {
+        let route = KeyboardVoiceRoute.load()
+        switch route.mode {
+        case .standard: return false
+        case .webView: return FluidWebModel.ready
+        case .computer: return route.providerURL != nil
+        }
+    }
+
+    init(store: SharedStore, proxy: TextProxyActions?, feedback: KeyFeedback, localHost: LocalDictationHost? = nil) {
+        if proxy != nil, #available(iOS 26, *) { Task { await ZoneModelSpeech.shared.discover() } }
         self.store = store
         self.proxy = proxy
         self.feedback = feedback
+        self.localHost = localHost ?? .shared
+        self.preferenceReader = localHost?.preferenceReader ?? (store is InMemorySharedStore ? KeyboardSettingReader(store: store) : .shared)
         self.savedMode = LocalKeyboardMode(store: store)
         // The saved face from the start, so the first height the system sees is the right one.
-        mode = savedMode.mode
+        mode = proxy == nil ? .type : savedMode.mode
     }
 
     /// The face is the keyboard's own setting, kept in its own container (`LocalKeyboardMode`).
@@ -221,7 +365,9 @@ final class MicController {
         history = nil
         setMode(savedMode.mode, persist: false)
         #if DEBUG && targetEnvironment(simulator)
-        startFixtureWatch() // Screenshot fixtures only; never polls storage on a phone.
+        // Screenshot fixtures belong to the installed keyboard or its UI harness.
+        // An isolated store must not consume commands left by another simulator session.
+        if !(store is InMemorySharedStore) { startFixtureWatch() }
         #endif
         if !proxy.hasOpenAccess {
             // The real value, every time, so onboarding never checks off on a stale "on". On a
@@ -241,6 +387,10 @@ final class MicController {
             return
         }
         if case .error(Self.unreachableMessage) = state { state = .idle }
+        if #available(iOS 26, *), !(store is InMemorySharedStore) {
+            ZoneModelSpeech.shared.keyboardAppeared(prepares: readPreferences().dictatesInKeyboard && !alternateSpeechReady())
+            OwnModelLabRunner.tidyKeyboardCache()
+        }
         store.keyboardPresence = KeyboardPresence(lastSeen: Date(), hasFullAccess: true)
         // Whatever a crash or an abandoned request left in the shared store goes now.
         store.purgeStalePayloads()
@@ -250,6 +400,8 @@ final class MicController {
         // The latest style choice, from the Z or the app's Settings.
         style = store.effectiveTextStyle()
         handleSessionChanged()
+        adoptLocalDictation()
+        preloadCapturePage()
         restoreActiveRequest()
         updateStatusPolling()
         updateLevelSampling()
@@ -322,10 +474,57 @@ final class MicController {
         }
     }
 
+    /// A pick from the style row. It is the style from now on, and a dictation still standing at
+    /// the cursor is written again in it, so nobody has to say a message twice to see it another
+    /// way.
     func chooseStyle(_ choice: TextStyle) {
         store.chooseTextStyle(choice)
         style = choice
         haptic(.light)
+        restyleLastDictation(in: choice)
+    }
+
+    /// Writes the last dictation again in `choice` when the field still ends with exactly what was
+    /// inserted. Typed-after or edited text, a field that was sent or left, and a dictation that
+    /// was undone all leave the field alone.
+    private func restyleLastDictation(in choice: TextStyle) {
+        guard let proxy, var last = lastDictation, last.inserted == lastInsertedDictation, last.style != choice else { return }
+        switch state {
+        case .idle, .inserted: break
+        default: return
+        }
+        let vocabulary = try? PersonalVocabulary.shared?.document()
+        let systemWords = (try? SystemLexiconStore.shared?.snapshot().speechWords) ?? []
+        guard let edit = RestylePlan.edit(contextBefore: proxy.contextBefore(), last: last, render: { before in
+            render(last.transcript, in: choice, contextBefore: before, opening: last.opening, proxy: proxy,
+                   vocabulary: vocabulary, systemWords: systemWords)
+        }) else { return }
+        cancelTimers()
+        apply(edit, to: proxy)
+        beforeRestyle = last
+        KeyboardLog.journal?.log("dictationRestyled", ["from": last.style.rawValue, "to": choice.rawValue,
+                                                       "retyped": String(edit.insertion.count)])
+        last.inserted = edit.result
+        last.style = choice
+        settle(last)
+    }
+
+    private func apply(_ edit: RestylePlan.Edit, to proxy: TextProxyActions) {
+        for _ in 0..<edit.deletions { proxy.deleteBackward() }
+        if !edit.insertion.isEmpty { proxy.insert(edit.insertion) }
+    }
+
+    /// `dictation` is what the field now holds: the strip shows it as just inserted, with Undo.
+    private func settle(_ dictation: InsertedDictation) {
+        updateInsertionCredit(dictation.inserted)
+        lastDictation = dictation
+        lastInsertedDictation = dictation.inserted
+        onDictationInserted?(dictation.inserted)
+        doubts = []
+        doubtReview = nil
+        state = .inserted(text: dictation.inserted)
+        flagDoubts(dictation.doubts, in: dictation.inserted)
+        scheduleIdle(after: reviewWindow)
     }
 
     func tapRedo() {
@@ -333,6 +532,8 @@ final class MicController {
         cancelTimers()
         proxy.insert(text)
         lastInsertedDictation = text
+        updateInsertionCredit(text)
+        onDictationInserted?(text)
         haptic(.light)
         state = .inserted(text: text)
         if isLearning {
@@ -365,14 +566,32 @@ final class MicController {
             return
         }
         switch state {
-        case .requesting, .recording, .transcribing:
-            return
+        case .requesting: pressMessage = RecordingRefusal.starting; return
+        case .transcribing: pressMessage = RecordingRefusal.writing; return
+        case .recording: return
         default:
             break
+        }
+        if localHost.isBusy, !localHost.isRecognizing {
+            state = .error(RecordingRefusal.keyboard)
+            opensAppOnNextTap = false
+            scheduleIdle(after: .seconds(4))
+            return
+        }
+        if let session = routingSession, session.recording == true,
+           session.holdsMicrophoneLease == true || abs(session.heartbeat.timeIntervalSinceNow) <= KeyboardCapture.appHeartbeatTolerance {
+            state = .error(session.microphoneBusyMessage ?? RecordingRefusal.recording)
+            opensAppOnNextTap = false
+            scheduleIdle(after: .seconds(4))
+            return
         }
         // Only a tap on the error that said so opens Zone; once it fades, the warm path is tried again.
         var tapOpensApp = false
         if case .error = state, !fromHold { tapOpensApp = opensAppOnNextTap }
+        if !fromHold, localHost.openAfterStuckMute {
+            tapOpensApp = true
+            localHost.openAfterStuckMute = false
+        }
         opensAppOnNextTap = false
         cancelTimers()
         let generation = max(store.ledger.droppedGeneration, ownedGeneration) + 1
@@ -381,46 +600,71 @@ final class MicController {
             generation: generation,
             createdAt: Date(),
             inputSession: proxy.currentInputSession(),
-            contextBefore: proxy.contextBefore().map { String($0.suffix(64)) })
+            contextBefore: proxy.contextBefore().map { String($0.suffix(64)) }, holdToTalk: fromHold)
+        // Publish the pair together. A delayed tap cannot clear another keyboard's result.
+        store.keyboardPresence = KeyboardPresence(lastSeen: Date(), hasFullAccess: true)
+        let requested = DictationStatus(requestID: request.id, generation: generation, phase: .requested,
+                                        updatedAt: Date(), message: nil)
+        guard store.admitRequest(request, initialStatus: requested) else {
+            KeyboardLog.journal?.log("keyboardRequestNotAdmitted", recording: request.id)
+            state = .error("This dictation didn't start. Tap the mic to try again.")
+            scheduleIdle(after: .seconds(4))
+            return
+        }
         ownedRequestID = request.id
         stopIssuedAt = nil
         requiresExplicitInsert = false
         openedAppForRequest = nil
         ownedGeneration = generation
-        // A new dictation supersedes any older result, used or not. One left behind (an
-        // interrupted take, an offer that was never answered) was offered again when the
-        // keyboard was rebuilt mid-recording and pasted the previous dictation. History keeps it.
-        if let stale = store.result, stale.requestID != request.id {
-            store.result = nil
-        }
-        store.control = nil
-        // Stamp presence before the app can start recording. The app's keyboard-gone check
-        // runs one second in, before the first poll stamp, and would otherwise see the stamp
-        // from when this keyboard appeared and stop any dictation started 12 s later.
-        store.keyboardPresence = KeyboardPresence(lastSeen: Date(), hasFullAccess: true)
-        store.request = request
-        store.status = DictationStatus(requestID: request.id, generation: generation, phase: .requested, updatedAt: Date(), message: nil)
         DarwinNotifier.post(.requestChanged)
         state = .requesting
         haptic(.medium)
 
-        let sessionAlive = store.session?.isAlive(now: Date()) ?? false
+        let sessionAlive = routingSession?.isAlive(now: Date()) ?? false
         KeyboardLog.mic.info("request \(request.id.uuidString.prefix(8), privacy: .public) posted, sessionAlive=\(sessionAlive)")
-        KeyboardLog.journal?.log("keyboardRequest", recording: request.id,
-                                 ["sessionAlive": String(sessionAlive), "opensApp": String((!sessionAlive || tapOpensApp) && !fromHold),
-                                  "fromHold": String(fromHold)])
-        guard sessionAlive, !tapOpensApp else {
-            if fromHold {
-                // The session lapsed between the hold's check and this request.
-                failWarmRequest(message: SpaceTalk.notReadyMessage)
-            } else {
-                openApp(for: request.id)
-            }
-            return
+        // The keyboard's own route is only looked at when the press could use it: the look
+        // journals why it was passed over, which would be noise beside a warm session.
+        let host = !sessionAlive && !tapOpensApp && localRoute(recording: request.id) == .keyboard ? captureHost() : nil
+        let route = DictationRoute.resolve(.init(sessionAlive: sessionAlive, personAskedForZone: tapOpensApp,
+                                                 fromHold: fromHold, keyboardCanRecord: host != nil))
+        var fields = MemoryFootprint.journalFields()
+        fields["route"] = route.journalName
+        fields["sessionAlive"] = String(sessionAlive)
+        fields["opensApp"] = String({ if case .opensZone = route { true } else { false } }())
+        fields["fromHold"] = String(fromHold)
+        fields["recordsHere"] = String(route == .inKeyboard)
+        fields["pageLoaded"] = String(localHost.isPrepared)
+        KeyboardLog.journal?.log("keyboardRequest", recording: request.id, fields)
+        follow(route, for: request, host: host)
+    }
+
+    /// The one place a press is sent on its way (`DictationRoute`).
+    /// - Parameter zoneAnswered: Zone already said it has to be open, so there is no half
+    ///   second to wait for its answer before the keyboard records.
+    private func follow(_ route: DictationRoute, for request: DictationRequest, host: UIView?, zoneAnswered: Bool = false) {
+        switch route {
+        case .setUp(.fullAccess):
+            state = .needsFullAccess
+        case .setUp(.sharedFolder):
+            state = .error(Self.unreachableMessage)
+        case .warm:
+            waitForApp(request)
+        case .inKeyboard:
+            guard let host else { return follow(.opensZone(.keyboardCannotRecord), for: request, host: nil) }
+            if zoneAnswered { recordHereNow(request, in: host) } else { probeThenRecordHere(request, in: host) }
+        case .opensZone:
+            if request.holdToTalk == true { failWarmRequest(message: SpaceTalk.notReadyMessage) } else { openApp(for: request.id) }
+        case .notReady:
+            // The session lapsed between the hold's check and this request.
+            failWarmRequest(message: SpaceTalk.notReadyMessage)
         }
-        // The session is alive, so the user expects to stay in this app: a slow answer is retried
-        // once and then reported here. The keyboard never bounces to Zone on its own from the warm
-        // path; a later tap on the mic decides that.
+    }
+
+    /// The session is alive (or the app answered the probe), so the user expects to stay in this
+    /// app: a slow answer is retried once and then reported here. The keyboard never bounces to
+    /// Zone on its own from the warm path; a later tap on the mic decides that.
+    private func waitForApp(_ request: DictationRequest) {
+        waitTask?.cancel()
         waitTask = Task { [weak self] in
             for attempt in 0..<2 {
                 if attempt > 0 {
@@ -428,17 +672,45 @@ final class MicController {
                     DarwinNotifier.post(.requestChanged)
                 }
                 var deadline = ContinuousClock.now + Self.warmPathTimeout
+                let silentSince = ContinuousClock.now
                 var acknowledged = false
                 while !Task.isCancelled, ContinuousClock.now < deadline {
                     try? await Task.sleep(for: .milliseconds(80))
                     guard let self else { return }
                     if self.applyStatus() { return }
+                    // The session looked alive, yet nobody answered: iOS ended Zone in the last few
+                    // seconds and its heartbeat has not gone stale yet. A running Zone answers in
+                    // well under a second, so record here instead of waiting six seconds to fail.
+                    if attempt == 0, !acknowledged, !self.appAcknowledged(request.id),
+                       ContinuousClock.now - silentSince >= Self.silentAppGrace,
+                       case .requesting = self.state, self.ownedRequestID == request.id,
+                       self.holdRequestID == nil || self.holdRequestID == request.id,
+                       self.localRoute(trustingHeartbeat: false, recording: request.id) == .keyboard, let host = self.captureHost() {
+                        KeyboardLog.journal?.log("keyboardLocalTakesSilentTap", recording: request.id)
+                        guard self.canStartLocal(request) else { return }
+                        guard self.takeTap(request) else { continue }
+                        self.recordHere(request, in: host)
+                        return
+                    }
                     if !acknowledged, self.appAcknowledged(request.id) {
                         acknowledged = true
                         deadline = ContinuousClock.now + Self.startingGrace
                     }
                 }
                 guard let self, !Task.isCancelled, case .requesting = self.state else { return }
+                // Zone said it was starting and then went quiet for the whole starting wait
+                // (a model that never finished loading, a process iOS froze). The keyboard
+                // takes the press rather than ask a second time and end in "Zone didn't answer".
+                if acknowledged, self.ownedRequestID == request.id,
+                   self.holdRequestID == nil || self.holdRequestID == request.id,
+                   self.localRoute(trustingHeartbeat: false, recording: request.id) == .keyboard, let host = self.captureHost() {
+                    KeyboardLog.journal?.log("keyboardLocalTakesStalledStart", recording: request.id)
+                    guard self.canStartLocal(request) else { return }
+                    if self.takeTap(request) {
+                        self.recordHere(request, in: host)
+                        return
+                    }
+                }
             }
             guard let self, !Task.isCancelled, case .requesting = self.state else { return }
             KeyboardLog.mic.info("warm wait expired twice for \(request.id.uuidString.prefix(8), privacy: .public); staying here")
@@ -446,12 +718,53 @@ final class MicController {
         }
     }
 
+    static let needsAppMessage = "Zone has to be open to start the mic. Tap the mic to open it."
+    /// How long after a tap Zone's "I have to be open" still gets the tap's own answer. A
+    /// running Zone says it in 0.2 to 0.4 s (2026-11-22); later than this the person has moved
+    /// on, and a jump to Zone would come out of nowhere.
+    static let freshTapWindow: TimeInterval = 1.5
+    /// The request whose "I have to be open" was already acted on, so it is acted on once.
+    private var needsAppContinued: UUID?
+
+    /// Zone answered a tap "I have to be open": its session ended between the keyboard's last
+    /// read and the tap (the car's microphone release, a session that just ran out). The tap is
+    /// still fresh, so it does what it would have done had the keyboard known: records here, or
+    /// opens Zone. On 2026-11-22 this was a red line and a second tap, three times in a minute.
+    /// A hold on space never opens Zone, and a late answer stays for the next tap to settle.
+    private func continueAfterNeedsApp(_ id: UUID) {
+        guard ownedRequestID == id, let request = store.request, request.id == id,
+              abs(Date().timeIntervalSince(request.createdAt)) <= Self.freshTapWindow else {
+            failWarmRequest(message: Self.needsAppMessage)
+            return
+        }
+        needsAppContinued = id
+        let host = localRoute(trustingHeartbeat: false, recording: id) == .keyboard ? captureHost() : nil
+        let route = DictationRoute.resolve(.init(sessionAlive: false, fromHold: request.holdToTalk == true,
+                                                 keyboardCanRecord: host != nil))
+        KeyboardLog.journal?.log("keyboardTapOutlivedSession", recording: id, ["route": route.journalName])
+        follow(route, for: request, host: host, zoneAnswered: true)
+    }
+
+    /// The keyboard takes a press Zone has already declined, without the wait for Zone's answer.
+    private func recordHereNow(_ request: DictationRequest, in host: UIView) {
+        localHost.prepare(in: host)
+        waitTask = Task { [weak self] in
+            guard let self, self.canStartLocal(request) else { return }
+            guard self.takeTap(request) else {
+                // Zone took the request after all; a second "open me" is the error it was.
+                if !self.applyStatus() { self.waitForApp(request) }
+                return
+            }
+            self.recordHere(request, in: host)
+        }
+    }
+
     /// Drops a request Zone never picked up, so a late start cannot record, and says so in the strip.
     private func failWarmRequest(message: String = "Zone didn't answer. Tap the mic to open it.") {
         guard let id = ownedRequestID else { return }
-        var ledger = store.ledger
-        ledger.droppedGeneration = max(ledger.droppedGeneration, ownedGeneration)
-        store.ledger = ledger
+        store.updateLedger(for: id) {
+            $0.droppedGeneration = max($0.droppedGeneration, ownedGeneration)
+        }
         store.control = DictationControl(requestID: id, generation: ownedGeneration, action: .cancel, issuedAt: Date())
         DarwinNotifier.post(.controlChanged)
         store.clearPayloads(for: id)
@@ -468,7 +781,7 @@ final class MicController {
     private var holdRequestID: UUID?
 
     /// What the space bar shows while a hold owns a dictation.
-    var spaceTalkPhase: SpaceTalk.Phase {
+    private var holdPhase: SpaceTalk.Phase {
         guard let id = holdRequestID, id == ownedRequestID else { return .none }
         switch state {
         case .requesting: return .starting
@@ -477,15 +790,30 @@ final class MicController {
         }
     }
 
-    /// Zone can start listening without the keyboard opening it.
+    #if DEBUG
+    /// The grid's tests stand in for the hold here (`SpaceTalkGridTests`). Nil everywhere else.
+    @ObservationIgnored var holdStandIn: SpaceHoldStandIn?
+    var spaceTalkPhase: SpaceTalk.Phase {
+        get { holdStandIn?.phase ?? holdPhase }
+        set { holdStandIn?.phase = newValue }
+    }
+    #else
+    var spaceTalkPhase: SpaceTalk.Phase { holdPhase }
+    #endif
+
+    /// A dictation can start without the keyboard opening Zone: Zone keeps the microphone
+    /// ready, or the keyboard can record by itself.
     private var zoneListensInPlace: Bool {
-        store.session?.isAlive(now: Date()) ?? false
+        (store.session?.isAlive(now: Date()) ?? false) || localRoute() == .keyboard
     }
 
     /// The space bar was held still for `SpaceTalk.holdDuration` with Hold space set to Talk.
     /// True when the hold is talking's (it asked for a dictation or explained why it could not);
     /// false when there is nothing to talk with and the hold should move the cursor instead.
     func spaceHoldBegan() -> Bool {
+        #if DEBUG
+        if let holdStandIn { return holdStandIn.begin() }
+        #endif
         guard let proxy else { return false }
         let underWay: Bool
         switch state {
@@ -517,6 +845,9 @@ final class MicController {
 
     /// The finger that held space lifted, or its touch was cancelled.
     func spaceHoldEnded() {
+        #if DEBUG
+        if let holdStandIn { return holdStandIn.end() }
+        #endif
         let phase = spaceTalkPhase
         holdRequestID = nil
         switch SpaceTalk.release(phase) {
@@ -535,7 +866,12 @@ final class MicController {
 
     // MARK: History
 
+    private var historyGeneration = 0
+
     func showHistory() {
+        historyGeneration &+= 1
+        let generation = historyGeneration
+        panelSection = nil
         guard let proxy, proxy.hasOpenAccess else {
             history = .needsFullAccess
             return
@@ -547,19 +883,20 @@ final class MicController {
             if let store = TranscriptHistory.shared {
                 // An app killed mid-dictation and not reopened since: rescue its text here too.
                 store.recoverCutOff()
-                let records = store.recent(limit: Self.historyPanelLimit)
+                let records = store.recentDictations(limit: Self.historyPanelLimit)
                 panel = records.isEmpty && store.retention == .off ? .off : .loaded(records)
             } else {
                 panel = .unreachable
             }
             DispatchQueue.main.async {
-                guard let self, self.history == .loading else { return }
+                guard let self, self.historyGeneration == generation, self.history == .loading else { return }
                 self.history = panel
             }
         }
     }
 
     func hideHistory() {
+        historyGeneration &+= 1
         history = nil
     }
 
@@ -572,20 +909,42 @@ final class MicController {
         cancelTimers()
         proxy.insert(text)
         history = nil
+        lastInsertedDictation = text
+        // Undo can only retract the insertion in this field.
+        lastInsertionID = record.status == .inserted ? nil : record.id
+        lastDictation = nil
+        beforeRestyle = nil
+        markHistory(record.id, .inserted, keptWords: text.split(whereSeparator: \.isWhitespace).count)
+        onDictationInserted?(text)
+        hideHistory()
         haptic(.light)
         state = .inserted(text: text)
         scheduleIdle(after: Self.undoWindow)
     }
 
     /// Notes where a dictation went, off the main thread; the history file is small but shared.
-    private func markHistory(_ id: UUID, _ status: TranscriptStatus) {
-        DispatchQueue.global(qos: .utility).async {
-            TranscriptHistory.shared?.mark(id: id, status: status)
+    private func markHistory(_ id: UUID, _ status: TranscriptStatus, keptWords: Int? = nil) {
+        Self.deliveryQueue.async { [deliveryHistory] in
+            deliveryHistory()?.mark(id: id, status: status, keptWords: keptWords)
         }
+    }
+
+    private func updateInsertionCredit(_ text: String) {
+        guard let id = lastInsertionID else { return }
+        let count = text.split(whereSeparator: \.isWhitespace).count
+        markHistory(id, count > 0 ? .inserted : .dismissed, keptWords: count)
     }
 
     func tapStop() {
         guard case .recording = state, let id = ownedRequestID else { return }
+        if localRequest?.id == id {
+            // No watchdog on the app here: `LocalDictationHost` reports its own failure or its text.
+            localHost.stop()
+            KeyboardLog.journal?.log("keyboardStop", recording: id, ["where": "keyboard"])
+            state = .transcribing
+            haptic(.light)
+            return
+        }
         store.control = DictationControl(requestID: id, generation: ownedGeneration, action: .stop, issuedAt: Date())
         DarwinNotifier.post(.controlChanged)
         KeyboardLog.journal?.log("keyboardStop", recording: id)
@@ -607,6 +966,14 @@ final class MicController {
     /// and the clock gives way to "Paused" so the state is visible at a glance.
     func tapPause() {
         guard case .recording = state, let id = ownedRequestID else { return }
+        if localRequest?.id == id {
+            let wasPaused = isPaused
+            localHost.setPaused(!wasPaused)
+            guard isPaused != wasPaused else { return }
+            KeyboardLog.journal?.log(isPaused ? "keyboardPause" : "keyboardResume", recording: id, ["where": "keyboard"])
+            haptic(.light)
+            return
+        }
         isPaused.toggle()
         store.control = DictationControl(requestID: id, generation: ownedGeneration,
                                          action: isPaused ? .pause : .resume, issuedAt: Date())
@@ -618,12 +985,24 @@ final class MicController {
     func tapCancel() {
         cancelTimers()
         guard let id = ownedRequestID else {
+            // A recording here whose owner was lost still ends: nothing else could stop it.
+            if localRequest != nil || localProbe != nil { endLocal() }
             state = .idle
             return
         }
-        var ledger = store.ledger
-        ledger.droppedGeneration = max(ledger.droppedGeneration, ownedGeneration)
-        store.ledger = ledger
+        store.updateLedger(for: id) {
+            $0.droppedGeneration = max($0.droppedGeneration, ownedGeneration)
+        }
+        if localRequest?.id == id || localProbe != nil {
+            // Recorded here, or about to be. An app that read the request in the probe's
+            // window and is starting it drops it on this control.
+            endLocal()
+            postCancelControl(for: id)
+            withdraw(id)
+            ownedRequestID = nil
+            state = .idle
+            return
+        }
         store.control = DictationControl(requestID: id, generation: ownedGeneration, action: .cancel, issuedAt: Date())
         DarwinNotifier.post(.controlChanged)
         // A cancelled request's typed context has no further use.
@@ -635,7 +1014,7 @@ final class MicController {
     func tapInsert() {
         switch state {
         case .pendingInsert(let result, _), .recovery(let result):
-            insert(result)
+            insert(result, explicitlyRequested: true)
         default:
             break
         }
@@ -643,26 +1022,32 @@ final class MicController {
 
     /// Drops a pending result for good so it is not offered again.
     func tapDismissPending() {
-        switch state {
-        case .pendingInsert(let result, _), .recovery(let result):
-            var ledger = store.ledger
-            ledger.consumedResultID = result.requestID
-            ledger.claimedResultID = nil
-            ledger.claimedAt = nil
-            store.ledger = ledger
-            store.clearPayloads(for: result.requestID)
-            DarwinNotifier.post(.payloadConsumed)
-            // Gone from the handoff store, kept in history: a dismissed dictation can still be rescued.
-            markHistory(result.requestID, .dismissed)
-            state = .idle
-        default:
-            break
+        guard let result = state.offeredResult else { return }
+        guard markConsumed(result) else {
+            evaluateResult()
+            return
         }
+        // Gone from the handoff store, kept in history: a dismissed dictation can still be rescued.
+        markHistory(result.requestID, .dismissed)
+        state = .idle
     }
 
     func tapUndo() {
         guard case .inserted(let text) = state, let proxy else { return }
         cancelTimers()
+        // Right after a style rewrite, Undo takes back the rewrite, not the dictation.
+        if undoRevertsRestyle, let previous = beforeRestyle {
+            beforeRestyle = nil
+            guard let edit = RestylePlan.edit(contextBefore: proxy.contextBefore(), from: text, to: previous.inserted) else {
+                state = .error("Text changed, so undo is off.")
+                scheduleIdle(after: .seconds(3))
+                return
+            }
+            apply(edit, to: proxy)
+            haptic(.light)
+            settle(previous)
+            return
+        }
         guard let count = UndoPlan.deletionCount(contextBefore: proxy.contextBefore(), lastInserted: text) else {
             state = .error("Text changed, so undo is off.")
             scheduleIdle(after: .seconds(3))
@@ -671,6 +1056,8 @@ final class MicController {
         for _ in 0..<count {
             proxy.deleteBackward()
         }
+        onDictationRemoved?()
+        updateInsertionCredit("")
         state = .undone(text: text)
         scheduleIdle(after: Self.undoWindow)
     }
@@ -686,6 +1073,8 @@ final class MicController {
     }
 
     private func restoreActiveRequest() {
+        // A dictation recorded here is this keyboard's own; nothing in the store may replace it.
+        guard localRequest == nil, localProbe == nil else { return }
         guard isVisible,
               let request = RecordingRecovery.activeRequest(request: store.request, status: store.status,
                                                              ledger: store.ledger, session: store.session, now: Date()) else { return }
@@ -708,6 +1097,7 @@ final class MicController {
 
     /// Called by the controller when iOS takes the keyboard off screen mid-dictation.
     func keyboardWillDisappear() {
+        panelSection = nil
         // Hold space records only while held, and the keyboard going away ends the hold.
         if holdRequestID != nil { spaceHoldEnded() }
         isVisible = false
@@ -716,6 +1106,21 @@ final class MicController {
         #endif
         if ownedRequestID != nil { requiresExplicitInsert = true }
         cancelTimers()
+        preloadTask?.cancel()
+        preloadTask = nil
+        abandonProbe()
+        if localRequest != nil, case .requesting = state {
+            // The microphone was still on its way (a cold web view takes up to 4 s): the start is
+            // called off, which is the person leaving, not the route failing.
+            abandonLocalStart()
+        }
+        // A recording held in the keyboard cannot outlive the keyboard. What was said so far is
+        // recognized and, like any result that arrives while the keyboard is away, offered on return.
+        if case .recording = state, localRequest != nil {
+            localHost.stop()
+            state = .transcribing
+        }
+        localHost.release()
         returnRereadTask?.cancel()
         returnRereadTask = nil
         updateStatusPolling()
@@ -743,7 +1148,7 @@ final class MicController {
             return
         }
         switch state {
-        case .recording, .transcribing, .requesting:
+        case .recording, .transcribing, .requesting, .inApp:
             guard statusPollTask == nil else { return }
             statusPollTask = Task { [weak self] in
                 while !Task.isCancelled {
@@ -753,8 +1158,9 @@ final class MicController {
                     if self.presenceTick % 8 == 1 {
                         self.store.keyboardPresence = KeyboardPresence(lastSeen: Date(), hasFullAccess: true)
                     }
-                    if self.applyStatus() { continue }
-                    self.evaluateResult()
+                    if !self.applyStatus() { self.evaluateResult() }
+                    // After the status: `needsApp` settles a status read but leaves `.inApp` waiting.
+                    self.giveUpIfZoneNeverAnswered()
                 }
             }
         default:
@@ -768,6 +1174,18 @@ final class MicController {
         sessionIsArmed = store.session?.isAlive(now: Date()) ?? false
     }
 
+    /// On screen in `.inApp` with a tap Zone never answered (see `ColdStart.keyboardGivesUp`):
+    /// the launch never reached it, so drop it and give the mic back. Until 2026-11-10 a false
+    /// "interrupted" from that launch cleared this state by accident.
+    private func giveUpIfZoneNeverAnswered() {
+        guard case .inApp = state, let id = ownedRequestID,
+              ColdStart.keyboardGivesUp(ownedID: id, request: store.request, status: store.status, now: Date()) else { return }
+        KeyboardLog.mic.info("Zone never answered \(id.uuidString.prefix(8), privacy: .public); giving up")
+        let phase = store.status.flatMap { $0.requestID == id ? $0.phase.rawValue : nil } ?? "none"
+        KeyboardLog.journal?.log("keyboardGaveUp", recording: id, ["phase": phase])
+        failWarmRequest(message: "Zone didn't start recording. Tap the mic to try again.")
+    }
+
     // MARK: Internals
 
     private func appAcknowledged(_ requestID: UUID) -> Bool {
@@ -778,6 +1196,10 @@ final class MicController {
     /// Returns true when the status settled the requesting phase (recording started or failed).
     @discardableResult
     private func applyStatus() -> Bool {
+        // Once the keyboard records by itself, only `LocalDictationHost` moves this state. An app
+        // answer that lands late (it read the request in the probe's window) must not turn a
+        // live recording into an error and orphan it.
+        guard localRequest == nil else { return false }
         guard let status = store.status, let id = ownedRequestID, status.requestID == id,
               status.generation == ownedGeneration,
               status.generation > store.ledger.droppedGeneration else { return false }
@@ -834,9 +1256,13 @@ final class MicController {
             evaluateResult()
             return true
         case .needsApp:
-            waitTask?.cancel()
-            if case .requesting = state {
-                failWarmRequest(message: "Zone has to be open to start the mic. Tap the mic to open it.")
+            // While the keyboard waits to record by itself, "open me" is its cue, not an error.
+            if localProbe != nil { return false }
+            // A Darwin ping and the poller can read the same reply before the takeover runs.
+            // Only the first reader may cancel the old wait and continue the press.
+            if case .requesting = state, needsAppContinued != id {
+                waitTask?.cancel()
+                continueAfterNeedsApp(id)
             }
             return true
         case .failed:
@@ -856,7 +1282,10 @@ final class MicController {
 
     private func evaluateResult() {
         guard isVisible else { return }
-        guard let result = store.result else { return }
+        guard let result = store.result else {
+            if state.offeredResult != nil { state = .idle }
+            return
+        }
         // While a dictation of ours is live, only its own result may surface.
         if let owned = ownedRequestID, result.requestID != owned {
             switch state {
@@ -864,21 +1293,25 @@ final class MicController {
             default: break
             }
         }
-        // Already on offer: later re-reads must not change the caption or the state.
-        switch state {
-        case .pendingInsert(let offered, _) where offered.requestID == result.requestID: return
-        case .recovery(let offered) where offered.requestID == result.requestID: return
-        default: break
+        let ledger = store.ledger
+        let previousOffer = state.offeredResult
+        if let offered = previousOffer {
+            // Keep a valid offer explicit, even if the user moves back to the original field.
+            if offered == result, InsertionDecider.unavailableReason(for: result, ledger: ledger, now: Date()) == nil { return }
+            state = .idle
         }
         let request = store.request.flatMap { $0.id == result.requestID ? $0 : nil }
         let owns = result.requestID == ownedRequestID
         var decision = InsertionDecider.decide(
             result: result,
             request: request,
-            ledger: store.ledger,
+            ledger: ledger,
             currentInputSession: proxy?.currentInputSession(),
             currentContextBefore: proxy?.contextBefore(),
             ownsRequest: owns)
+        if decision == .insertNow, previousOffer != nil {
+            decision = .offerInsert(reason: "Dictation changed")
+        }
         if decision == .insertNow, store.status?.phase == .interrupted, store.status?.requestID == result.requestID {
             decision = .offerInsert(reason: "Recording was interrupted")
         }
@@ -916,65 +1349,87 @@ final class MicController {
             markHistory(result.requestID, .offered)
         case .ignore(let reason):
             if reason == "stale" {
-                markConsumed(result.requestID)
+                markConsumed(result)
             } else if owns, reason == "no speech" {
+                guard markConsumed(result) else { return }
                 watchdogTask?.cancel()
-                markConsumed(result.requestID)
-                state = .error("No speech detected.")
+                ownedRequestID = nil
+                state = .error("No words heard. Tap the mic to try again.")
                 scheduleIdle(after: .seconds(3))
             }
         }
     }
 
-    private func insert(_ result: DictationResult) {
+    /// What was said, written in `style` and joined to `contextBefore`: the one place a dictation
+    /// becomes text, for the insert and for a rewrite in another style.
+    private func render(_ transcript: String, in style: TextStyle, contextBefore: String?, opening: DictationOpening,
+                        proxy: TextProxyActions, vocabulary: PersonalVocabulary.Document?, systemWords: [String]) -> String {
+        let preferences = readPreferences()
+        return proxy.capitalization.dictated(style.insertion(
+            of: transcript,
+            contextBefore: contextBefore,
+            fieldCapitalizesSentences: proxy.autocapitalizesSentences, personalWords: vocabulary?.appliedWords ?? [],
+            opening: opening, mentions: preferences.handleRecognition,
+            handles: vocabulary?.handles ?? [],
+            systemWords: systemWords,
+            spokenCorrections: preferences.spokenCorrections,
+            capsLockDropsPunctuation: preferences.capsLockDropsPunctuation, emoticons: preferences.spokenEmoticons,
+            smallOrdinals: preferences.smallOrdinals, numbers: preferences.numbers, california: preferences.californiaMode,
+            searchField: proxy.isSearchField, misheard: vocabulary?.misheard ?? [:],
+            autoCapitalization: preferences.autoCapitalizationEnabled))
+    }
+
+    private func insert(_ result: DictationResult, explicitlyRequested: Bool = false) {
         guard let proxy else { return }
         style = store.effectiveTextStyle()
-        let vocabulary = try? PersonalVocabulary.shared?.document()
+        // One read of the person's words, for a dictation Zone recognized and for one the
+        // keyboard recorded by itself alike: every layer below is the same for both.
+        let vocabulary = readVocabulary()
         let personalWords = vocabulary?.appliedWords ?? []
-        let handleRecognition = store.keyboardPreferences.handleRecognition
-        let spokenCorrections = store.keyboardPreferences.spokenCorrections
-        let emoticons = store.keyboardPreferences.spokenEmoticons
-        let smallOrdinals = store.keyboardPreferences.smallOrdinals
-        let california = store.keyboardPreferences.californiaMode
-        let systemWords = (try? SystemLexiconStore.shared?.snapshot().speechWords) ?? []
+        let handleRecognition = readPreferences().handleRecognition
+        let spokenCorrections = readPreferences().spokenCorrections
+        let systemWords = readSystemWords()
+        let now = Date()
+        guard store.claimInsertion(result, explicitlyRequested: explicitlyRequested, now: now) else {
+            let ledger = store.ledger
+            let current = store.result
+            if current != result, state.offeredResult != nil {
+                evaluateResult()
+            } else if current == result,
+                      InsertionDecider.unavailableReason(for: result, ledger: ledger, now: now) == nil {
+                state = .recovery(result)
+            } else {
+                state = .idle
+            }
+            return
+        }
+
         // "Scratch that" said on its own takes back the dictation before it, with the Beta on.
         if spokenCorrections, SpokenRepair.isStandaloneCommand(result.text) {
             scratchPreviousDictation(for: result)
             return
         }
-        let misheard = vocabulary?.misheard ?? [:]
-        let text = proxy.capitalization.dictated(style.insertion(
-            of: result.text,
-            contextBefore: proxy.contextBefore(),
-            fieldCapitalizesSentences: proxy.autocapitalizesSentences, personalWords: personalWords,
-            opening: dictationOpening(), mentions: handleRecognition,
-            handles: vocabulary?.handles ?? [], systemWords: systemWords,
-            spokenCorrections: spokenCorrections,
-            capsLockDropsPunctuation: store.keyboardPreferences.capsLockDropsPunctuation, emoticons: emoticons,
-            smallOrdinals: smallOrdinals, california: california, searchField: proxy.isSearchField, misheard: misheard))
+        // Read once: the rewrite of this dictation in another style opens the way this one did.
+        let opening = dictationOpening()
+        let text = render(result.text, in: style, contextBefore: proxy.contextBefore(), opening: opening, proxy: proxy,
+                          vocabulary: vocabulary, systemWords: systemWords)
         guard !text.isEmpty else {
-            markConsumed(result.requestID)
+            markConsumed(result)
             state = .idle
             return
         }
-        var ledger = store.ledger
-        ledger.claimedResultID = result.requestID
-        ledger.claimedAt = Date()
-        store.ledger = ledger
-
         proxy.insert(text)
         lastInsertedDictation = text
+        lastDictation = InsertedDictation(transcript: result.text, inserted: text, style: style, opening: opening,
+                                          doubts: result.doubts)
+        beforeRestyle = nil
         if handleRecognition { PersonalVocabulary.learnHandles(taughtIn: result.text, renderedText: text, personalWords: personalWords, knownHandles: vocabulary?.handles ?? []) }
         onDictationInserted?(text)
 
-        ledger.consumedResultID = result.requestID
-        ledger.claimedResultID = nil
-        ledger.claimedAt = nil
-        store.ledger = ledger
-        // Undo and Redo work from the inserted text held here, not from the store.
-        store.clearPayloads(for: result.requestID)
+        store.acknowledgeInsertion(result.requestID)
         DarwinNotifier.post(.payloadConsumed)
-        markHistory(result.requestID, .inserted)
+        lastInsertionID = result.requestID
+        updateInsertionCredit(text)
 
         haptic(.light)
         state = .inserted(text: text)
@@ -998,7 +1453,7 @@ final class MicController {
         #if DEBUG && targetEnvironment(simulator)
         if fixtureForcesDoubts { return true }
         #endif
-        return store.keyboardPreferences.checksDoubtfulWords
+        return readPreferences().checksDoubtfulWords
     }
 
     /// The words flagged in the dictation last inserted that no tap in the strip has settled.
@@ -1060,6 +1515,7 @@ final class MicController {
         for _ in 0..<tail.count { proxy.deleteBackward() }
         proxy.insert(String(edit.text.suffix(tail.count - placement.word.count + replacement.count)))
         lastInsertedDictation = edit.text
+        updateInsertionCredit(edit.text)
         DoubtStore.calibration.record(confidence: placement.confidence, fixed: true)
         // Remembered the way the dictionary writes it: "Here" chosen at a sentence start is
         // offered as "here" mid-sentence, while a name keeps its capital.
@@ -1084,7 +1540,7 @@ final class MicController {
     /// they are. Words from anything but the dictation last inserted are ignored, and nothing is
     /// stored but the two words and a count.
     func wordCorrectedByHand(original: String, replacement: String) {
-        guard store.keyboardPreferences.checksDoubtfulWords, let dictated = lastInsertedDictation,
+        guard readPreferences().checksDoubtfulWords, let dictated = lastInsertedDictation,
               DoubtfulWords.contains(original, in: dictated) else { return }
         DoubtStore.memory.record(heard: original, chosen: replacement)
         let flagged = unsettledDoubts.firstIndex { DoubtfulWords.sameWord($0.word, original) }
@@ -1105,7 +1561,7 @@ final class MicController {
     /// Removes the previous dictation when the text before the cursor still ends with it, the
     /// same check Undo makes. Edited text, or nothing inserted yet, leaves the field alone.
     private func scratchPreviousDictation(for result: DictationResult) {
-        markConsumed(result.requestID)
+        guard markConsumed(result) else { return }
         markHistory(result.requestID, .dismissed)
         guard let proxy, let previous = lastInsertedDictation else {
             state = .error("Nothing to scratch.")
@@ -1119,17 +1575,216 @@ final class MicController {
         }
         for _ in 0..<count { proxy.deleteBackward() }
         lastInsertedDictation = nil
+        updateInsertionCredit("")
+        onDictationRemoved?()
         haptic(.light)
         state = .undone(text: previous)
         scheduleIdle(after: Self.undoWindow)
     }
 
-    private func markConsumed(_ id: UUID) {
-        var ledger = store.ledger
-        ledger.consumedResultID = id
-        store.ledger = ledger
-        store.clearPayloads(for: id)
+    @discardableResult
+    private func markConsumed(_ result: DictationResult) -> Bool {
+        guard store.dismissResult(result) else { return false }
         DarwinNotifier.post(.payloadConsumed)
+        return true
+    }
+
+    // MARK: Recording in the keyboard
+
+    /// - Parameter trustingHeartbeat: false once a Zone that looked alive has stayed silent: its
+    ///   heartbeat is then known to be left over from a process iOS ended.
+    private var routingSession: SessionState? {
+        guard let session = store.session else { return nil }
+        // A killed app releases its descriptor immediately. Ignore the last pulse
+        // even if it still says a meeting is recording or standby is armed.
+        if session.holdsMicrophoneLease == true {
+            let available = store.microphoneOwnership.reserveForApp { operation, code in
+                KeyboardLog.journal?.log("microphoneLockUnavailable", ["from": "sessionProbe", "operation": operation,
+                                                                          "errno": String(code)])
+                KeyboardLog.mic.error("Microphone ownership probe failed during \(operation, privacy: .public) with errno \(code).")
+            }
+            if available != nil { return nil }
+        }
+        return session
+    }
+
+    private func localRoute(trustingHeartbeat: Bool = true, recording: UUID? = nil) -> KeyboardCapture.Route {
+        let session = routingSession
+        let capability = localCapability()
+        let hasRoom = KeyboardCapture.hasMemory(available: memoryAvailable(), pageLoaded: localHost.isPrepared)
+        if let recording, !hasRoom {
+            var fields = MemoryFootprint.journalFields()
+            fields["decision"] = "skipKeyboard"
+            fields["workerReason"] = "memory"
+            KeyboardLog.journal?.log("keyboardModelDecision", recording: recording, fields)
+        }
+        return KeyboardCapture.route(enabled: readPreferences().dictatesInKeyboard,
+                                     systemSupports: capability.systemSupports,
+                                     microphoneGranted: microphoneObservation.allowed(
+                                        keyboard: capability.microphoneGranted, app: store.appMicrophoneReading),
+                                     // Who hears the recording is decided when it stops. With no
+                                     // speech model able to run here the audio is kept and Zone
+                                     // writes it out, so the words are recorded first either way.
+                                     speechAssetInstalled: true,
+                                     hasMemory: hasRoom,
+                                     appHeartbeat: trustingHeartbeat || session?.recording == true ? session?.heartbeat : nil, failures: localHost.failures, now: Date())
+    }
+
+    /// Loads the capture page a moment after the keyboard appears, for someone who dictates in
+    /// the keyboard, so their tap has only the microphone left to open. Nothing here asks for
+    /// the microphone: no orange dot shows until a dictation starts.
+    private func preloadCapturePage() {
+        preloadTask?.cancel()
+        guard KeyboardCapture.preloads(route: localRoute(), lastDictatedHere: localHost.lastDictated, now: Date()) else { return }
+        preloadTask = Task { [weak self] in
+            // After the keyboard's first frames, which nothing may slow.
+            try? await Task.sleep(for: Self.preloadDelay)
+            guard let self, !Task.isCancelled, self.isVisible, !self.localHost.isBusy, !self.localHost.isPrepared,
+                  self.localRoute() == .keyboard, let host = self.captureHost() else { return }
+            self.localHost.prepare(in: host)
+            KeyboardLog.journal?.log("keyboardLocalPreloaded", MemoryFootprint.journalFields())
+        }
+    }
+
+    /// The request is already posted, as for any tap. An app that is running answers it within a
+    /// moment (it refuses during a meeting, or says it must be opened); only when it stays silent
+    /// or says it must be opened does the keyboard record. The web view loads meanwhile.
+    private func probeThenRecordHere(_ request: DictationRequest, in host: UIView) {
+        localHost.prepare(in: host)
+        localProbe?.cancel()
+        localProbe = Task { [weak self] in
+            try? await Task.sleep(for: KeyboardCapture.probe)
+            guard let self, !Task.isCancelled else { return }
+            self.localProbe = nil
+            // The tap was cancelled or replaced meanwhile.
+            guard self.ownedRequestID == request.id, case .requesting = self.state else { return }
+            let answer = self.store.status.flatMap { $0.requestID == request.id ? $0.phase : nil }
+            guard KeyboardCapture.routeAfterProbe(phase: answer) == .keyboard,
+                  self.localRoute(trustingHeartbeat: false, recording: request.id) == .keyboard else {
+                // The app answered: it owns the tap now, exactly as on the warm path. A refusal or
+                // a cancel shows here; an app that is starting gets the warm wait.
+                KeyboardLog.journal?.log("keyboardLocalYields", recording: request.id, ["phase": answer?.rawValue ?? "none"])
+                if self.applyStatus() { return }
+                self.waitForApp(request)
+                return
+            }
+            // Withdrawn from the store, so an app opened a minute from now finds nothing to start,
+            // and told off, so an app that read it a moment ago and is starting drops it.
+            guard self.canStartLocal(request) else { return }
+            guard self.takeTap(request) else {
+                if !self.applyStatus() { self.waitForApp(request) }
+                return
+            }
+            self.recordHere(request, in: host)
+        }
+    }
+
+    /// Capture needs ownership and a microphone. Speech assets are checked on the sealed file.
+    private func canStartLocal(_ request: DictationRequest) -> Bool {
+        guard !Task.isCancelled, isVisible, case .requesting = state, ownedRequestID == request.id else { return false }
+        // Zone declining this press is the reason to record here. Honor any newer app status.
+        if let status = store.status, status.requestID == request.id, status.generation == request.generation,
+           status.phase == .needsApp { return true }
+        return !applyStatus()
+    }
+
+    private func takeTap(_ request: DictationRequest) -> Bool {
+        guard KeyboardTapOwner.take(request, store: store),
+              store.transferRequestToKeyboard(request) else { return false }
+        postCancelControl(for: request.id)
+        return true
+    }
+
+    private func recordHere(_ request: DictationRequest, in host: UIView) {
+        let hostStore = localHost.store
+        let reserved = hostStore.microphoneOwnership.reserveForKeyboard(recordingID: request.id) { operation, code in
+            KeyboardLog.journal?.log("keyboardMicrophoneLockError", recording: request.id,
+                                     ["operation": operation, "errno": String(code)])
+        }
+        guard reserved else {
+            failWarmRequest(message: "The mic is in use. Finish the recording, then tap again.")
+            opensAppOnNextTap = false
+            return
+        }
+        let now = Date()
+        hostStore.keyboardRecordingClaim = KeyboardRecordingClaim(requestID: request.id, since: now, heartbeat: now)
+        localRequest = request
+        KeyboardLog.journal?.log("keyboardLocalStart", recording: request.id)
+        // The host cancels anything of its own still in flight first: one recorder, the newest tap.
+        localHost.start(request, in: host, observer: self)
+    }
+
+    /// A tap whose probe never finished (the keyboard left the screen first) is withdrawn whole,
+    /// so no app started later takes it for a waiting request.
+    private func abandonProbe() {
+        guard localProbe != nil, let id = ownedRequestID else { return }
+        store.updateLedger(for: id) {
+            $0.droppedGeneration = max($0.droppedGeneration, ownedGeneration)
+        }
+        endLocal()
+        postCancelControl(for: id)
+        withdraw(id)
+        ownedRequestID = nil
+        state = .idle
+    }
+
+    /// The keyboard left before the microphone started. Nothing was recorded and nothing counts
+    /// as a failure.
+    private func abandonLocalStart() {
+        let id = localRequest?.id
+        KeyboardLog.journal?.log("keyboardLocalAbandoned", recording: id)
+        endLocal()
+        if let id { withdraw(id) }
+        ownedRequestID = nil
+        state = .idle
+    }
+
+    private func postCancelControl(for id: UUID) {
+        store.control = DictationControl(requestID: id, generation: ownedGeneration, action: .cancel, issuedAt: Date())
+        DarwinNotifier.post(.controlChanged)
+    }
+
+    private func withdraw(_ id: UUID) {
+        store.withdraw(id)
+    }
+
+    /// `EngineKind.appleSpeech`'s raw value: the keyboard does not link the app's engine list.
+    static let localEngineName = LocalDictationHost.engineName
+
+    private func endLocal() {
+        localProbe?.cancel()
+        localProbe = nil
+        if let id = localRequest?.id, localHost.request?.id == id { localHost.cancel() }
+        localRequest = nil
+    }
+
+    /// On appearance: a dictation this process is still recognizing (its controller is gone, or
+    /// this one went off screen) is shown here, and offered when its text arrives. With nothing
+    /// in flight, a recording whose recognition failed earlier gets its one retry.
+    private func adoptLocalDictation() {
+        guard let request = localHost.request else {
+            if let id = localRequest?.id, ownedRequestID == id {
+                switch state {
+                case .requesting, .recording, .transcribing:
+                    ownedRequestID = nil
+                    state = .idle
+                default: break
+                }
+            }
+            localRequest = nil
+            localHost.retryKeptRecording(in: captureHost())
+            return
+        }
+        // Starting or recording belongs to the controller that tapped (this one, when the
+        // appearance is checked again); only a recognition is taken over.
+        guard localHost.adopt(self, for: request.id) else { return }
+        localRequest = request
+        if ownedRequestID != request.id {
+            ownedRequestID = request.id
+            ownedGeneration = request.generation
+            requiresExplicitInsert = true
+        }
+        if case .transcribing = state {} else { state = .transcribing }
     }
 
     private func openApp(for requestID: UUID) {
@@ -1173,13 +1828,15 @@ final class MicController {
                 return
             }
             #endif
-            levelSubscription = LevelChannel.Subscription { [weak self] level in
-                self?.appendLevel(level)
+            levelSubscription = LevelChannel.Subscription { [weak self] level, finishIn in
+                guard let self, self.localRequest == nil else { return }
+                self.appendLevel(level, finishIn: finishIn)
             }
         } else {
             stopLevelSampling()
             levelRecordingStart = nil
             hearsNothing = false
+            quietFinishIn = nil
             if case .transcribing = state { return }
             levels = Array(repeating: 0, count: 32)
         }
@@ -1201,8 +1858,10 @@ final class MicController {
         #endif
     }
 
-    private func appendLevel(_ sample: Float) {
+    private func appendLevel(_ sample: Float, finishIn: Int? = nil) {
         guard isVisible, case .recording = state else { return }
+        let countdown = isPaused ? nil : finishIn
+        if quietFinishIn != countdown { quietFinishIn = countdown }
         let latest = isPaused ? 0 : sample
         var next = levels
         next.removeFirst()
@@ -1230,6 +1889,8 @@ final class MicController {
     #if DEBUG && targetEnvironment(simulator)
     private var fixtureDrivesLevels = false
     private var fixtureConstantLevel: Float?
+    /// The `finishing` fixture's countdown, re-sent with each synthetic level as the app would.
+    private var fixtureFinishIn: Int?
     private var fixtureLevelTask: Task<Void, Never>?
 
     /// A fixture stands in for the app: a constant level or a synthetic envelope at 20 Hz.
@@ -1240,7 +1901,7 @@ final class MicController {
                 try? await Task.sleep(for: .milliseconds(50))
                 guard !Task.isCancelled, let self else { return }
                 tick += 1
-                self.appendLevel(self.fixtureConstantLevel ?? Self.fixtureEnvelope(tick: tick))
+                self.appendLevel(self.fixtureConstantLevel ?? Self.fixtureEnvelope(tick: tick), finishIn: self.fixtureFinishIn)
             }
         }
     }
@@ -1263,7 +1924,12 @@ final class MicController {
                     let fixture = KeyboardFixture.parse(text)
                     // A dictation is delivered once. Left in place, a keyboard that relaunches would
                     // read the same file as new and insert the text a second time.
-                    if fixture.say != nil { KeyboardFixture.removeFile() }
+                    // The line is forgotten with the file, so the same one (a second `undo`) is
+                    // delivered again when it is written again.
+                    if fixture.say != nil || fixture.style != nil || fixture.undo {
+                        KeyboardFixture.removeFile()
+                        self.lastFixtureText = nil
+                    }
                     self.apply(fixture)
                 }
                 try? await Task.sleep(for: .milliseconds(300))
@@ -1276,14 +1942,26 @@ final class MicController {
             cancelTimers()
             let marked = KeyboardFixture.doubtMarks(in: said)
             fixtureForcesDoubts = !marked.doubts.isEmpty
-            insert(DictationResult(requestID: UUID(), generation: 1, text: marked.text, audioSeconds: 3,
-                                   createdAt: Date(), inputSession: nil, doubts: marked.doubts.isEmpty ? nil : marked.doubts))
+            let request = DictationRequest(id: UUID(), generation: store.ledger.droppedGeneration + 1,
+                                           createdAt: Date(), inputSession: nil, contextBefore: nil)
+            store.request = request
+            let result = DictationResult(requestID: request.id, generation: request.generation, text: marked.text,
+                                         audioSeconds: 3, createdAt: Date(), inputSession: nil,
+                                         doubts: marked.doubts.isEmpty ? nil : marked.doubts)
+            if store.publishFinal(result, for: request) { insert(result) }
             fixtureForcesDoubts = false
+            return
+        }
+        if let style = fixture.style {
+            chooseStyle(style)
+            return
+        }
+        if fixture.undo {
+            tapUndo()
             return
         }
         if fixture.capsLock { lockShift?() }
         // Look tokens apply on their own too, so `accent-ice` alone recolors without a state.
-        FlowingWave.debugShading = fixture.waveShading.flatMap(FlowingWave.Shading.init(rawValue:))
         if let accent = fixture.accent, accent != AccentChoice.current {
             AccentChoice.current = accent
             KeyboardTheme.refreshAccent()
@@ -1298,7 +1976,9 @@ final class MicController {
         dictationsInserted = Self.trainingDictations
         fixtureDrivesLevels = false
         fixtureConstantLevel = nil
+        fixtureFinishIn = nil
         hearsNothing = false
+        quietFinishIn = nil
         switch fixed {
         case .idle:
             state = .idle
@@ -1316,6 +1996,12 @@ final class MicController {
             levels = Array(repeating: level, count: levels.count)
             state = .recording(startedAt: Date().addingTimeInterval(-12))
             hearsNothing = fixed == .quiet
+        case .finishing:
+            fixtureConstantLevel = 0
+            levels = Array(repeating: 0, count: levels.count)
+            fixtureFinishIn = 3
+            state = .recording(startedAt: Date().addingTimeInterval(-9))
+            quietFinishIn = 3
         case .transcribing:
             levels = KeyboardFixture.sampleLevels(count: levels.count)
             state = .transcribing
@@ -1337,5 +2023,138 @@ final class MicController {
     /// wins; both are the flags KeyFeedback caches on each appearance.
     private func haptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
         feedback.impact(style)
+    }
+}
+
+extension MicController: LocalDictationObserver {
+    /// Everything about a dictation recorded here reaches this controller only through the host,
+    /// which delivers the words itself; this only moves what the strip shows.
+    func localDictation(_ request: DictationRequest, reported update: LocalDictationHost.Update) {
+        guard localRequest?.id == request.id else { return }
+        let owns = ownedRequestID == request.id
+        switch update {
+        case .started:
+            guard owns, case .requesting = state else { return }
+            state = .recording(startedAt: Date())
+            if holdRequestID == request.id { haptic(.light) }
+        case .paused(let value):
+            isPaused = value
+        case .level(let level, let countdown):
+            appendLevel(level, finishIn: countdown)
+        case .recognizing:
+            // A limit, or iOS taking the microphone, ended it without a tap on Stop.
+            guard owns, case .recording = state else { return }
+            state = .transcribing
+        case .delivered(let published):
+            localRequest = nil
+            guard owns else { return }
+            if published {
+                evaluateResult()
+            } else {
+                ownedRequestID = nil
+                state = .error("Your words are in History.")
+                scheduleIdle(after: .seconds(4))
+                return
+            }
+            // Not on screen, or nothing to insert: the strip never stays on "Transcribing".
+            switch state {
+            case .requesting, .recording, .transcribing:
+                ownedRequestID = nil
+                state = .idle
+            default:
+                break
+            }
+        case .savedForZone:
+            localRequest = nil
+            guard owns else { return }
+            ownedRequestID = nil
+            state = .error("Finishing your recording in Zone.")
+            if isVisible, openedAppForRequest != request.id {
+                openedAppForRequest = request.id
+                proxy?.open(ZoneContract.homeURL)
+            }
+            // A host can decline a URL. Keep a manual way forward without opening Zone twice.
+            expiryTask?.cancel()
+            expiryTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard let self, !Task.isCancelled, isVisible, openedAppForRequest == request.id,
+                      state == .error("Finishing your recording in Zone.") else { return }
+                state = .error("Open Zone to finish your saved recording.")
+            }
+        case .failed(let message):
+            localRequest = nil
+            guard owns else { return }
+            ownedRequestID = nil
+            // The next tap on the mic opens Zone, the way it always could.
+            opensAppOnNextTap = true
+            state = .error("\(message) Tap the mic to open Zone.")
+            haptic(.light)
+            scheduleIdle(after: .seconds(8))
+        }
+    }
+}
+
+#if DEBUG
+/// A hold on space with no dictation behind it, for tests of the grid's side of hold space to
+/// talk: what the hold answers, how often it began and ended, and the phase the space bar shows.
+@MainActor @Observable final class SpaceHoldStandIn {
+    var talkAvailable = false
+    var phase = SpaceTalk.Phase.none
+    private(set) var began = 0
+    private(set) var ended = 0
+    /// The strip explains (Zone not ready): the hold is talking's, with no dictation.
+    var explainsInsteadOfTalking = false
+
+    func begin() -> Bool {
+        began += 1
+        if talkAvailable, !explainsInsteadOfTalking { phase = .starting }
+        return talkAvailable
+    }
+
+    func end() {
+        ended += 1
+        phase = .none
+    }
+}
+#endif
+
+/// Shared by the visible panel and both cue and quiet consumers in the recording host.
+@MainActor
+final class KeyboardSettingReader {
+    static let shared = KeyboardSettingReader(store: UserDefaultsSharedStore())
+    let store: SharedStore
+    private let last: LastKeyboardPreferences
+    private var pending: [QuickSettingRequest] = []
+    private var revision: UInt = 0
+
+    init(store: SharedStore, defaults: UserDefaults = .standard) {
+        self.store = store
+        self.last = LastKeyboardPreferences(defaults: defaults)
+    }
+
+    func current() -> KeyboardPreferences {
+        if let shared = store as? UserDefaultsSharedStore {
+            return last.resolve(stored: shared.storedKeyboardPreferences, pending: pending)
+        }
+        return store.keyboardPreferences.overlaying(pending)
+    }
+
+    func refresh() async {
+        guard let inbox = store.quickSettingInbox else { return }
+        revision &+= 1
+        let revisionAtRead = revision
+        let requests = await Task.detached { try? inbox.read() }.value
+        guard let requests, revisionAtRead == revision else { return }
+        pending = requests
+        _ = current()
+    }
+
+    func submit(_ value: QuickSetting, inbox: QuickSettingInbox) async throws {
+        let known = current()
+        let request = try await Task.detached { try inbox.submit(value, known: known) }.value
+        revision &+= 1
+        pending.removeAll { $0.value.key == value.key && $0.stamp < request.stamp }
+        pending.append(request)
+        _ = current()
     }
 }

@@ -17,6 +17,19 @@ final class TranscriptHistoryTests: XCTestCase {
         try? FileManager.default.removeItem(at: directory)
     }
 
+    func testLastFinishedDoesNotFallBackAfterSilenceOrDeletion() {
+        let store = history!
+        let first = UUID(), last = UUID()
+        store.finish(id: first, text: "older", audioSeconds: 1)
+        store.finish(id: last, text: "newest", audioSeconds: 1)
+        XCTAssertEqual(store.lastFinishedRecording()?.id, last)
+        store.delete(id: last)
+        XCTAssertNil(store.lastFinishedRecording())
+        store.finish(id: first, text: "another take", audioSeconds: 2)
+        store.finish(id: UUID(), text: "", audioSeconds: 1)
+        XCTAssertNil(TranscriptHistory(directory: directory).lastFinishedRecording())
+    }
+
     func testAFinishedDictationIsKeptNewestFirst() {
         let a = UUID(), b = UUID()
         history.begin(id: a, engine: "moonshineTiny", source: .keyboard, now: t0)
@@ -28,6 +41,19 @@ final class TranscriptHistoryTests: XCTestCase {
         XCTAssertEqual(records[1].engine, "moonshineTiny")
         XCTAssertEqual(records[1].source, .keyboard)
         XCTAssertEqual(records[1].createdAt, t0, "created when recording began, not when it finished")
+    }
+
+    func testRecentDictationStillShowsAfterSixtyNotes() {
+        let id = UUID()
+        history.begin(id: id, engine: "e", source: .keyboard, now: t0)
+        history.finish(id: id, text: "remember", audioSeconds: 1, now: t0)
+        for index in 1...60 {
+            let note = UUID()
+            let date = t0 + Double(index)
+            history.begin(id: note, engine: "e", source: .app, now: date)
+            history.finish(id: note, text: "note", audioSeconds: 1, status: .note, now: date)
+        }
+        XCTAssertEqual(history.recentDictations(limit: 3, now: t0 + 61).map(\.id), [id])
     }
 
     func testEmptyResultsAreNotKept() {
@@ -52,6 +78,28 @@ final class TranscriptHistoryTests: XCTestCase {
         XCTAssertEqual(record?.status, .cutOff)
         XCTAssertEqual(record?.audioSeconds, 8)
         XCTAssertTrue(relaunched.recoverCutOff(now: t0 + 200).isEmpty, "recovered once only")
+    }
+
+    func testFailedHistoryDeleteKeepsTheRecoveryDraft() throws {
+        let id = UUID()
+        history.begin(id: id, engine: "test", source: .app, now: t0)
+        history.saveProgress(id: id, text: "pending words", audioSeconds: 4, now: t0 + 4)
+        let blocked = directory.appendingPathComponent("history.json")
+        try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: false)
+        try Data([1]).write(to: blocked.appendingPathComponent("block"))
+        XCTAssertFalse(history.delete(id: id))
+        try FileManager.default.removeItem(at: blocked)
+        XCTAssertEqual(history.recoverCutOff(now: t0 + 120).map(\.text), ["pending words"])
+    }
+
+    func testRecoveryLeavesUnknownDraftBytesAvailableForBackup() throws {
+        let name = UUID().uuidString + ".json"
+        let url = directory.appendingPathComponent("inflight").appendingPathComponent(name)
+        let bytes = Data("future draft format".utf8)
+        try bytes.write(to: url)
+        XCTAssertTrue(history.recoverCutOff(now: t0 + 120).isEmpty)
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+        XCTAssertEqual(try history.backupRecoveryFiles()["inflight-" + name], bytes)
     }
 
     func testARecordingStillRunningIsNotRecovered() {
@@ -201,6 +249,86 @@ final class TranscriptHistoryTests: XCTestCase {
         history.deleteAll()
         XCTAssertTrue(history.records(now: t0 + 2).isEmpty)
     }
+
+    /// Delete everything once left quarantined and imported recovery files, and a crash's
+    /// in-flight text, in a later backup export, and the crash text came back on the next launch.
+    func testDeleteAllLeavesNothingABackupWouldExport() throws {
+        let fm = FileManager.default
+        history.finish(id: UUID(), text: "kept until deleted", audioSeconds: 1, engine: "e", source: .app, now: t0)
+        try Data("quarantined words".utf8).write(to: directory.appendingPathComponent("history.unreadable-1.json"))
+        let source = TranscriptHistory(directory: directory.appendingPathComponent("elsewhere"))
+        try Data("another phone's raw text".utf8).write(to: source.directory.appendingPathComponent("history.unreadable-9.json"))
+        try history.importRecoveryFiles(try source.backupRecoveryFiles())
+        let crashed = UUID(), live = UUID()
+        history.begin(id: crashed, engine: "e", source: .keyboard, now: t0)
+        history.saveProgress(id: crashed, text: "left by a crash", audioSeconds: 2, now: t0 + 1)
+        history.begin(id: live, engine: "e", source: .keyboard, now: t0 + 990)
+        history.saveProgress(id: live, text: "still talking", audioSeconds: 2, now: t0 + 995)
+        try Data("not json at all".utf8).write(to: directory.appendingPathComponent("inflight/\(UUID().uuidString).json"))
+        // Nearby files that are not history recovery stay byte for byte.
+        let neighbours = ["notes.json", "history.unreadable.txt", "history-unreadable-1.json", "inflight/readme.txt"]
+        for name in neighbours { try Data(name.utf8).write(to: directory.appendingPathComponent(name)) }
+        XCTAssertEqual(try history.backupRecoveryFiles().count, 5)
+
+        XCTAssertTrue(history.deleteAllWithRecovery(now: t0 + 1_000))
+
+        XCTAssertTrue(history.records(now: t0 + 1_000).isEmpty)
+        XCTAssertEqual(Array(try history.backupRecoveryFiles().keys), ["inflight-\(live.uuidString).json"],
+                       "only the dictation running right now remains")
+        for name in neighbours {
+            XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent(name)), Data(name.utf8), name)
+        }
+        XCTAssertTrue(fm.fileExists(atPath: source.directory.appendingPathComponent("history.unreadable-9.json").path),
+                      "another history's files are not this delete's")
+        let relaunched = TranscriptHistory(directory: directory)
+        XCTAssertTrue(relaunched.recoverCutOff(now: t0 + 1_000, activeWindow: 30).isEmpty,
+                      "deleted crash text must not come back as a cut-off")
+        XCTAssertNil(relaunched.record(id: crashed))
+        relaunched.finish(id: live, text: "still talking, done", audioSeconds: 3, now: t0 + 1_001)
+        XCTAssertEqual(relaunched.records(now: t0 + 1_002).map(\.text), ["still talking, done"])
+    }
+
+    func testDeleteAllRemovesTheQuarantineOfAnUndecodableHistoryFile() throws {
+        try Data("{ not a history".utf8).write(to: directory.appendingPathComponent("history.json"))
+        XCTAssertTrue(history.deleteAllWithRecovery(now: t0))
+        XCTAssertTrue(try history.backupRecoveryFiles().isEmpty)
+        XCTAssertTrue(try TranscriptHistory.recordsInBackup(history.backupData()).isEmpty)
+    }
+
+    func testRetentionNeverErasesRecoveryFiles() throws {
+        try Data("quarantined words".utf8).write(to: directory.appendingPathComponent("history.unreadable-1.json"))
+        try history.importRecoveryFiles(["inflight-x.json": Data("imported".utf8)])
+        for retention in [HistoryRetention.sevenDays, .thirtyDays, .off] { history.setRetention(retention, now: t0 + 400 * 86_400) }
+        history.purgeExpired(now: t0 + 400 * 86_400)
+        history.finish(id: UUID(), text: "dropped by Off", audioSeconds: 1, now: t0 + 400 * 86_400)
+        XCTAssertEqual(try history.backupRecoveryFiles().count, 2)
+    }
+
+    func testDeleteAllReportsARecoveryNameItCannotRemoveAndLeavesItsContents() throws {
+        let folder = directory.appendingPathComponent("history.imported-recovery-folder.json", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let inside = folder.appendingPathComponent("unrelated.txt")
+        try Data("unrelated".utf8).write(to: inside)
+        try Data("quarantined words".utf8).write(to: directory.appendingPathComponent("history.unreadable-1.json"))
+        XCTAssertFalse(history.deleteAllWithRecovery(now: t0), "not reported as deleted")
+        XCTAssertEqual(try Data(contentsOf: inside), Data("unrelated".utf8), "no blanket folder delete")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("history.unreadable-1.json").path))
+    }
+    func testDeleteAllDoesNotTraverseALinkedInflightFolder() throws {
+        let manager = FileManager.default
+        let other = directory.appendingPathComponent("other")
+        try manager.createDirectory(at: other, withIntermediateDirectories: true)
+        let keep = other.appendingPathComponent("example.json")
+        try Data("unrelated".utf8).write(to: keep)
+        let inflight = directory.appendingPathComponent("inflight")
+        if manager.fileExists(atPath: inflight.path) { try manager.removeItem(at: inflight) }
+        try manager.createSymbolicLink(at: inflight, withDestinationURL: other)
+        XCTAssertThrowsError(try history.backupRecoveryFiles())
+        XCTAssertTrue(history.deleteAllWithRecovery(now: t0))
+        XCTAssertEqual(try Data(contentsOf: keep), Data("unrelated".utf8))
+        XCTAssertFalse(manager.fileExists(atPath: inflight.path))
+    }
+
     func testFailedFinalWritePreservesRecoveryUntilRetryCommits() throws {
         let id = UUID()
         history.begin(id: id, engine: "e", source: .keyboard, now: t0)

@@ -59,7 +59,8 @@ struct MeetingTimerText: View {
 }
 
 struct MeetingAppearanceView: View {
-    @AppStorage("meetingWaveformStyle") private var waveform = EdgeEqualizer.Style.flow.rawValue
+    @Environment(MeetingCoordinator.self) private var meetings
+    @AppStorage(MeetingWaveStyle.preferenceKey) private var waveform = MeetingWaveStyle.defaultStyle.rawValue
     @AppStorage("meetingTimerAnimated") private var animated = true
     @AppStorage("meetingTimerPace") private var pace = 0.5
     @Environment(\.colorScheme) private var scheme
@@ -89,7 +90,7 @@ struct MeetingAppearanceView: View {
 
             Section {
                 Picker("Style", selection: $waveform) {
-                    ForEach(EdgeEqualizer.Style.allCases) { Text($0.title).tag($0.rawValue) }
+                    ForEach(MeetingWaveStyle.allCases) { Text($0.title).tag($0.rawValue) }
                 }
             } header: {
                 Text("Waveform")
@@ -102,7 +103,8 @@ struct MeetingAppearanceView: View {
             .listRowBackground(Zone.card(scheme))
         }
         .scrollContentBackground(.hidden)
-        .tint(Zone.accentText(scheme))
+        .tint(Zone.inlineInk(scheme))
+        .onChange(of: waveform) { _, _ in meetings.refreshIslandAppearance() }
         .navigationTitle("Meeting appearance")
         .zoneBackButton()
         .navigationBarTitleDisplayMode(.inline)
@@ -110,43 +112,110 @@ struct MeetingAppearanceView: View {
     }
 
     private var waveformDescription: String {
-        switch EdgeEqualizer.Style(rawValue: waveform) ?? .flow {
-        case .flow: "Audio ripples around the screen edge."
-        case .breath: "The border expands and contracts with your voice."
-        case .glow: "Static border that brightens with sound."
+        MeetingWaveStyle(preference: waveform).detail
+    }
+}
+
+struct MeetingPreviewFrame {
+    let levels: [Float]
+    let seconds: Double
+    let playing: Bool
+
+    func recorder(insets: EdgeInsets = EdgeInsets()) -> some View {
+        MeetingRecorderFace(edge: MeetingEdge(levels: levels, active: playing), seconds: { seconds },
+                            title: "Meeting", isPaused: !playing, previewInsets: insets)
+    }
+}
+
+/// A short exchange. The second voice answers early on the last phrase. The meter sees
+/// one mixed envelope, just as it does with one microphone in a room.
+enum MeetingDemoSpeech {
+    private static let syllables: [(start: Int, length: Int, stress: Float)] = [
+        (8, 5, 0.37), (14, 4, 0.19), (20, 9, 0.50), (33, 5, 0.25), (39, 7, 0.42),
+        (62, 8, 0.72), (72, 4, 0.29), (78, 7, 0.56), (89, 5, 0.36),
+        (103, 9, 0.55), (114, 6, 0.32), (123, 8, 0.49),
+        (109, 7, 0.41), (118, 8, 0.65), (130, 5, 0.34), (138, 8, 0.46)
+    ]
+    static func sample(at tick: Int) -> Float {
+        let t = tick % 168
+        var power: Float = 0
+        for beat in syllables where (beat.start..<beat.start + beat.length).contains(t) {
+            let age = Float(t - beat.start) / Float(beat.length)
+            let amplitude = beat.stress * min(1, (age + 0.08) * 4) * (1 - age * age)
+            power += amplitude * amplitude
+        }
+        return min(1, sqrt(power))
+    }
+}
+
+/// Render the recorder at phone dimensions, then scale the complete face. The Settings
+/// row never supplies its own timer color, border weight, corner radius or status label.
+struct MeetingRecorderMiniature: View {
+    let frame: MeetingPreviewFrame
+    @State private var display = PreviewDisplay()
+    var body: some View {
+        GeometryReader { geometry in
+            let size = display.size
+            let scale = min(geometry.size.width / size.width, geometry.size.height / size.height)
+            let radius = display.insets.bottom > 0 ? min(size.width, size.height) * 56 / 393 : 0
+            frame.recorder(insets: display.insets)
+                .frame(width: size.width, height: size.height)
+                .clipShape(RoundedRectangle(cornerRadius: radius))
+                .scaleEffect(scale)
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .background(PreviewWindow { display = $0 })
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct PreviewDisplay: Equatable {
+    var size = CGSize(width: 393, height: 852)
+    var insets = EdgeInsets(top: 59, leading: 0, bottom: 34, trailing: 0)
+}
+
+/// Use the very window containing the Settings row, including when the phone rotates.
+private struct PreviewWindow: UIViewRepresentable {
+    let measured: (PreviewDisplay) -> Void
+    func makeUIView(context: Context) -> Probe { Probe() }
+    func updateUIView(_ view: Probe, context: Context) { view.measured = measured }
+
+    final class Probe: UIView {
+        var measured: ((PreviewDisplay) -> Void)?
+        private var previous: PreviewDisplay?
+        override func didMoveToWindow() { super.didMoveToWindow(); measure() }
+        override func layoutSubviews() { super.layoutSubviews(); measure() }
+        override func safeAreaInsetsDidChange() { super.safeAreaInsetsDidChange(); measure() }
+
+        private func measure() {
+            guard let window, !window.bounds.isEmpty else { return }
+            let i = window.safeAreaInsets
+            let display = PreviewDisplay(size: window.bounds.size,
+                insets: EdgeInsets(top: i.top, leading: i.left, bottom: i.bottom, trailing: i.right))
+            guard display != previous else { return }
+            previous = display
+            DispatchQueue.main.async { [weak self] in self?.measured?(display) }
         }
     }
 }
 
 private struct MeetingMotionPreview: View {
-    @AppStorage("meetingWaveformStyle") private var waveform = EdgeEqualizer.Style.flow.rawValue
-    @Environment(\.colorScheme) private var scheme
     @Environment(\.scenePhase) private var scenePhase
-    @State private var seconds = 3598.0
-    @State private var samples: [Float] = Array(repeating: 0, count: 48)
+    @State private var seconds = 0.0
+    @State private var samples: [Float] = Array(repeating: 0, count: MeetingWaveSignal.count)
     @State private var playing = true
 
     var body: some View {
         VStack(spacing: 12) {
-            ZStack {
-                Zone.paper(scheme)
-                EdgeEqualizer(levels: samples, color: UIColor(Zone.accentGraphic(scheme)),
-                              active: playing && scenePhase == .active,
-                              style: EdgeEqualizer.Style(rawValue: waveform) ?? .flow)
-                    .accessibilityHidden(true)
-                    .allowsHitTesting(false)
-                VStack(spacing: 4) {
-                    MeetingTimerText(seconds: seconds, fontSize: 52)
-                    Text("Preview").font(.caption).foregroundStyle(Zone.muted(scheme))
-                }
-                .padding(24)
-            }
-            .frame(height: 200)
-            .clipShape(Zone.cardShape)
+            MeetingRecorderMiniature(frame: .init(levels: samples, seconds: seconds, playing: playing))
+                .frame(height: 286)
             HStack {
                 Button(playing ? "Pause preview" : "Play preview") { playing.toggle() }
+                #if DEBUG
                 Spacer()
                 Button("Hour rollover") { seconds = 3598; playing = true }
+                #endif
             }
             .font(.footnote)
             .buttonStyle(.borderless)
@@ -158,12 +227,12 @@ private struct MeetingMotionPreview: View {
             var tick = 0
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
-                guard playing else { continue }
-                tick += 1
-                let t = Double(tick) * 0.05
-                samples.removeFirst()
-                samples.append(Float(max(0, sin(t * 2.3)) * (0.25 + 0.15 * sin(t * 11))))
-                if tick % 20 == 0 { seconds += 1 }
+                if playing { tick += 1 }
+                if playing || samples.contains(where: { $0 != 0 }) {
+                    samples.removeFirst()
+                    samples.append(playing ? MeetingDemoSpeech.sample(at: tick) : 0)
+                }
+                if playing && tick % 20 == 0 { seconds += 1 }
             }
         }
     }

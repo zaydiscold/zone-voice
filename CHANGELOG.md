@@ -10,6 +10,121 @@ earlier build announced starts with "Changed since" or "Fixed since" and that bu
 notes people read inside Zone (Settings > Version) are per version, in `Zone/ReleaseNotes/`; the
 long form for 1.0.4 is `docs/release-notes/1.0.4.md`.
 
+## 1.0.5 (2026112001), November 20, 2026
+
+Source 9d3c176e4a6c26a02176d1f214aa9ab60c92c448. App Store Connect build `771d35e9-b6c9-4763-b532-15cce81007ef`. TestFlight distribution requested; App Store submission is separate.
+
+What to Test in App Store Connect was written by hand for this build, and that text is kept there and in the build receipt. These are the per-change notes it stands for.
+
+- When the Action Button cannot start the microphone, Zone says what works: press again, or with CarPlay, open Zone and then press. Before, it asked you to open Zone "once to start its microphone session".
+- With CarPlay connected, Zone turns the microphone on only while you record, so music and audiobooks stay on the car speakers in stereo instead of moving to the iPhone. Turning Zone on from Home in the car keeps it ready, as before.
+- What's New and Settings > Version are shorter: every change is one line, grouped by Dictation, Keyboard, Voice notes, Dynamic Island and more. The sheet after an update shows only the few big ones.
+- If you tap the mic, Zone opens and no recording ever starts, the keyboard now says so after ten seconds and gives the mic back, instead of asking you to finish in Zone.
+- Your data > Delete everything, and the delete-by-date choices, now remove text files left by earlier versions. Before, those stayed on the iPhone.
+- Typing, swipe typing and dictation know more AI and developer terms people use every day, such as PRs, WebSocket, latencies, TPUs and FastAPI, and keep them as you write them.
+- Settings > Experimental is now Dictation options, under Dictation: Scratch that, Check unsure words, caps lock, faces, ordinals and California Mode, with their on or off choices kept. Smart @ is in Settings > @ Handles.
+- A second dictation after sentence punctuation starts with a capital when the field uses sentence capitals. Fixing an unsure word checks that the dictation is still at the cursor.
+- Finish when quiet, off by default: stop talking and the dictation finishes and types by itself after 3, 5, 10 or 30 seconds (5 unless you choose). The keyboard counts down the last seconds. Turn it on in Settings > Microphone and timing.
+- Fixing a word by hand no longer teaches Zone a typo: a slip made while retyping is corrected as usual, and names you capitalize are still learned. With Check unsure words on, a fix made by hand counts the same as one made from the strip.
+- History opens and refreshes faster with a long library, and saving a dictation from the keyboard uses less memory.
+- New, in Beta: hold the space bar to talk, and let go to type what you said. Turn it on in Settings > Keyboard > Hold space > Talk. A tap still types a space, and sliding sideways still moves the cursor. It works while Zone keeps the microphone ready; otherwise the keyboard asks you to tap the mic once.
+- Hold Zone's icon on the Home Screen for Voice note, Dictate and copy, Record a meeting, and Share Zone with a friend.
+- Under your word count on Home, see what it adds up to ("That's 1.2 Great Gatsbys."). Tap it for more comparisons. The one showing goes on your share card.
+- History shows how much text you've kept and how little space it takes.
+- Hold the gear on Home to jump to My words, Speech model, Keyboard, Appearance or Backup. Hold Share Zone with a friend in Settings for a QR code or just the links.
+- New for 1.0.5: the dot in Zone's icon is ice blue. It changes color with each version.
+- Stopping a meeting during a call clears the keyboard’s live mic indicator. A held dictation gets time to resume when the interruption ends.
+- Zone keeps its small dot in the Dynamic Island after a call, Siri or other audio briefly takes the microphone. Before, the wide orange microphone pill could come back until you opened Zone.
+- Five living Dynamic Island looks in Settings > Dynamic Island > Alive: Void (the island is a black cat whose eyes widen when you speak, and blink slowly while Zone waits), Mote (a pixel pet that hatches and grows with the words you dictate, and never shrinks), Sprout (grows as you speak, flowers when your words are kept), Nocturne (a bat, the camera is its body) and Loop (a comet circling an infinity).
+- Three art looks in Settings > Dynamic Island > Art: Stream (your words pass through the island as you say them, the newest right of the camera), Pulse (a heart that beats by itself while Zone waits, with a trace that follows your voice) and Drift (petals carried by the wind of your voice, settling when you stop).
+- Themes at the top of Settings > Dynamic Island set a look and a color in one tap, such as Night Watch (two white eyes on the black island), Heartline and Blossom. Two new colors: Bone and Rose.
+- Start and stop from the Dynamic Island. Hold the island while Zone is ready and tap Dictate (your words are copied, ready to paste anywhere) or Note. While you record, Pause is on the left and Stop on the right; Stop is on the Lock Screen too. Turn the buttons off in Settings > Dynamic Island > Buttons.
+- The island's edge lights in your accent color only while Zone is recording, and a check with your word count shows for a moment when a recording is kept.
+- Clearing Zone from the Lock Screen now turns Zone off, microphone included, instead of leaving the orange microphone dot on. A notification says so; open Zone to turn it back on. Settings > Dynamic Island explains it.
+- The Action Button and the Voice note control start more reliably when Zone is off or closed: if iOS refuses the microphone at first, Zone tries again within the same press.
+- Tapping the keyboard's mic with Zone off should no longer bring Zone forward a second time after you return to your app.
+- Settings > Dynamic Island starts with one switch, Zone in the Dynamic Island, on from the first launch. Turn it off and iPhone's own microphone pill shows while Zone waits, and the look, color and button choices are hidden because they no longer apply.
+- Choose the island's color in Settings > Dynamic Island > Color: your accent, Blackout (dark grey on black with no white at all, so the island stays a black pill), Graphite, Red, Amber or Green. The Lock Screen card follows it.
+- Zone's dot stays in the Dynamic Island past iOS's 8-hour limit: Zone starts a fresh one whenever you open it or press the Action Button. If iOS still ends it while the microphone is on, a notification says so, and a tap brings Zone back.
+- New control, Bring back Zone's island: add it to Control Center (or run it from Shortcuts) to put Zone back in the Dynamic Island without opening Zone.
+- Settings > Dynamic Island > Times: choose Live to see standby as "on for 29 minutes" and "Off in 15 minutes", counting by itself, instead of clock times.
+- Zone's island now lasts 16 hours after you last open Zone, not 8: on iOS 26 and later, Zone has iOS start a fresh island just before the old one's 8 hours run out, while you are in other apps. You see Zone's island open for a moment when it does.
+- Hold the island while Zone is ready to see this session: dictations, words and when you turned Zone on. The Lock Screen card shows the same and the time you saved, and says when Zone turns off as a time instead of a ticking countdown.
+- While Zone waits, nothing on the island looks like recording: the Recorder look's dot is white until you record, and recognizing your words after Stop no longer shows a moving waveform.
+- A misspelling Zone kept after an undone correction no longer takes over swipe typing for the everyday word beside it. When you type it, the row offers the everyday word, and choosing that makes Zone forget the misspelling.
+- Two-letter texting shorthand that sits one key from a very common word is kept as you type it, and changes only when your tap landed at the edge of the key.
+- A single slipped letter in more informal everyday words is now corrected, when no other word fits as well.
+- The keyboard does less repeated work each time it opens, so the first swipe lands sooner.
+- Phone number and card number fields on web forms get no swiped words or corrections, as code and password fields already did.
+- The mic is available again if Zone stops answering or the keyboard cannot open the app.
+- Zone starts getting the speech model ready as soon as the keyboard opens, so even a one-word dictation after the phone sat idle comes back without a wait.
+- The keyboard's rows sit 3 points higher, level with Apple's keyboard instead of pressed against the globe row.
+- Zone does less on launch and after each dictation, so opening it from the keyboard's mic is quicker. While it records, Zone no longer redraws its widget and controls every second.
+- Fixed: after an iPhone restart, Zone could open with the default color and sounds and an empty notes list until it was closed. It now waits for the first unlock and opens with your own settings and notes.
+- Home shows your longest dictation under your stats, with how long it ran, how many words it held and the day, once one runs a minute or more. Dictations already in History count.
+- The share card shows your longest dictation under its wave.
+- Send feedback (Settings > Send feedback): say or type what you think and Zone writes it into an email in your own mail app. Nothing is sent until you send it.
+- Home marks word milestones (500 words, 1,000, 5,000 and up) with a short note from Zayd, the next time you open Zone. Settings > About has Rate Zone on the App Store.
+- The first dictation after your phone has sat idle finishes about as fast as any other. Zone reads the speech model back into memory while you talk, so you no longer wait up to 3 seconds after you stop.
+- On iOS 26, removing Fluid Speech Mini now frees all of its storage, about 1.2 GB more than before, and Settings shows its full size. A nearly full iPhone no longer refuses to load a speech model it already has.
+- Dictation no longer swaps an everyday word like "repo" for one of My words that sounds like it.
+- A single mistyped letter in a newer everyday word or app name is now corrected, and a two-letter slip is fixed when the tap landed on the edge nearest the intended key.
+- The row above the keys now offers your next word. Finish a word and three likely next words appear; tap one to write it with a space, and keep tapping to carry the sentence on. While you type, the row puts the word that fits the sentence first, so "good m" offers morning. Suggestions are now on by default (Settings > Keyboard > Suggestions).
+- A word typed in the middle of a sentence in Messages no longer gets a capital it should not have.
+- Voice notes record in a card at the top of Zone instead of taking over the screen. Press the Action Button again and the next note starts at once.
+- After a note saves, edit, copy, share or delete it right on the Note saved page. Added to Notes takes you to it on Home.
+- While a note records, Home shows "Your note" and counts your words instead of repeating the card.
+- After a voice note finishes by itself (Finish when quiet, or Stop in the Dynamic Island), the next Action Button press starts a new note. Before, that first press did nothing.
+- With Finish when quiet on, a note that hears nothing for two seconds says Quiet on its card and in the Dynamic Island, with a countdown to when it saves. The note card has a Pause button.
+- Several notes saved in a row from the Action Button now all show on the Note saved page when you open Zone: step between them, edit or delete each one, or use Copy all.
+- A note from the Action Button no longer turns standby off. The island keeps showing Zone and the keyboard's mic starts in place instead of opening Zone. With "Turn on when Zone opens" on, a press from off also leaves the microphone ready for your "Keep microphone ready" time.
+- The 123 key is as wide as Return when no emoji or globe key sits beside it, the size iOS gives it.
+- A one-handed keyboard, off until you turn it on in Settings > Keyboard > One-handed. The keys move toward your left or right thumb at a width you choose (70 to 90 percent). Hold 123 and slide to switch sides or go back to full width, or tap the buttons beside the keys.
+- Buttons across the app now share one shape with the keyboard keys, cards line up edge to edge, and the section switch spans the top of Home.
+- Zone has one speech model now, Fluid Speech Mini, on every iPhone. Settings > Speech model explains it and shows each step from your voice to the text in your app. If you used Light, Zone removes it and downloads Fluid Speech Mini once (253 MB). Zone now needs iOS 18.
+- The keyboard's Paste key pastes without iPhone asking you to allow it each time. Turn the key on in Settings > Keyboard > Paste key.
+- Notes, History and Meetings are lighter: each item is a row on the page instead of its own card, with two lines of it and Copy right beside it. Tap a dictation to read all of it.
+- Deleting a dictation or a note asks first, and a full swipe in History no longer deletes on its own. The swipe typing trail (Settings > Keyboard > Swipe typing) is shorter and a little more see-through.
+- A long voice note or dictation keeps recording when iPhone removes Zone's Dynamic Island card at its eight-hour limit, instead of being stopped. Opening Zone brings the card back.
+- Tapping the mic twice while it opens starts one recording. A new keyboard request lets an audio retry finish.
+- Sending everything to a paired computer again now includes deletions made while the computer was offline.
+- Changing the style on the keyboard rewrites the dictation you just made in that style, so you can see a message as Casual, Formal or any other without saying it again. Tap the Z, pick a style, and the text changes in place.
+- Undo right after puts the earlier wording back and keeps the new style for what you say next.
+- Fixed: after you undo a dictation, the next thing you dictate or type starts with a capital again.
+- Long dictations use the same pauses to split speech even when audio arrives in a large batch.
+- The space bar shows a slim line instead of the word "space". Choose Voice, Word or Blank in Settings > Keyboard > Space bar.
+- Words per minute now counts only the time you spend talking, not the start of a recording, long pauses or the quiet before you tap stop, so short replies no longer drag your speed down. Time saved still counts the whole recording, against a typing speed of 36 words a minute.
+- After each dictation the island's check shows how fast you spoke ("Kept 42 words · 128 wpm"), and the Lock Screen card shows this session's words, speed and time saved.
+- With the microphone kept ready, Zone writes to storage about 95% less often in the background. If the keyboard ever says Zone is off while it is on, tell us.
+- If Zone stops while it's ready for the keyboard (an update, the phone reclaiming memory, closing it), a quiet notification says so. Open Zone to turn it back on. Turning Zone off yourself never sends one.
+- The styles the Z opens, and Insert and Dismiss, are raised keys with the keyboard's own shadow, and those shadows are a little deeper.
+- Dictation now leaves out stutters on its own: a sound you cut off before the word ("f- fidgeting"), a small word said twice by accident ("I I", "it's it's", "a a") and a phrase you started over ("in the in the box"). Words doubled on purpose, like "really really" or "thank you thank you", stay.
+- Tap the Z on the keyboard to choose the style for your next dictation. The styles open in the row beside it, and the Z stays put so a second tap closes them. Holding the microphone does the same, which is how to choose a style with the Z hidden (Settings > Keyboard > Hide the Z).
+- The recent dictations button now sits on the right, beside the microphone. Holding the keyboard key still offers Open Zone.
+- Casual and Very casual write small numbers as digits, the way people text: "around 7", "2 things". Formal and Excited still spell them out.
+- Numbers said together are written the same way in every style: "8 or 9, maybe 7".
+- Casual follows Settings > Keyboard > Auto-Capitalization. With it off, sentences in a casual dictation start lowercase; names and "I" keep their capitals.
+- Formal writes "gonna", "wanna", "kinda" and "cuz" as "going to", "want to", "kind of" and "because".
+- Settings > Text style shows the same sentence written in each style, so you can pick one by reading it.
+- "No one" is no longer written "no 1".
+- Dictation style names start with a capital: Casual, Very casual, Formal and Excited.
+- The style you pick with the Z stays until you pick another, from the Z or Settings > Text style, whichever you changed last. It used to go back to the Settings style after 15 minutes without a dictation, which is why a message picked as Casual could come out Formal. Settings now shows the style the next dictation will use.
+- Casual and very casual write times the way people text them: "7 am" and "12:45 pm", not "7 AM" or "7 a.m.". Formal keeps them as before.
+- A spoken time after "later than", "earlier than" or "sooner than" is written as a time: "later than 12:45".
+- A dictated question no longer ends with a stray period after its question mark ("work?." is now "work?").
+- Recent dictations (the clock in the row above the keys) stays on screen while word suggestions show, so a dictation that did not land can always be put back.
+- Typing and swipe typing know thousands more names and words: teams, players, places, brands, tech terms and British spellings are kept as you type them, and names take their capitals. Brands written with a hyphen or apostrophe, like T-Mobile and McDonald's, come out right when typed without one.
+- Dictation writes a few brand names the speech model confuses with everyday words only when the sentence is about them, such as Vercel in a sentence about deploying a site, or Jupyter in "Jupyter notebook".
+- When you backspace over the last word of a dictation and type it the way you meant, Zone remembers it and writes it that way in your next dictations (Settings > My words > Learn from corrections).
+- Autocorrect leaves a word after @ or # as you typed it, corrects a word typed right after a dictation, and expands your iPhone text replacements even when the shortcut is also a word Zone knows.
+- Fixing a typo in a selected everyday word no longer adds it to My words, and a capital an earlier build learned that way no longer follows the word into dictation and swipe.
+- Tightened copy across setup, Home, Settings, Meetings, History, and the keyboard so explanations stay direct and plain.
+- After Dictate and copy from the Action Button or a control, opening Zone later shows Home, not the finished screen of that earlier dictation.
+- Verification code fields open on the next keyboard in your list, where iPhone offers the code from Messages. Switching back to Zone in that field sticks.
+- Seven new voice graphics in Settings > Appearance > Voice graphic. Scope is the dot oscilloscope from Hex. Ink writes a line of script as you talk, Glyphs stamps a character per syllable, Branch grows and sheds leaves when you pause, Inkblot, Lanes and Stars each draw your voice their own way.
+- A new voice graphic, Bars: thin upright bars that rise as you talk, on the keyboard and on Home. Choose it in Settings > Appearance > Voice graphic.
+- The Z on the keyboard is drawn as a key, like the keys beside it, and stays pressed in while the styles are open.
+
 ## 1.0.4 (2026111604), November 16, 2026
 
 Source 5e16dc26a5c87585d33e789a061502e49b8fbfa7. App Store Connect build `766b32e4-40e5-4094-bed0-af107c3b94c7`. TestFlight distribution requested; App Store submission is separate.
@@ -148,7 +263,6 @@ Source 7444566db0d41ce0871c63ba854d671a8b043e8a. App Store Connect build `967a53
 Source dcdd2f6713f2a7f92d6a33aaa396190f3cc05b7d. App Store Connect build `fb2f044d-541d-4eec-b5b4-912c098dd1fb`. TestFlight distribution requested; App Store submission is separate.
 
 - Changed since 2026110812: the keyboard's Zone button is the plain Z again, without the dark square behind it, so it looks right in light and dark mode, and it sits closer to the other buttons.
-- Clean up dictation on your device in the Cleanup tab: download Fluid Pico once, then review changes with the original kept for recovery. Turn on Automatically clean dictation there to use cleanup after each recording.
 - Hide the listening screen while you dictate: recording keeps going, and a strip at the top of every page shows the time, finishes with the checkmark, or opens the recording again.
 - A new share card in Zone's own look, with a waveform drawn fresh each time you share. Home and the card now show words per minute, time saved (like "2h 5m") and "0 bytes shared. Ever."
 - Sharing the card now includes a short note with the App Store and TestFlight links, and Settings has Share Zone with a friend to send the links on their own.

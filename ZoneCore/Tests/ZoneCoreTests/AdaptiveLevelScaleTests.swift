@@ -28,4 +28,26 @@ final class AdaptiveLevelScaleTests: XCTestCase {
         var scale = AdaptiveLevelScale()
         XCTAssertEqual(scale.map(decibels: -120, elapsed: 0.05), 0)
     }
+    func testLowSpeechMovesTheMeterAndDoesNotAutoFinishOverSyllables() {
+        var meter = QuietVoiceMeter()
+        var finish = SilenceFinish(wait: 5)
+        var maxLevel: Float = 0
+        for step in 0..<240 {
+            let time = Double(step) * 0.05
+            let db: Float = step < 20 ? -64 : [-54, -48, -53, -59, -61, -57][step % 6]
+            let reading = meter.reading(rms: pow(10, db / 20), at: time)
+            maxLevel = max(maxLevel, reading.display)
+            XCTAssertNotEqual(finish.sample(level: reading.detection, at: time), .finish)
+        }
+        XCTAssertGreaterThan(maxLevel, 0.32)
+        var didFinish = false
+        for step in 240..<400 {
+            let t = Double(step) * 0.05
+            let room = meter.reading(rms: pow(10, -59.0 / 20), at: t)
+            if step > 255 { XCTAssertLessThan(room.display, 0.05) }
+            if finish.sample(level: room.detection, at: t) == .finish { didFinish = true }
+        }
+        XCTAssertTrue(didFinish)
+    }
+
 }

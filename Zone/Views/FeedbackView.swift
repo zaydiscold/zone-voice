@@ -14,6 +14,7 @@ enum FeedbackSession {
 /// what they think; Zone writes it into an email in their own mail app. Zone sends nothing:
 /// the App Store label stays Data Not Collected because the email is theirs to send.
 struct FeedbackView: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(DictationCoordinator.self) private var coordinator
     @Environment(\.colorScheme) private var scheme
     @Environment(\.dismiss) private var dismiss
@@ -45,18 +46,18 @@ struct FeedbackView: View {
                         .foregroundStyle(Zone.ink(scheme))
                     Text("Zayd")
                         .font(.system(.title2, design: .serif).italic())
-                        .foregroundStyle(Zone.accentText(scheme))
+                        .foregroundStyle(Zone.ink(scheme))
                         .accessibilityLabel("Signed, Zayd")
                     Hairline().padding(.vertical, 2)
                     Toggle("Add app and iPhone details", isOn: $includesDetails)
-                        .tint(Zone.accentGraphic)
+                        .tint(Zone.accentTone(scheme))
                         .accessibilityIdentifier("feedback.details")
                     Text(includesDetails
                          ? "Adds this line under your words: \(details.line)"
                          : "Only your words go in the email.")
-                        .font(.footnote).foregroundStyle(Zone.muted(scheme))
+                        .font(.footnote).foregroundStyle(.secondary)
                     Text("Email opens your mail app with this written out. Nothing is sent until you send it there.")
-                        .font(.footnote).foregroundStyle(Zone.muted(scheme))
+                        .font(.footnote).foregroundStyle(.secondary)
                     if mailUnavailable {
                         mailFallback.id(Self.fallbackAnchor)
                     }
@@ -77,7 +78,7 @@ struct FeedbackView: View {
             }
             }
             .safeAreaInset(edge: .bottom) {
-                Composer(text: $message, placeholder: "Say it or type it", forFeedback: true)
+                Composer(text: $message, placeholder: typeSize.isAccessibilitySize ? "Feedback" : "Say it or type it", forFeedback: true)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
             }
@@ -171,7 +172,7 @@ struct MilestoneCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Button(action: close) {
                     Image(systemName: "xmark").font(.footnote.weight(.semibold))
-                        .foregroundStyle(Zone.muted(scheme))
+                        .foregroundStyle(.secondary)
                         .frame(width: 32, height: 32).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -185,7 +186,7 @@ struct MilestoneCard: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("Zayd")
                     .font(.system(.title3, design: .serif).italic())
-                    .foregroundStyle(Zone.accentText(scheme))
+                    .foregroundStyle(Zone.ink(scheme))
                     .accessibilityLabel("Signed, Zayd")
                 Spacer(minLength: 8)
                 Button("Tell Zayd", action: reply)

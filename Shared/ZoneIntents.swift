@@ -3,6 +3,22 @@
 import AppIntents
 import Foundation
 
+struct RecordingUnchanged: Error {
+    let message: String
+}
+
+@MainActor
+private func recordingReply(_ action: () async throws -> Void) async throws -> IntentResultContainer<Never, Never, Never, IntentDialog> {
+    do {
+        try await action()
+        var reply: IntentResultContainer<Never, Never, Never, IntentDialog> = .result(dialog: "")
+        reply.dialog = nil
+        return reply
+    } catch let refusal as RecordingUnchanged {
+        return .result(dialog: IntentDialog("\(refusal.message)"))
+    }
+}
+
 /// Zone's two recording intents, in a file the app and the widget extension both compile, so
 /// a widget button (Home Screen, StandBy, the CarPlay widget stacks) can name them. Both are
 /// `AudioRecordingIntent`s, so the system always performs them in the app's own process. Each
@@ -21,9 +37,8 @@ struct DictateNoteIntent: AppIntent {
     static var supportedModes: IntentModes { [.background, .foreground(.dynamic)] }
 
     @MainActor
-    func perform() async throws -> some IntentResult {
-        try await ZoneIntentHost.perform(self, noteMode: true)
-        return .result()
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        try await recordingReply { try await ZoneIntentHost.perform(self, noteMode: true) }
     }
 }
 
@@ -36,9 +51,8 @@ struct DictateIntent: AppIntent {
     static var supportedModes: IntentModes { [.background, .foreground(.dynamic)] }
 
     @MainActor
-    func perform() async throws -> some IntentResult {
-        try await ZoneIntentHost.perform(self, noteMode: false)
-        return .result()
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        try await recordingReply { try await ZoneIntentHost.perform(self, noteMode: false) }
     }
 }
 
@@ -69,9 +83,8 @@ struct SetZoneRecordingIntent: SetValueIntent {
     init(noteMode: Bool) { self.noteMode = noteMode }
 
     @MainActor
-    func perform() async throws -> some IntentResult {
-        try await ZoneIntentHost.perform(self, noteMode: noteMode, desiredState: value)
-        return .result()
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        try await recordingReply { try await ZoneIntentHost.perform(self, noteMode: noteMode, desiredState: value) }
     }
 }
 
@@ -105,6 +118,29 @@ struct SetZoneStandbyIntent: SetValueIntent {
 }
 
 extension SetZoneStandbyIntent: LiveActivityIntent {}
+
+
+/// "Bring back Zone's island": while Zone is on, puts its card back in the Dynamic Island, or
+/// replaces an aging one so iOS's eight-hour limit starts over. iOS makes a card for an app in
+/// the background only inside one of the app's own intents, so this is how a Control Center
+/// button, the Action Button or a Shortcuts automation ("When Messages is opened") keeps the
+/// island Zone's without opening Zone. With Zone off it does nothing: it never turns the
+/// microphone on. A `LiveActivityIntent`, so iOS performs it in the Zone app.
+struct ShowIslandIntent: AppIntent {
+    static let title: LocalizedStringResource = "Bring back Zone's island"
+    static let description = IntentDescription("While Zone is on, puts Zone back in the Dynamic Island if iOS took it away, and keeps iOS's 8-hour limit from ending it. Does nothing while Zone is off. Never opens Zone.")
+    static let openAppWhenRun = false
+    @available(iOS 26.0, *)
+    static var supportedModes: IntentModes { [.background] }
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await ZoneIntentHost.showIsland()
+        return .result()
+    }
+}
+
+extension ShowIslandIntent: LiveActivityIntent {}
 
 
 /// What a button in the Dynamic Island or on the Lock Screen card asks for.

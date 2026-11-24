@@ -33,23 +33,23 @@ struct ClipSendSheet: View {
                     HStack(spacing: 12) {
                         // The system's own paste button: one tap sends what is on the
                         // clipboard, and iOS shows no "Allow Paste" question for it.
-                        PasteButton(payloadType: String.self) { values in
-                            let pasted = values.joined(separator: "\n")
-                            Task { @MainActor in send(pasted, source: .clipboard) }
+                        ClipPasteControl(fill: Zone.controlFill(scheme), ink: Zone.controlInk(scheme)) {
+                            send($0, source: .clipboard)
                         }
-                        .labelStyle(.titleAndIcon)
+                        .id(PasteAppearance(accent: AccentStore.shared.choice, scheme: scheme))
+                        .fixedSize()
                         .disabled(link.clipTargets.isEmpty)
                         .accessibilityIdentifier("clips.paste")
                         Spacer(minLength: 0)
                         Button("Send") { send(text, source: .typed) }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(ZonePrimaryButtonStyle())
                             .disabled(link.clipTargets.isEmpty || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             .accessibilityIdentifier("clips.send")
                     }
                     if let message {
                         Text(message)
                             .font(.footnote)
-                            .foregroundStyle(failed ? Color.red : Zone.muted(scheme))
+                            .foregroundStyle(failed ? Zone.live : Zone.muted(scheme))
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("clips.message")
                     }
@@ -67,7 +67,7 @@ struct ClipSendSheet: View {
                                     .lineLimit(2)
                                 HStack(spacing: 6) {
                                     Image(systemName: clip.isSent ? "checkmark.circle.fill" : "clock")
-                                        .foregroundStyle(clip.isSent ? Zone.accentText(scheme) : Zone.muted(scheme))
+                                        .foregroundStyle(clip.isSent ? Zone.accentTone(scheme) : Zone.muted(scheme))
                                         .accessibilityHidden(true)
                                     Text(status(clip))
                                         .accessibilityIdentifier("clips.status")
@@ -95,7 +95,7 @@ struct ClipSendSheet: View {
                 }
             }
             .scrollContentBackground(.hidden)
-            .tint(Zone.accentText(scheme))
+            .tint(Zone.inlineInk(scheme))
             .navigationTitle("Send text")
             .zoneBackButton()
             .navigationBarTitleDisplayMode(.inline)
@@ -130,21 +130,77 @@ struct ClipSendSheet: View {
             let clip = try link.sendClip(value, source: source)
             if source == .typed { text = "" }
             failed = false
-            message = "Sending…"
+            message = LinkClipCopy.sending
             waitingOn = clip.id
             Task {
                 let settled = await link.clipSettled(clip.id, within: Self.settleSeconds)
                 // A newer send owns the line now.
                 guard waitingOn == clip.id else { return }
                 waitingOn = nil
-                message = settled.map { LinkClipCopy.outcome($0, names: link.computerNames) }
+                message = settled.map { LinkClipCopy.outcome($0, names: link.computerNames) } ?? LinkClipCopy.removed
             }
         } catch let failure as LinkClipFailure {
             failed = true
             message = failure.plainMessage
         } catch {
             failed = true
-            message = "Couldn't save clip. Try again."
+            message = "Zone could not queue this text for your computer. Tap Send to try again."
         }
+    }
+}
+
+/// UIKit owns the trusted paste interaction and applies both colors to its native face.
+private struct PasteAppearance: Hashable {
+    let accent: AccentChoice
+    let scheme: ColorScheme
+}
+
+private struct ClipPasteControl: UIViewRepresentable {
+    let fill: Color
+    let ink: Color
+    let send: (String) -> Void
+
+    @MainActor final class Target: NSObject, UIPasteConfigurationSupporting {
+        var pasteConfiguration: UIPasteConfiguration? = UIPasteConfiguration(acceptableTypeIdentifiers: ClipboardPasteText.acceptedTypes)
+        var send: (String) -> Void
+
+        init(send: @escaping (String) -> Void) { self.send = send }
+
+        func canPaste(_ itemProviders: [NSItemProvider]) -> Bool {
+            itemProviders.contains(where: ClipboardPasteText.supports)
+        }
+
+        func paste(itemProviders: [NSItemProvider]) {
+            Task {
+                var strings: [String] = []
+                for provider in itemProviders where ClipboardPasteText.supports(provider) {
+                    let value: String? = await withCheckedContinuation { continuation in
+                        ClipboardPasteText.load(provider) { value in
+                            continuation.resume(returning: value)
+                        }
+                    }
+                    if let value { strings.append(value) }
+                }
+                if !strings.isEmpty { send(strings.joined(separator: "\n")) }
+            }
+        }
+    }
+
+    func makeCoordinator() -> Target { Target(send: send) }
+
+    func makeUIView(context: Context) -> UIPasteControl {
+        let configuration = UIPasteControl.Configuration()
+        configuration.baseForegroundColor = UIColor(ink)
+        configuration.baseBackgroundColor = UIColor(fill)
+        let control = UIPasteControl(configuration: configuration)
+        control.target = context.coordinator
+        control.accessibilityIdentifier = "clips.paste"
+        return control
+    }
+
+    func updateUIView(_ control: UIPasteControl, context: Context) {
+        context.coordinator.send = send
+        control.isUserInteractionEnabled = context.environment.isEnabled
+        control.alpha = context.environment.isEnabled ? 1 : 0.45
     }
 }

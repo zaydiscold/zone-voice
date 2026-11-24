@@ -56,6 +56,14 @@ final class LinkPairingTests: XCTestCase {
         XCTAssertEqual(failure("zone://pair?v=1&n=\(endpoint)&name=x"), .badSecret)
     }
 
+    func testOptionalExpiryMustBeUnambiguousUnixSeconds() throws {
+        XCTAssertNil(try LinkPairingLink.parse(link()).expiresAt)
+        XCTAssertEqual(try LinkPairingLink.parse(link(extra: "&exp=123")).expiresAt, Date(timeIntervalSince1970: 123))
+        for extra in ["&exp", "&exp=", "&exp=x", "&exp=-1", "&exp=1&exp=2"] {
+            XCTAssertThrowsError(try LinkPairingLink.parse(link(extra: extra)))
+        }
+    }
+
     func testOnlyVersionOnePairingLinksAreRead() {
         XCTAssertEqual(failure(link(v: "2")), .unsupportedVersion)
         XCTAssertEqual(failure(link(v: nil)), .notAPairingLink)

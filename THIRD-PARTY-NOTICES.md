@@ -2,12 +2,178 @@
 
 Zone is released under the MIT License. It ships, or is built from, the following third-party material.
 
+## BorderBeam
+
+Zone adapts the animation clock from [BorderBeam](https://github.com/ismnoiet/border-beam-ios) for the Home microphone lights.
+
+```text
+MIT License
+
+Copyright (c) 2026 ismnoiet
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## English word list (keyboard autocorrect)
 
 `ZoneCore/Sources/ZoneCore/Resources/en-words.txt` is generated from two sources, neither checked in:
 
 1. **SCOWL (Spell Checker Oriented Word Lists) 2020.12.07, sizes 10 to 60**, by Kevin Atkinson, http://wordlist.aspell.net/. It decides which words are valid and how they are cased. Its copyright notice, reproduced in full below as it requires, permits use, modification, distribution and sale with the notice kept. Zone uses only sizes 10 to 60, so the UKACD terms (size 80) do not apply, but the whole notice is kept for simplicity.
 2. **Wikipedia word frequency list, enwiki-2023-04-13**, by Ilya Semenov, https://github.com/IlyaSemenov/wikipedia-word-frequency, MIT License (below). Zone uses only the counts, to rank words; no Wikipedia text is shipped.
+
+## Emoji catalog and English search metadata
+
+`emoji.tsv` uses the Unicode Emoji data. `emoji-search.tsv` joins the panel's
+Unicode glyphs to English annotations from [Unicode CLDR 49](https://github.com/unicode-org/cldr/tree/release-49/common)
+and shortcode aliases from [Emojibase 18.0.0](https://emojibase.dev/docs/shortcodes/)
+(JoyPixels text metadata, commonly used for Discord-style names),
+[iamcal/emoji-data 16.0.0](https://github.com/iamcal/emoji-data/tree/v16.0.0)
+(Slack-style names), and [GitHub gemoji 4.1.0](https://github.com/github/gemoji/tree/v4.1.0).
+CLDR's data files are under Unicode License V3. Emojibase, JoyPixels non-artwork
+JSON, emoji-data and gemoji use MIT terms. The keyboard draws the system's glyphs.
+The bundled resources contain text metadata and Unicode characters.
+Zone uses iOS text fonts and emoji glyphs. ZoneGateOne and ZoneGateEven are original generated digit masks, covered by Zone’s MIT license.
+
+### Unicode License V3
+
+```text
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+```
+
+### Emojibase MIT notice
+
+```text
+MIT License
+
+Copyright (c) 2017-2019 Miles Johnson
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### emoji-data MIT notice
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2013 Cal Henderson
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### gemoji MIT notice
+
+```text
+Copyright (c) 2019 GitHub, Inc.
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation
+files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+```
+
+JoyPixels licenses its [non-artwork JSON](https://github.com/joypixels/emoji-toolkit/blob/master/LICENSE.md) under the [MIT License](https://opensource.org/license/mit/).
 
 ## iroh (Zone Link)
 
@@ -18,8 +184,24 @@ revision, with two changes so it imports only public iOS API: netdev (MIT, https
 at the merge commit of its pull request 195, and `scripts/iroh-patches/` applied to n0-dns-resolver 0.1.0
 (MIT OR Apache-2.0). The Swift binding it generates is byte for byte the release's.
 The library is built from iroh and the Rust crates it depends on, each under its own license (mostly MIT,
-Apache-2.0, BSD and ISC); their notices are in the iroh-ffi repository's `Cargo.lock` and crate sources.
+Apache-2.0, BSD and ISC); their notices are in Settings > About > Acknowledgements > Computer link libraries.
 Only the Zone app contains this code. The keyboard and the other extensions do not.
+
+## Recording in the keyboard
+
+`ZoneKeyboard/LocalDictation.swift` records through a hidden web view, adapted from **Hex**,
+https://github.com/anomalyco/hex (`ios/HEXKeyboard/KeyboardLocalDictation.swift` at commit 9787c49),
+Copyright (c) 2026 Christopher Langton, MIT License. The capture page and the sample writer follow that
+file; the rest was written for Zone. The MIT permission notice reproduced below under "Wikipedia word
+frequency list license" applies to it word for word, with that copyright line. Later fixes in Zone
+follow Hex's pull requests 2005, 2045, 2048, 2071, 2089 and 2090 (the same license): the audio session,
+the memory check, the second speech model, the app's microphone reading and the page loaded ahead.
+
+The capture page's heartbeat (the page stops the microphone when the keyboard goes quiet), its
+handling of an interrupted audio context or session and its silent output gain follow
+**ios-keyboard-dictation**, https://github.com/stephancill/ios-keyboard-dictation
+(`Sources/KeyboardDictationDemoKeyboard/WebAudioCapture.swift` at commit c86b6cf), Copyright (c) 2026
+Stephan Cilliers, MIT License. The same permission notice applies, with that copyright line.
 
 ## Swipe word pairs (keyboard)
 
@@ -309,7 +491,7 @@ SOFTWARE.
 ## Speech recognition libraries and models
 
 - **FluidAudio** (FluidInference/FluidAudio), Apache License 2.0, built from Zone's fork (zaydiscold/FluidAudio, branch `zone/main`): upstream's main branch after 0.18.3 with Zone's decoder changes, which are also offered upstream. Linked into the app for the optional Core ML engines.
-- **Fluid Speech Mini** (FluidVoice Labs, built on NVIDIA Parakeet TDT 0.6B v3), Zone's speech model, downloaded from Hugging Face the first time it is needed, CC BY 4.0. Settings, Speech model names it and its license. **Parakeet TDT-CTC 110M** (NVIDIA, CC BY 4.0) is retired and no longer offered. Zone changes Fluid Speech Mini's joint network after download: it adds a top-K output to the same Core ML program, reading the downloaded weights unchanged (`Packages/ZoneFluidAudio/Sources/ZoneFluidAudio/FluidMiniJointTopK`, built by `scripts/spelled-letter-eval/build_mini_joint_topk_shared.py`).
+- **Fluid Speech Mini** (FluidVoice Labs, built on NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra), Zone's speech model, downloaded from Hugging Face the first time it is needed, CC BY 4.0. Settings, Speech model names it and its license. **Parakeet TDT-CTC 110M** (NVIDIA, CC BY 4.0) is retired and no longer offered. Zone changes Fluid Speech Mini's joint network after download: it adds a top-K output to the same Core ML program, reading the downloaded weights unchanged (`Packages/ZoneFluidAudio/Sources/ZoneFluidAudio/FluidMiniJointTopK`, built by `scripts/spelled-letter-eval/build_mini_joint_topk_shared.py`).
 - Apple's SpeechTranscriber and DictationTranscriber are part of iOS.
 - **Speaker diarization models** for Meetings (FluidInference/speaker-diarization-coreml, the revision pinned by FluidAudio, unchanged since 0.18.3: Segmentation, FBank, Embedding, PldaRho and plda-parameters.json, about 21.6 MB), downloaded from Hugging Face only when a meeting is first labeled, CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Modified Core ML conversions by Fluid Inference of the pyannote community-1 segmentation model (pyannote), the WeSpeaker speaker embedding (WeSpeaker) and VBx PLDA parameters (BUT Speech@FIT). VBx clustering code in FluidAudio is Apache License 2.0.
 
@@ -319,7 +501,7 @@ SOFTWARE.
 
 ## US Social Security Administration baby names
 
-`ZoneCore/Sources/ZoneCore/Resources/first-names.txt` is derived from the Social Security
+`ZoneCore/Sources/ZoneCore/FirstNames.swift` is derived from the Social Security
 Administration's national baby name data (https://www.ssa.gov/oact/babynames/limits.html), a
 public domain work of the US government.
 
@@ -334,7 +516,7 @@ The Swift/Accelerate inference implementation and Python parity fixture come fro
 `d9c6f20d4bf4dec4feffafa74730114a25801d9d`, copyright 2026 Phil Trinh, MIT.
 Full MIT and model terms, including the derivative notice, are reproduced in
 [SwipeNotices.txt](ZoneCore/Sources/ZoneCore/Resources/SwipeNotices.txt), bundled in the app
-and accessible from Keyboard settings. FUTO's GPL swipe-library runtime is not included.
+and accessible from Settings > About > Acknowledgements. FUTO's GPL swipe-library runtime is not included.
 
 The external evaluation corpus is [futo-org/swipe.futo.org](https://huggingface.co/datasets/futo-org/swipe.futo.org)
 (MIT). Raw corpus traces are not distributed with Zone.
@@ -346,3 +528,29 @@ oscilloscope from **Hex**, https://github.com/anomalyco/hex (`ios/HEXShared/DotS
 `DotScopeShader.metal` at commit 9787c49), Copyright (c) 2026 Christopher Langton, MIT License.
 Zone changed one thing: the shader is compiled from source on the device. The MIT permission
 notice reproduced above applies to it word for word, with that copyright line.
+
+## Sun and moon shadows
+
+Zone’s shadow calculations are adapted from real-shadows 1.2.
+
+MIT License
+
+Copyright (c) 2026 Zayd Khan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

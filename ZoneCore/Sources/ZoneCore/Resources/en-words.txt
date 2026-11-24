@@ -2284,7 +2284,7 @@ diam	59040
 Dias	19174
 dibs	56273
 dice	14024
-dick	4469	x
+dick	4469	c
 dict	56769
 dido	27554
 died	357
@@ -2647,7 +2647,7 @@ frig	73390
 frog	6343
 from	16
 Frye	24044
-fuck	15767	x
+fuck	15767	c
 fuel	2301
 Fuji	14331
 full	702
@@ -4263,7 +4263,7 @@ shew	51784
 shim	34207
 shin	11414
 ship	930
-shit	16524	x
+shit	16524	c
 shiv	20955
 shod	50618
 shoe	9368
@@ -5522,7 +5522,7 @@ birch	10583
 birds	2172
 birth	1710
 bison	12550
-bitch	18509	x
+bitch	18509	c
 biter	55737
 bites	16818
 bitty	49687
@@ -6394,7 +6394,7 @@ diary	6463
 diced	42899
 dices	66463
 dicey	47950
-dicks	35111	x
+dicks	35111	c
 dicta	46097
 didst	59092
 Diego	2493
@@ -7055,7 +7055,7 @@ frump	65124
 fryer	31776
 FSLIC	68178
 Fuchs	20983
-fucks	57472	x
+fucks	57472	c
 fudge	31260
 fuels	11909
 fugal	50327
@@ -9812,7 +9812,7 @@ ships	1279
 shire	7523
 shirk	41284
 shirt	7748
-shits	64752	x
+shits	64752	c
 Shiva	7696
 shoal	20953
 shock	5052
@@ -12045,7 +12045,7 @@ bishop	1142
 bisque	53661
 Bissau	36899
 bistro	29629
-bitchy	53394	x
+bitchy	53394	c
 biters	66956
 biting	19710
 bitmap	35669
@@ -14380,8 +14380,8 @@ frumpy	62198
 Frunze	34244
 fryers	56174
 frying	26671
-fucked	36708	x
-fucker	57653	x
+fucked	36708	c
+fucker	57653	c
 fuddle	72959
 fudged	68628
 fudges	71468
@@ -18613,7 +18613,7 @@ Shiraz	21537
 shires	28325
 shirks	70997
 shirts	12648
-shitty	49197	x
+shitty	49197	c
 shiver	40516
 shoals	18892
 shocks	19103
@@ -21126,7 +21126,7 @@ assayed	51091
 assayer	52922
 assents	61812
 asserts	11537
-asshole	44016	x
+asshole	44016	c
 assigns	12241
 assists	3775
 assizes	33009
@@ -21379,7 +21379,7 @@ basques	32021
 bassets	63318
 bassist	5363
 bassoon	25724
-bastard	19502	x
+bastard	19502	c
 basters	59036
 basting	64381
 bastion	17792
@@ -21633,8 +21633,8 @@ bishops	4960
 Bismark	51224
 bismuth	29975
 bistros	59955
-bitched	74873	x
-bitches	34997	x
+bitched	74873	c
+bitches	34997	c
 bitcoin	22711
 bitmaps	53901
 bittern	37444
@@ -24785,8 +24785,8 @@ frowned	32889
 fruited	60157
 frustum	57883
 fuchsia	39124
-fuckers	64407	x
-fucking	20256	x
+fuckers	64407	c
+fucking	20256	c
 fudging	69016
 fuehrer	63187
 fueling	25822
@@ -26085,7 +26085,7 @@ Izhevsk	45227
 jabbers	72906
 jabbing	60327
 jackals	31635
-jackass	35840	x
+jackass	35840	c
 jackdaw	50586
 jackets	11639
 jacking	52237
@@ -33265,7 +33265,7 @@ asserted	7694
 assessed	7658
 assesses	28883
 assessor	24072
-assholes	58376	x
+assholes	58376	c
 assigned	1479
 assignee	50983
 assigner	72849
@@ -33530,7 +33530,7 @@ bassinet	65917
 bassists	35348
 bassoons	32033
 basswood	46063
-bastards	31231	x
+bastards	31231	c
 bastardy	60034	x
 Bastille	24726
 bastions	25703
@@ -33740,8 +33740,8 @@ bisector	54226
 bisexual	12569
 Bismarck	14030
 Bisquick	72774
-bitchier	75821	x
-bitching	64044	x
+bitchier	75821	c
+bitching	64044	c
 bitcoins	49742
 bitingly	64583
 bitterer	75354
@@ -34130,7 +34130,7 @@ bullocks	41932
 bullpens	54266
 bullring	41162
 bullseye	32783
-bullshit	34044	x
+bullshit	34044	c
 bullwhip	55269
 bullying	13557
 Bultmann	56170
@@ -35724,7 +35724,7 @@ diatonic	29699
 diatribe	44590
 diazepam	43557
 DiCaprio	33300
-dickhead	66640	x
+dickhead	66640	c
 dictated	15526
 dictates	24411
 dictator	13356
@@ -42293,9 +42293,9 @@ shipyard	7184
 shirkers	70621
 shirking	57094
 shirting	68397
-shithead	68226	x
-shittier	75708	x
-shitting	67218	x
+shithead	68226	c
+shittier	75708	c
+shitting	67218	c
 shivered	66588
 shoaling	52574
 shockers	41229
@@ -45835,7 +45835,7 @@ bisection	52898
 bisectors	57204
 bisexuals	44625
 bishopric	12336
-bitchiest	75321	x
+bitchiest	75321	c
 bitterest	55192
 bizarrely	47238
 blackball	49993
@@ -53421,7 +53421,7 @@ shipshape	72202
 shipwreck	18629
 shipyards	16025
 shirtless	42884
-shittiest	74571	x
+shittiest	74571	c
 shivering	43500
 shoddiest	75296
 shoelaces	53773
@@ -56260,7 +56260,7 @@ birthright	31888
 birthstone	67465
 bisections	74222
 bishoprics	33603
-bitchiness	70783	x
+bitchiness	70783	c
 bitterness	23651
 BitTorrent	34525
 bituminous	32825
@@ -71844,7 +71844,7 @@ moonlighting	41095
 moralization	69785
 mortarboards	73132
 motherboards	38106
-motherfucker	46357	x
+motherfucker	46357	c
 motivational	19741
 motorcycling	37667
 motorcyclist	34998
@@ -74563,8 +74563,8 @@ monotonically	48250
 monstrosities	58894
 morphological	12120
 mortification	43243
-motherfuckers	57103	x
-motherfucking	67372	x
+motherfuckers	57103	c
+motherfucking	67372	c
 motorcyclists	38560
 mountaineered	76225
 mountainsides	49943

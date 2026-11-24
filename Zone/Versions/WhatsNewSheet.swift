@@ -4,9 +4,9 @@ import SwiftUI
 import ZoneCore
 
 /// The installed version's notes, shown once after an update (`WhatsNewGate` decides when).
-/// A short list: one line per feature, then how many smaller changes there are. Read the full
-/// notes opens the version's detailed page (the same one Settings > Version shows) inside the
-/// sheet; Continue closes it; See all versions opens the history.
+/// Short on purpose: the version, its name, and the few starred changes. All changes opens the
+/// version's full page (the grouped list Settings > About > Version shows) inside the sheet; Continue
+/// closes it; See all versions opens the history.
 struct WhatsNewSheet: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.dismiss) private var dismiss
@@ -44,51 +44,43 @@ struct WhatsNewSheet: View {
             .toolbar(.hidden, for: .navigationBar)
             .zoneScreen()
         }
-        .tint(Zone.accentText(scheme))
+        .tint(Zone.inlineInk(scheme))
         .accessibilityIdentifier("whatsNew.sheet")
     }
 }
 
-/// The sheet's list: the version, its summary, a line for each feature, and a way into the full notes.
+/// The sheet's content: the version and its name, the starred changes, and the way into the rest.
 private struct WhatsNewHighlights: View {
     @Environment(\.colorScheme) private var scheme
     let note: ReleaseNote
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 6) {
-                Eyebrow("What's new in Zone")
-                HeroNumber(text: note.version.description)
-                    .accessibilityLabel("Version \(note.version.description)")
-                    .accessibilityAddTraits(.isHeader)
-                    .accessibilityIdentifier("releaseNotes.version")
-                Text(note.summary)
-                    .font(.system(.title3, design: .serif))
-                    .foregroundStyle(Zone.ink(scheme))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 8)
-            }
-            .padding(.bottom, 4)
+        let highlights = note.highlights
+        VStack(alignment: .leading, spacing: 0) {
+            ReleaseNotesHeader(note: note, eyebrow: "What's new in Zone")
+                .padding(.bottom, 20)
 
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(note.features.enumerated()), id: \.element.id) { index, feature in
-                    if index > 0 { Hairline().padding(.leading, 52) }
-                    WhatsNewLine(feature: feature)
+            if !highlights.isEmpty {
+                Hairline()
+                ForEach(Array(highlights.enumerated()), id: \.offset) { index, highlight in
+                    if index > 0 { Hairline().padding(.leading, WhatsNewLine.inset) }
+                    WhatsNewLine(highlight: highlight)
                 }
+                Hairline()
             }
-            .zoneCard(padding: 16)
 
             NavigationLink {
                 ReleaseNotesView(note: note)
             } label: {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Read the full notes")
+                        Text(allChanges)
                             .font(.body.weight(.semibold))
                             .foregroundStyle(Zone.ink(scheme))
-                        Text(fullNotesDetail)
+                        Text(note.groups.map(\.title).joined(separator: ", "))
                             .font(.subheadline)
                             .foregroundStyle(Zone.muted(scheme))
+                            .multilineTextAlignment(.leading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 8)
@@ -97,53 +89,49 @@ private struct WhatsNewHighlights: View {
                         .foregroundStyle(Zone.muted(scheme))
                         .accessibilityHidden(true)
                 }
+                .padding(.vertical, 14)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .zoneCard(padding: 16)
             .accessibilityIdentifier("whatsNew.fullNotes")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Says what the full page adds: every feature in detail and, when there are any, the
-    /// smaller changes the list leaves out.
-    private var fullNotesDetail: String {
-        switch note.fixes.count {
-        case 0: "Every change in detail, and where to find it."
-        case 1: "Every change in detail, plus 1 smaller fix."
-        default: "Every change in detail, plus \(note.fixes.count) smaller fixes and improvements."
-        }
+    private var allChanges: String {
+        note.count == 1 ? "The 1 change" : "All \(note.count) changes"
     }
 }
 
-/// One feature as a line: its symbol, title, an optional label such as Beta, and one sentence.
+/// One starred change as a line: its group's picture, then its name and sentence.
 private struct WhatsNewLine: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.dynamicTypeSize) private var typeSize
-    let feature: ReleaseFeature
+    /// Where the text starts, so the hairlines between lines begin under it.
+    static let inset: CGFloat = 46
+    let highlight: ReleaseHighlight
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
             if !typeSize.isAccessibilitySize {
-                ReleaseSymbolTile(symbol: feature.symbol, side: 38)
+                ReleaseSymbolTile(symbol: highlight.group.symbol, side: 32)
             }
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
-                    Text(feature.title)
-                        .font(.body.weight(.semibold))
+                    Text(highlight.item.title ?? highlight.group.title)
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Zone.ink(scheme))
                         .fixedSize(horizontal: false, vertical: true)
-                    if let tag = feature.tag {
+                    if let tag = highlight.item.tag {
                         Text(tag.uppercased())
                             .font(.caption2.weight(.bold))
                             .tracking(0.5)
-                            .foregroundStyle(Zone.accentText(scheme))
+                            .zoneAccentBadge(scheme)
                             .fixedSize()
                             .accessibilityLabel(tag)
                     }
                 }
-                Text(feature.headline)
+                Text(highlight.item.text)
                     .font(.subheadline)
                     .foregroundStyle(Zone.muted(scheme))
                     .fixedSize(horizontal: false, vertical: true)
@@ -151,7 +139,7 @@ private struct WhatsNewLine: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 11)
-        .accessibilityElement(children: .contain)
+        .accessibilityElement(children: .combine)
         .accessibilityIdentifier("whatsNew.line")
     }
 }

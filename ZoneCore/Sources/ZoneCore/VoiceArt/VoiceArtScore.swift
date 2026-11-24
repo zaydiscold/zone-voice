@@ -7,7 +7,7 @@ import Foundation
 /// syllable is a note in the lane its loudness earned (quiet at the bottom, loud at the top),
 /// as long as the sound was held. The strike line flashes when a note lands.
 final class LanesPainter: VoicePainter {
-    private struct Note {
+    struct Note {
         var lane: Int
         var start: CGFloat
         var end: CGFloat?
@@ -17,33 +17,61 @@ final class LanesPainter: VoicePainter {
     private static let dark = [ArtColor(0.33, 0.90, 0.52), ArtColor(0.24, 0.84, 0.94), ArtColor(0.99, 0.82, 0.26), ArtColor(0.98, 0.36, 0.70)]
     private static let light = [ArtColor(0.10, 0.60, 0.28), ArtColor(0.04, 0.50, 0.68), ArtColor(0.78, 0.54, 0.02), ArtColor(0.82, 0.14, 0.48)]
 
-    private var random: ArtRandom
-    private var notes: [Note] = []
+    private(set) var notes: [Note] = []
     private var time: CGFloat = 0
     private var flash: [CGFloat] = [0, 0, 0, 0]
-    private var lastLane = 1
-
-    init(random: ArtRandom) { self.random = random }
+    private var moveDwell: CGFloat = 0.1
+    private var startDB: Float = 0
+    private var pendingTime: CGFloat = 0
 
     func step(_ voice: VoiceSignal, dt: CGFloat, size: CGSize) {
         time += dt
         for lane in 0..<4 { flash[lane] = max(0, flash[lane] - dt / 0.28) }
         let open = notes.indices.last.flatMap { notes[$0].end == nil ? $0 : nil }
-        let held = open.map { time - notes[$0].start } ?? 0
-        if voice.onset > 0 || (open == nil && voice.level > 0.22) || held > 0.55 && voice.level > 0.2 {
-            if let open { notes[open].end = time - 0.035 }
-            var lane = min(3, Int(voice.contour * 4))
-            // The same lane four times running reads as a stuck meter, so a repeat may step aside.
-            if lane == lastLane, random.chance(0.35) { lane = min(3, max(0, lane + (random.chance(0.5) ? 1 : -1))) }
-            lastLane = lane
-            notes.append(Note(lane: lane, start: time, end: nil, strength: voice.onset > 0 ? CGFloat(voice.onset) : 0.4))
-            flash[lane] = 1
-        } else if let open, voice.level < 0.1 || voice.quiet > 0.08 {
-            notes[open].end = time
+        if voice.quiet == 0 {
+            let position = voice.contour * 4
+            let lane = min(3, Int(position))
+            if let open, lane != notes[open].lane,
+               abs(voice.decibels - startDB) >= 2.5,
+               abs(position - Float(notes[open].lane) - 0.5) > 0.7 {
+                pendingTime += dt
+            } else {
+                pendingTime = 0
+            }
+
+            // Wait for a clear move across a lane boundary. A fresh attack can strike immediately.
+            let held = open.map { time - notes[$0].start } ?? 0
+            let attack = voice.onset > 0 && held > 0.13
+            if open == nil || attack || pendingTime + 1e-6 >= moveDwell {
+                let strength = max(0.4, CGFloat(voice.onset))
+                if let previous = notes.indices.last, notes[previous].lane == lane {
+                    // Both rounded caps extend past the endpoints. Leave daylight between them.
+                    let caps = (Self.thickness(notes[previous].strength) + Self.thickness(strength)) / 2
+                    let gap = (caps + 0.025) / 1.5
+                    notes[previous].end = max(notes[previous].start, min(notes[previous].end ?? time, time - gap))
+                } else if let open {
+                    notes[open].end = time
+                }
+                // A quiet opening gets two posts to find its lane. Give an accent
+                // a longer tail, and require three posts for consecutive moves.
+                if open == nil { moveDwell = 0.1 }
+                else if attack { moveDwell = 0.125 }
+                else { moveDwell = 0.15 }
+                startDB = voice.decibels
+                notes.append(Note(lane: lane, start: time, end: nil, strength: strength))
+                pendingTime = 0
+            }
+            if let lane = notes.last?.lane { flash[lane] = 1 }
+        } else {
+            pendingTime = 0
+            if let open, voice.quiet >= 0.09 { notes[open].end = time }
         }
         let speed = size.height * 1.5
         notes.removeAll { note in (note.end.map { (time - $0) * speed > size.width + 20 }) ?? false }
     }
+
+    // Pill thickness as a fraction of the strip height.
+    private static func thickness(_ strength: CGFloat) -> CGFloat { (0.46 + 0.22 * strength) / 4 }
 
     func draw(in context: CGContext, size: CGSize, palette: VoiceArtPalette) {
         let h = size.height, speed = h * 1.5
@@ -59,7 +87,7 @@ final class LanesPainter: VoicePainter {
         }
         for note in notes {
             let y = h - (CGFloat(note.lane) + 0.5) * laneHeight
-            let thick = laneHeight * (0.46 + 0.22 * note.strength)
+            let thick = h * Self.thickness(note.strength)
             let left = strike - (time - note.start) * speed
             let right = strike - (time - (note.end ?? time)) * speed
             let rect = CGRect(x: left - thick / 2, y: y - thick / 2, width: max(thick, right - left + thick), height: thick)
@@ -101,6 +129,7 @@ final class StarsPainter: VoicePainter {
 
     private var random: ArtRandom
     private var stars: [Star] = []
+    var starCount: Int { stars.count }
     private var dust: [CGPoint] = []
     private var x: CGFloat = 0
     private var scroll: CGFloat = 0
@@ -115,12 +144,12 @@ final class StarsPainter: VoicePainter {
         time += dt
         sinceStar += dt
         if dust.isEmpty { dust = (0..<26).map { _ in CGPoint(x: random.unit(), y: random.unit()) } }
-        if voice.quiet < 0.2, voice.level > 0.05 { x += h * (0.42 + 0.1 * CGFloat(min(voice.pace, 7))) * dt }
+        if voice.quiet == 0 { x += h * (0.42 + 0.1 * CGFloat(min(voice.pace, 7))) * dt }
         if voice.quiet > 0.4, phraseOpen {
             phraseOpen = false
             x += h * 0.5
         }
-        if voice.onset > 0 || (voice.level > 0.2 && sinceStar > 0.42) {
+        if voice.onset > 0 || (voice.quiet == 0 && voice.level > 0.2 && sinceStar > 0.42) {
             sinceStar = 0
             let strength = voice.onset > 0 ? CGFloat(voice.onset) : 0.35
             let y = h * (0.82 - 0.64 * CGFloat(voice.contour)) + random.bell() * h * 0.07
@@ -158,9 +187,11 @@ final class StarsPainter: VoicePainter {
             let center = CGPoint(x: star.position.x - scroll + left, y: star.position.y)
             let pop = 1 + 0.9 * max(0, 1 - (time - star.born) / 0.35)
             let shine = 0.82 + 0.18 * sin(time * 2.3 + star.twinkle)
-            context.fill(palette.accent, 0.2 * shine)
+            // Each star keeps a temperature for its lifetime; a hard syllable has a warmer core.
+            let starlight = star.size > h / 48 * 2.6 ? ArtColor(1, 0.82, 0.57) : ArtColor(0.65, 0.84, 1)
+            context.fill(palette.accent.mixed(with: starlight, 0.35), 0.25 * shine)
             context.dot(at: center, radius: star.size * 2.6 * pop)
-            context.fill(palette.ink, shine)
+            context.fill(palette.ink.mixed(with: starlight, palette.isDark ? 0.45 : 0.12), shine)
             context.dot(at: center, radius: star.size * pop)
             if star.size > h / 48 * 2.6 {
                 // The brightest get a four-point glint.

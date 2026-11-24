@@ -177,4 +177,13 @@ final class DictationOpeningTests: XCTestCase {
         XCTAssertEqual(TextStyle.casual.insertion(of: "Tell Daan hi.", contextBefore: nil, fieldCapitalizesSentences: true,
                                                   personalWords: ["Daan"], opening: .capital), "Tell Daan hi")
     }
+
+    func testExcitedKeepsSentenceEndingsWhenWritingNumbers() {
+        XCTAssertEqual(TextStyle.excited.apply("Pick 6 or 8? Maybe seven. Bring tape."),
+                       "Pick 6 or 8? Maybe 7! Bring tape!")
+        XCTAssertEqual(TextStyle.excited.apply("Pick 6 or 8? Maybe seven! Bring tape."),
+                       "Pick 6 or 8? Maybe 7! Bring tape!")
+        XCTAssertEqual(TextStyle.excited.apply("1. Read the map.\n2. Get ready."), "1. Read the map.\n2. Get ready!")
+        XCTAssertEqual(TextStyle.excited.apply("Is it 3.25? Wait... Maybe."), "Is it 3.25? Wait... Maybe!")
+    }
 }

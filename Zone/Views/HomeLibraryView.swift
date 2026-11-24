@@ -3,8 +3,10 @@
 import SwiftUI
 import ZoneCore
 
-/// Recent recovery text stays on Home; the complete searchable archive remains one tap away.
+/// The newest three dictations and the newest three notes stay on Home; all of each, with search,
+/// is one tap away behind its "See all".
 struct HomeLibraryView: View {
+    let isActive: Bool
     @Environment(AppSettings.self) private var settings
     @Environment(DictationCoordinator.self) private var coordinator
     @Environment(\.colorScheme) private var scheme
@@ -15,41 +17,48 @@ struct HomeLibraryView: View {
     @State private var unavailable = false
     @State private var deleting = false
     @State private var refreshToken = UUID()
-    @AppStorage("zone.home.notesCollapsed") private var notesCollapsed = false
-    @State private var allNotesShown = false
-    @State private var editingNote: Note?
+    /// The note being read, pushed over Home.
+    @State private var reading: NoteRoute?
+    /// Added to Notes for a note that is not among Home's three: the Notes page, at that note.
+    @State private var revealing: NoteRoute?
     @State private var opened: TranscriptRecord?
     /// Where HomeView scrolls for Added to Notes.
     static let notesAnchor = "home.notes"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 0) {
             if settings.notesFirst {
                 notes
-                Hairline()
+                SectionBreak()
                 history
             } else {
                 history
-                Hairline()
+                SectionBreak()
                 notes
             }
         }
-        .task(id: scenePhase) {
-            guard scenePhase == .active else { return }
+        .navigationDestination(item: $reading) { NoteReadView($0) }
+        .navigationDestination(item: $revealing) { NotesView(reveal: $0.id) }
+        .task(id: isActive && scenePhase == .active) {
+            guard isActive && scenePhase == .active else { return }
             await refresh()
         }
         .task(id: coordinator.activity) {
-            guard scenePhase == .active else { return }
+            guard isActive && scenePhase == .active else { return }
             await refresh()
         }
     }
 
+    /// A title sits nearer its first row than the rows sit to each other, so it reads as the
+    /// start of what follows rather than the end of what came before.
+    static let titleToRows: CGFloat = 4
+
     private var history: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Self.titleToRows) {
             HStack {
-                Text("History").font(.headline)
+                Text("History").font(.headline).accessibilityAddTraits(.isHeader)
                 Spacer()
-                NavigationLink { HistoryView() } label: { Text("See all").frame(minHeight: 44) }
+                NavigationLink { HistoryView() } label: { Text("See all").zoneAccentLink(scheme).frame(minHeight: 44) }
                     .accessibilityLabel("See all dictation history")
             }
             if unavailable {
@@ -59,13 +68,14 @@ struct HomeLibraryView: View {
                 Text(retention == .off ? "History is off" : "No dictations yet")
                     .font(.subheadline).foregroundStyle(Zone.muted(scheme))
             }
-            RuledList(items: records) { record in
+            ForEach(records) { record in
                 LibraryRow(kind: .dictation, text: record.text,
                            detail: Self.detail(LibraryRow.when(record.createdAt), quiet: Self.quietStatus(record.status)),
-                           alert: Self.alertStatus(record.status), recoveredFrom: record.recoveredFrom,
+                           alert: Self.alertStatus(record.status), recoveredFrom: record.recoveredFrom, copiedDictationID: record.id,
                            onOpen: { opened = record }, onDelete: { delete(record) })
             }
         }
+        .alert("Could not delete dictation", isPresented: $deleteFailed) { Button("OK") {} }
         .sheet(item: $opened) { record in
             RecordSheet(record: record, onDelete: { delete(record); opened = nil })
         }
@@ -85,74 +95,89 @@ struct HomeLibraryView: View {
         [when, quiet].compactMap { $0 }.joined(separator: " · ")
     }
 
-    /// Notes stay contained: the newest few, the rest behind "Show all", and the whole section
-    /// folds away with the chevron (remembered). Tap a note to edit it in place and save.
-    private static let shownNotes = 3
+    /// Notes on Home have History's shape: the newest three, and "See all" for the Notes page
+    /// (every note, with search). Tapping one opens it to read; nothing here opens a keyboard,
+    /// and nothing here makes Home longer than three rows.
+    static let shownNotes = 3
 
     private var notes: some View {
-        LazyVStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Button {
-                    withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.3)) { notesCollapsed.toggle() }
-                } label: {
-                    HStack(spacing: 6) {
-                        Text("Notes").font(.headline)
-                        if !coordinator.notes.notes.isEmpty {
-                            Text("\(coordinator.notes.notes.count)").font(.subheadline).foregroundStyle(Zone.muted(scheme))
-                        }
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(Zone.muted(scheme))
-                            .rotationEffect(.degrees(notesCollapsed ? -90 : 0))
-                    }
-                    .frame(minHeight: 44)
-                    .contentShape(Rectangle())
+        VStack(alignment: .leading, spacing: Self.titleToRows) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    notesTitle
+                    newNote
+                    Spacer(minLength: 8)
+                    seeAllNotes
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(notesCollapsed ? "Show notes" : "Hide notes")
-                Spacer()
-                Button { coordinator.beginNoteDictation() } label: {
-                    Label("New note", systemImage: "mic.fill").frame(minHeight: 44)
-                }.font(.subheadline)
-                    // A loading engine is fine: the note card says it is turning on, as for the
-                    // Action Button. Only a missing model has nothing to turn on.
-                    .disabled(coordinator.modelState == .missing || coordinator.activity.isBusy || coordinator.noteIsLive)
-                    .accessibilityIdentifier("home.dictateNote")
+                // Large text: the title and See all, then the key under them.
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        notesTitle
+                        Spacer(minLength: 8)
+                        seeAllNotes
+                    }
+                    newNote
+                }
+                // The largest text on the narrowest iPhone: one under another, nothing broken mid-word.
+                VStack(alignment: .leading, spacing: 0) {
+                    notesTitle
+                    newNote
+                    seeAllNotes
+                }
             }
             .id(Self.notesAnchor)
-            if !notesCollapsed {
-                if coordinator.notes.notes.isEmpty {
-                    Text("No notes yet")
-                        .font(.subheadline).foregroundStyle(Zone.muted(scheme))
-                }
-                if let error = coordinator.notes.lastError {
-                    Text(error).font(.footnote).foregroundStyle(Zone.live)
-                }
-                let all = coordinator.notes.notes
-                RuledList(items: allNotesShown ? all : Array(all.prefix(Self.shownNotes))) { note in
-                    LibraryRow(kind: .note, text: note.text,
-                               detail: Self.detail(LibraryRow.when(note.createdAt), quiet: note.editedAt == nil ? nil : "Edited"),
-                               highlighted: coordinator.noteReveal?.noteID == note.id,
-                               onOpen: { editingNote = note }, onDelete: { coordinator.notes.delete(note) })
-                }
-                if all.count > Self.shownNotes {
-                    Button(allNotesShown ? "Show fewer" : "Show all \(all.count) notes") {
-                        withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.3)) { allNotesShown.toggle() }
-                    }
-                    .buttonStyle(ZoneLinkButtonStyle())
-                }
+            if coordinator.notes.notes.isEmpty {
+                Text("No notes yet")
+                    .font(.subheadline).foregroundStyle(Zone.muted(scheme))
+            }
+            if let error = coordinator.notes.lastError {
+                Text(error).font(.footnote).foregroundStyle(Zone.live)
+            }
+            if !coordinator.notes.notes.isEmpty {
+                RuledList(items: Array(coordinator.notes.notes.prefix(Self.shownNotes))) { note in
+                    NoteRow(note: note, lines: 4) { reading = $0.within(coordinator.notes.notes.map { NoteStep(id: $0.id) }) }
+                        .padding(.vertical, 4)
+                }.libraryWell(scheme)
             }
         }
-        .sheet(item: $editingNote) { note in
-            NoteEditorSheet(note: note) { text in coordinator.notes.update(note, text: text) }
-        }
-        // Added to Notes on the Note saved page: the section opens, far enough to show the note.
-        .onChange(of: coordinator.noteReveal?.token, initial: true) { _, token in
+        // Added to Notes on the Note saved page: a note among these three is lit here (HomeView
+        // scrolls to it); an older one, from a page of several, is shown on the Notes page.
+        .onChange(of: isActive ? coordinator.noteReveal?.token : nil, initial: true) { _, token in
             guard token != nil, let id = coordinator.noteReveal?.noteID else { return }
-            withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.3)) {
-                notesCollapsed = false
-                if !coordinator.notes.notes.prefix(Self.shownNotes).contains(where: { $0.id == id }) { allNotesShown = true }
+            if !coordinator.notes.notes.prefix(Self.shownNotes).contains(where: { $0.id == id }) { revealing = NoteRoute(id: id) }
+        }
+    }
+
+    private var notesTitle: some View {
+        HStack(spacing: 6) {
+            Text("Notes").font(.headline).lineLimit(1).fixedSize()
+            if !coordinator.notes.notes.isEmpty {
+                Text("\(coordinator.notes.notes.count)").font(.subheadline.monospacedDigit()).foregroundStyle(Zone.muted(scheme))
+                    .lineLimit(1).fixedSize()
+                    .accessibilityLabel("\(coordinator.notes.notes.count) notes")
             }
         }
+        .frame(minHeight: 44)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    /// A key, not a link: it starts a recording, where See all only goes somewhere.
+    private var newNote: some View {
+        NewNoteButton {
+            Label("New note", systemImage: "mic.fill").lineLimit(1).fixedSize()
+                .frame(minHeight: 44).contentShape(Rectangle())
+        }
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(Zone.accentTone(scheme))
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("home.dictateNote")
+    }
+
+    private var seeAllNotes: some View {
+        NavigationLink { NotesView() } label: { Text("See all").zoneAccentLink(scheme).lineLimit(1).fixedSize().frame(minHeight: 44) }
+            .accessibilityLabel("See all notes")
+            .accessibilityIdentifier("home.seeAllNotes")
     }
 
     private func refresh() async {
@@ -161,12 +186,14 @@ struct HomeLibraryView: View {
         unavailable = false
         let token = UUID()
         refreshToken = token
-        let result = await Task.detached(priority: .utility) { (store.recent(limit: 8).filter { $0.status != .note }.prefix(3).map { $0 }, store.retention) }.value
+        let result = await Task.detached(priority: .utility) { (store.recentDictations(limit: 3), store.retention) }.value
         guard !Task.isCancelled, !deleting, token == refreshToken else { return }
         records = result.0
         retention = result.1
         loaded = true
     }
+
+    @State private var deleteFailed = false
 
     private func delete(_ record: TranscriptRecord) {
         guard !deleting, let store = TranscriptHistory.shared else { return }
@@ -174,7 +201,8 @@ struct HomeLibraryView: View {
         refreshToken = UUID()
         records.removeAll { $0.id == record.id }
         Task {
-            await Task.detached(priority: .utility) { store.delete(id: record.id) }.value
+            let saved = await Task.detached(priority: .utility) { store.delete(id: record.id) }.value
+            deleteFailed = !saved
             deleting = false
             await refresh()
         }
@@ -183,11 +211,22 @@ struct HomeLibraryView: View {
 
 /// Failed recordings are immediately visible; successful retries remain until copied or deleted.
 struct HomeAudioRecoverySection: View {
+    let isActive: Bool
+    var fullList = false
+    private static let homeLimit = 3
     @Environment(DictationCoordinator.self) private var coordinator
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var scheme
-    @State private var expanded: Set<UUID> = []
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showsRecovery = false
+    @State private var inspecting: AudioRecoveryRecord?
+    @State private var shareURL: URL?
+    @State private var sharing = false
+    @State private var preparingShare = false
+    @State private var shareFailed = false
+    @State private var selecting = false
+    @State private var selected: Set<UUID> = []
+    @State private var deleting: [AudioRecoveryRecord] = []
 
     /// "Audio kept for 7 more days": a calm promise, not a deadline with a clock time.
     /// Builds before 2026-11-03 ended a recording at an interruption and filed it here as
@@ -207,115 +246,258 @@ struct HomeAudioRecoverySection: View {
     }
 
     private var records: [AudioRecoveryRecord] {
-        coordinator.audioRecoveryRecords.filter { $0.state != .recording }
+        coordinator.audioRecoveryRecords.filter { $0.state != .recording }.sorted { a, b in
+            let first = a.levels?.soundsLikeSpeech == true && a.attempts?.count == 0
+            let second = b.levels?.soundsLikeSpeech == true && b.attempts?.count == 0
+            return first == second ? a.createdAt > b.createdAt : first
+        }
     }
 
     var body: some View {
-        Group {
-        if !records.isEmpty {
-        VStack(alignment: .leading, spacing: 12) {
-            if !records.isEmpty {
-                Button {
-                    withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.35)) { showsRecovery.toggle() }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "arrow.counterclockwise.circle.fill")
-                            .font(.title3).foregroundStyle(Zone.accentText(scheme))
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(records.count == 1 ? "1 recording to recover" : "\(records.count) recordings to recover")
-                                .font(.headline).foregroundStyle(Zone.ink(scheme))
-                            Text("Tap to copy or transcribe again.")
-                                .font(.caption).foregroundStyle(Zone.muted(scheme))
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(Zone.muted(scheme))
-                            .rotationEffect(.degrees(showsRecovery ? 180 : 0))
-                    }
-                    .frame(minHeight: 44)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .zoneCard(padding: 12)
-                .accessibilityHint(showsRecovery ? "Hides recordings" : "Shows recordings")
-                if showsRecovery {
-                ForEach(records) { record in
-                    VStack(alignment: .leading, spacing: 8) {
+        let displayed = records
+        return Group {
+            if !displayed.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    if !fullList { disclosure(count: displayed.count) }
+                    if fullList || showsRecovery {
                         HStack {
-                            Text(record.createdAt.formatted(date: .abbreviated, time: .shortened))
-                                .font(.caption).foregroundStyle(Zone.muted(scheme))
+                            Button(selecting ? "Cancel selection" : "Select recordings") {
+                                selected.removeAll()
+                                selecting.toggle()
+                            }
+                            .buttonStyle(.bordered).controlSize(.small)
                             Spacer()
-                            if !record.text.isEmpty {
-                                Button {
-                                    Clipboard.copy(record.text)
-                                    if record.state == .textReady { coordinator.useRecoveredText(record.id) }
-                                } label: {
-                                    Text("Copy").frame(minWidth: 44, minHeight: 44)
+                            if selecting {
+                                Button("Delete selected", role: .destructive) {
+                                    deleting = records.filter { selected.contains($0.id) && coordinator.retryingAudioID != $0.id }
+                                }.buttonStyle(.bordered).controlSize(.small).disabled(selected.isEmpty)
+                            }
+                        }
+                        .padding(.vertical, 5)
+                        if fullList {
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                ForEach(displayed) { record in
+                                    recoveryRow(record)
+                                    if record.id != displayed.last?.id { RowRule().padding(.leading, selecting ? 54 : 0) }
                                 }
                             }
-                            Button(role: .destructive) { coordinator.deleteAudioRecovery(record.id) } label: {
-                                Image(systemName: "trash").frame(width: 44, height: 44)
-                            }.accessibilityLabel("Delete recovered dictation")
-                                .disabled(coordinator.retryingAudioID == record.id)
-                        }
-                        if record.state == .textReady {
-                            Button {
-                                if !expanded.insert(record.id).inserted { expanded.remove(record.id) }
-                            } label: {
-                                HStack(alignment: .top) {
-                                    Text(record.text).lineLimit(expanded.contains(record.id) ? nil : 3)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                    Image(systemName: expanded.contains(record.id) ? "chevron.up" : "chevron.down")
-                                        .font(.caption)
-                                }.frame(minHeight: 44).contentShape(Rectangle())
-                            }.buttonStyle(.plain)
-                            Text("Recovered").font(.caption).foregroundStyle(Zone.muted(scheme))
                         } else {
-                            if let message = Self.cardMessage(record) {
-                                Text(message).font(.subheadline)
-                            }
-                            if !record.text.isEmpty {
-                                Text(record.text).font(.subheadline).lineLimit(3)
-                            }
-                            HStack {
-                                Text(record.audioBytes < 2 ? "No audio" : "\(record.audioSeconds.countdownLabel) of audio saved").font(.caption)
-                                Spacer()
-                                if coordinator.retryingAudioID == record.id {
-                                    ProgressView()
-                                    Button("Cancel") { coordinator.cancelAudioRetry() }.frame(minHeight: 44)
-                                } else {
-                                    if !record.text.isEmpty {
-                                        // The words are already in History; this only lets the audio go.
-                                        Button("Done") { coordinator.deleteAudioRecovery(record.id) }.frame(minHeight: 44)
-                                            .accessibilityHint("Keeps the words in History and deletes the saved audio")
-                                    }
-                                    Button(record.text.isEmpty ? "Transcribe" : "Transcribe again") { coordinator.retryAudioRecovery(record) }
-                                        .frame(minHeight: 44)
-                                        .disabled(record.audioBytes < 2 || coordinator.activity.isBusy || !coordinator.modelIsReady || coordinator.retryingAudioID != nil)
+                            RuledList(items: Array(displayed.prefix(Self.homeLimit)), textInset: selecting ? 54 : 0) { record in recoveryRow(record) }
+                            if displayed.count > Self.homeLimit {
+                                RowRule()
+                                NavigationLink {
+                                    ScrollView { HomeAudioRecoverySection(isActive: true, fullList: true).padding() }
+                                        .navigationTitle("Saved recordings").zoneBackButton().zoneScreen()
+                                } label: {
+                                    HStack {
+                                        Text("See all \(displayed.count) recordings")
+                                        Spacer()
+                                        Image(systemName: "chevron.right").imageScale(.small)
+                                    }.font(.subheadline.weight(.semibold)).frame(minHeight: 44).contentShape(Rectangle())
                                 }
-                            }
-                            if !coordinator.modelIsReady {
-                                NavigationLink("Get a model to retry") { ModelLibraryView() }
-                                    .font(.subheadline).frame(minHeight: 44)
-                            }
-                            if let expiry = record.expiresAt {
-                                Text(Self.keptLabel(until: expiry))
-                                    .font(.caption).foregroundStyle(Zone.muted(scheme))
+                                .accessibilityIdentifier("recovery.seeAll")
                             }
                         }
-                    }.zoneCard(padding: 12)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-                }
-                }
+                    }
+                }.libraryWell(scheme)
+            } else if fullList {
+                ContentUnavailableView("No saved recordings", systemImage: "waveform")
             }
         }
+        .background {
+            ShareSheet(isPresented: $sharing, items: shareURL.map { [$0] } ?? []) { _, _ in
+                if let shareURL { try? FileManager.default.removeItem(at: shareURL) }
+                shareURL = nil
+            }
         }
+        .alert("Could not share this recording", isPresented: $shareFailed) { Button("OK") {} }
+        .sheet(item: $inspecting) { original in
+            let record = coordinator.audioRecoveryRecords.first { $0.id == original.id } ?? original
+            NavigationStack {
+                Form {
+                    if !record.text.isEmpty { Text(coordinator.textForRecoveryCopy(record.text)).textSelection(.enabled) }
+                    Text(Self.summary(record))
+                    if let message = Self.cardMessage(record) { Text(message) }
+                    if let expiry = record.expiresAt { Text(Self.keptLabel(until: expiry)) }
+                    if record.audioBytes >= 2 && !coordinator.modelIsReady {
+                        NavigationLink("Get a model to retry") { ModelLibraryView() }
+                    }
+                    if let levels = record.levels {
+                        LabeledContent("Peak level", value: Self.decibels(levels.peakDB))
+                        LabeledContent("Average level", value: Self.decibels(levels.averageDB))
+                        Text("Zone estimates speech from loudness. Music and background noise can look like speech too.")
+                    }
+                    if let date = record.attempts?.lastTry {
+                        LabeledContent("Last try", value: date.formatted(date: .abbreviated, time: .shortened))
+                    }
+                }
+                .task(id: record.id) { await coordinator.measureSavedAudio(record) }
+                .navigationTitle("Recording details")
+                .navigationBarTitleDisplayMode(typeSize.isAccessibilitySize ? .inline : .automatic)
+                .toolbar { ZoneBarItem(.confirmationAction) { Button("Done") { inspecting = nil } } }
+            }.presentationDetents(typeSize.isAccessibilitySize ? [.large] : [.medium, .large])
         }
-        .task(id: scenePhase) {
-            guard scenePhase == .active else { return }
+        .alert(deleting.count == 1 ? "Delete this recording?" : "Delete \(deleting.count) recordings?",
+                            isPresented: Binding(get: { !deleting.isEmpty }, set: { if !$0 { deleting = [] } }),
+                            presenting: deleting) { targets in
+            Button(targets.count == 1 ? "Delete recording" : "Delete recordings", role: .destructive) {
+                for record in targets { coordinator.deleteAudioRecovery(record.id) }
+                selecting = false
+                selected.removeAll()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { targets in
+            Text(Self.deletionMessage(targets))
+        }
+        .task(id: isActive && scenePhase == .active) {
+            guard isActive && scenePhase == .active else { return }
             await coordinator.refreshAudioRecovery()
         }
     }
+
+    private func disclosure(count: Int) -> some View {
+        Button {
+            withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.35)) { showsRecovery.toggle() }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.counterclockwise.circle.fill")
+                    .font(.title3).foregroundStyle(Zone.accentTone(scheme))
+                Text(count == 1 ? "1 recording to recover" : "\(count) recordings to recover")
+                    .font(.headline).foregroundStyle(Zone.ink(scheme))
+                Spacer()
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(Zone.muted(scheme))
+                    .rotationEffect(.degrees(showsRecovery ? 180 : 0))
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(showsRecovery ? "Expanded" : "Collapsed")
+        .accessibilityHint(showsRecovery ? "Hides recordings" : "Shows recordings")
+    }
+
+    private func recoveryRow(_ record: AudioRecoveryRecord) -> some View {
+        HStack(spacing: 10) {
+            if selecting {
+                Button {
+                    if !selected.insert(record.id).inserted { selected.remove(record.id) }
+                } label: {
+                    Image(systemName: selected.contains(record.id) ? "checkmark.circle.fill" : "circle")
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .accessibilityLabel(selected.contains(record.id) ? "Deselect recording" : "Select recording")
+                .accessibilityIdentifier("recovery.select." + record.id.uuidString)
+                .disabled(coordinator.retryingAudioID == record.id)
+            }
+            Button { inspecting = record } label: {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(record.text.isEmpty ? "Saved recording" : coordinator.textForRecoveryCopy(record.text))
+                        .font(.subheadline.weight(.semibold)).lineLimit(2)
+                    Text(Self.summary(record)).font(.caption).foregroundStyle(Zone.muted(scheme))
+                }
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityHint("Shows recording details")
+                .accessibilityIdentifier("recovery.row." + record.id.uuidString)
+                .task(id: record.id) { await coordinator.measureSavedAudio(record) }
+            if !selecting {
+                Menu {
+                    if !record.text.isEmpty { Button("Copy words") { copy(record) } }
+                    if coordinator.retryingAudioID == record.id {
+                        Button("Cancel transcription") { coordinator.cancelAudioRetry() }
+                    } else if record.audioBytes >= 2 {
+                        Button(retryTitle(record)) { coordinator.retryAudioRecovery(record) }
+                            .disabled(coordinator.activity.isBusy || !coordinator.modelIsReady || coordinator.retryingAudioID != nil)
+                    }
+                    Button("Recording details") { inspecting = record }
+                    if record.audioBytes > 0 { Button("Share audio") { share(record) } }
+                    if coordinator.retryingAudioID != record.id {
+                        Button("Delete recording", role: .destructive) { deleting = [record] }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle").frame(width: 44, height: 44)
+                }.accessibilityLabel("Recording actions")
+            }
+        }
+        .padding(.vertical, 8)
+        .modifier(RowMenu(text: record.text.isEmpty ? Self.summary(record) : coordinator.textForRecoveryCopy(record.text),
+                          copy: { copy(record) },
+                          copyTitle: record.text.isEmpty ? "Copy summary" : "Copy",
+                          share: record.audioBytes > 0 ? { share(record) } : nil,
+                          actions: actions(record), delete: coordinator.retryingAudioID == record.id ? nil : { deleting = [record] }))
+    }
+
+    private func copy(_ record: AudioRecoveryRecord) {
+        if record.text.isEmpty {
+            Clipboard.copy(Self.summary(record))
+        } else {
+            let text = coordinator.textForRecoveryCopy(record.text)
+            Clipboard.copy(text)
+            coordinator.confirmKept(record.id, text: text)
+        }
+    }
+
+    private func share(_ record: AudioRecoveryRecord) {
+        guard !preparingShare, !sharing else { return }
+        preparingShare = true
+        Task {
+            defer { preparingShare = false }
+            do {
+                shareURL = try await coordinator.shareableAudio(record.id)
+                sharing = true
+            } catch { shareFailed = true }
+        }
+    }
+
+    private func retryTitle(_ record: AudioRecoveryRecord) -> String {
+        (record.attempts?.count ?? 0) > 0 || !record.text.isEmpty ? "Transcribe again" : "Transcribe"
+    }
+
+    private func actions(_ record: AudioRecoveryRecord) -> [LibraryRow.Action] {
+        var items: [LibraryRow.Action] = [.init(title: "Details", symbol: "info.circle") { inspecting = record }]
+        if coordinator.retryingAudioID == record.id {
+            items.append(.init(title: "Cancel transcription", symbol: "stop") { coordinator.cancelAudioRetry() })
+        } else if record.audioBytes >= 2 {
+            items.append(.init(title: retryTitle(record), symbol: "waveform",
+                               action: { coordinator.retryAudioRecovery(record) },
+                               enabled: !coordinator.activity.isBusy && coordinator.modelIsReady && coordinator.retryingAudioID == nil))
+        }
+        return items
+    }
+
+    static func decibels(_ level: Double) -> String {
+        level <= -120 ? "below -119 dBFS" : "\(level.formatted(.number.precision(.fractionLength(1)))) dBFS"
+    }
+
+    static func summary(_ record: AudioRecoveryRecord) -> String {
+        var parts = [LibraryRow.when(record.createdAt)]
+        if record.audioSeconds > 0 {
+            parts.append(Duration.seconds(record.audioSeconds).formatted(.units(allowed: [.minutes, .seconds], width: .narrow,
+                fractionalPart: .show(length: record.audioSeconds < 1 ? 1 : 0))))
+        }
+        if let tries = record.attempts {
+            if tries.count > 0 {
+                let noun = tries.count == 1 ? "try" : "tries"
+                parts.append("\(tries.count) \(tries.earlierUnknown ? "recorded " : "")\(noun)")
+            } else {
+                parts.append(tries.earlierUnknown ? "Past tries unknown" : "Not tried yet")
+            }
+        } else {
+            parts.append("Past tries unknown")
+        }
+        if let levels = record.levels { parts.append("Peak " + decibels(levels.peakDB)) }
+        return parts.joined(separator: " · ")
+    }
+
+    static func deletionMessage(_ targets: [AudioRecoveryRecord]) -> String {
+        targets.count == 1
+            ? "This permanently deletes the recovery copy and its saved audio from this iPhone."
+            : "This permanently deletes the selected recovery copies and their saved audio from this iPhone."
+
+    }
+
 }
 
 /// The one place a failure or storage warning shows on Home, with a close button. A message
@@ -324,6 +506,7 @@ struct HomeNotice: View {
     @Environment(DictationCoordinator.self) private var coordinator
 
     private var message: String? {
+        if let stopped = coordinator.recordingCardStopMessage { return stopped }
         // The plain hold status shows in the hero card; only a failed resume is a warning.
         let resumeFailure = coordinator.holdNotice == DictationCoordinator.heldMessage ? nil : coordinator.holdNotice
         var candidate = resumeFailure ?? coordinator.autoStopNotice ?? coordinator.audioRecoveryWarning
@@ -353,57 +536,11 @@ struct HomeNotice: View {
     }
 }
 
-/// One note, editable, with Save. Emptying it and saving deletes the note.
-private struct NoteEditorSheet: View {
-    @Environment(\.colorScheme) private var scheme
-    @Environment(\.dismiss) private var dismiss
-    let note: Note
-    let onSave: (String) -> Void
-    @State private var text: String
-    @FocusState private var focused: Bool
-
-    init(note: Note, onSave: @escaping (String) -> Void) {
-        self.note = note
-        self.onSave = onSave
-        _text = State(initialValue: note.text)
-    }
-
-    private var changed: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines) != note.text }
-
-    var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
-                TextEditor(text: $text)
-                    .font(.body)
-                    .foregroundStyle(Zone.ink(scheme))
-                    .scrollContentBackground(.hidden)
-                    .padding(12)
-                    .zoneCard(padding: 0)
-                    .focused($focused)
-                    .frame(minHeight: 180)
-                Text(note.createdAt.formatted(date: .abbreviated, time: .shortened)
-                     + (note.editedAt.map { " · edited " + $0.formatted(date: .omitted, time: .shortened) } ?? ""))
-                    .font(.footnote).foregroundStyle(Zone.muted(scheme))
-                Spacer(minLength: 0)
-            }
-            .padding(20)
-            .navigationTitle("Note")
-            .zoneBackButton()
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ZoneBarItem(.cancellationAction) { Button("Cancel") { dismiss() } }
-                ZoneBarItem(.confirmationAction, prominent: true) {
-                    Button("Save") {
-                        onSave(text)
-                        Haptics.success()
-                        dismiss()
-                    }
-                    .disabled(!changed)
-                }
-            }
-            .zoneScreen()
-            .onAppear { focused = true }
-        }
-        .presentationDetents([.medium, .large])
+extension View {
+    fileprivate func libraryWell(_ scheme: ColorScheme) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return padding(.horizontal, 12).padding(.vertical, 3)
+            .background(shape.fill(Zone.recess(scheme).shadow(.inner(color: .black.opacity(0.16), radius: 1, y: 1))))
+            .overlay { shape.strokeBorder(Zone.rule(scheme), lineWidth: 1).allowsHitTesting(false) }
     }
 }

@@ -8,17 +8,72 @@ import ZoneCore
 /// Calm on purpose; it may sit on a table for six hours.
 struct MeetingRecorderView: View {
     @Environment(MeetingCoordinator.self) private var meetings
-    @Environment(\.colorScheme) private var scheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var confirmingCancel = false
     @State private var renaming = false
     @State private var draftTitle = ""
     @State private var showsInfo = false
 
     var body: some View {
+        MeetingRecorderFace(edge: RecorderEdge(), seconds: { meetings.recordedSeconds },
+            title: meetings.recording?.title ?? "Meeting", isPaused: meetings.isPaused,
+            isInterrupted: meetings.isInterrupted, warning: meetings.recordingWarning, detail: { detail }) { action in
+            switch action {
+            case .hide: meetings.showsRecorder = false
+            case .info: showsInfo = true
+            case .rename:
+                draftTitle = meetings.recording?.title ?? ""
+                renaming = true
+            case .cancel: confirmingCancel = true
+            case .stop: Task { await meetings.stopRecording() }
+            case .pause: meetings.togglePause()
+            case .resume: Task { await meetings.resumeAfterInterruption() }
+            }
+        }
+        .alert("Cancel this recording?", isPresented: $confirmingCancel) {
+            Button("Delete recording", role: .destructive) { Task { await meetings.discardRecording() } }
+            Button("Keep recording", role: .cancel) {}
+        } message: {
+            Text("Deletes the audio without transcribing.")
+        }
+        .alert("Name this meeting", isPresented: $renaming) {
+            TextField("Name", text: $draftTitle)
+                .autocorrectionDisabled()
+            Button("Save") { meetings.renameRecording(to: draftTitle) }
+            Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: $showsInfo) { MeetingInfoSheet().presentationDetents([.large]) }
+    }
+
+    private var detail: String? {
+        let remaining = MeetingRecordingSafety.maximumSeconds - meetings.recordedSeconds
+        if remaining <= MeetingRecordingSafety.countdownSeconds {
+            return "Auto-saves in \(MeetingExport.durationLabel(max(0, remaining)))"
+        }
+        if meetings.labelsSpeakers, meetings.recordedSeconds > MeetingRecordingSafety.maximumSpeakerSeconds {
+            return "Past \(MeetingRecordingSafety.speakerLabel), so speaker labels will be skipped."
+        }
+        return nil
+    }
+}
+
+enum MeetingRecorderAction { case hide, info, rename, cancel, stop, pause, resume }
+
+struct MeetingRecorderFace<Edge: View>: View {
+    let edge: Edge
+    let seconds: () -> Double
+    let title: String
+    let isPaused: Bool
+    var isInterrupted = false
+    var warning: String?
+    var detail: () -> String? = { nil }
+    var previewInsets = EdgeInsets()
+    var perform: (MeetingRecorderAction) -> Void = { _ in }
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
         ZStack {
             Zone.paper(scheme).ignoresSafeArea()
-            RecorderEdge().ignoresSafeArea()
+            edge.ignoresSafeArea()
             GeometryReader { geometry in
                 let landscape = geometry.size.width > geometry.size.height
                 ScrollView {
@@ -43,56 +98,18 @@ struct MeetingRecorderView: View {
                 }
                 .scrollIndicators(.hidden)
             }
+            .padding(previewInsets)
         }
-        .alert("Cancel this recording?", isPresented: $confirmingCancel) {
-            Button("Delete recording", role: .destructive) { Task { await meetings.discardRecording() } }
-            Button("Keep recording", role: .cancel) {}
-        } message: {
-            Text("Deletes the audio without transcribing.")
-        }
-        .alert("Name this meeting", isPresented: $renaming) {
-            TextField("Name", text: $draftTitle)
-                .autocorrectionDisabled()
-            Button("Save") { meetings.renameRecording(to: draftTitle) }
-            Button("Cancel", role: .cancel) {}
-        }
-        .sheet(isPresented: $showsInfo) { MeetingInfoSheet().presentationDetents([.large]) }
     }
 
     private var recordingStatus: some View {
-        VStack(spacing: 12) {
-            TimelineLabel()
-                .foregroundStyle(Zone.ink(scheme).opacity(meetings.isPaused ? 0.45 : 1))
-                .accessibilityLabel("Recorded \(MeetingExport.durationLabel(meetings.recordedSeconds))")
-            HStack(spacing: 0) {
-                StatusDot(color: stateColor, pulses: !meetings.isPaused && !meetings.isInterrupted, size: 8)
-                Text(stateLabel).font(.subheadline.weight(.medium)).foregroundStyle(Zone.ink(scheme))
-            }
-            .padding(.leading, -8)
-            if let warning = meetings.recordingWarning {
-                Text(warning).font(.footnote).foregroundStyle(Zone.live)
-            }
-            if meetings.isInterrupted {
-                Button("Resume") { Task { await meetings.resumeAfterInterruption() } }.buttonStyle(ZoneInkPillButtonStyle())
-            } else if meetings.isPaused {
-                Text("Recording paused.")
-                    .font(.footnote).foregroundStyle(Zone.muted(scheme))
-            } else if MeetingRecordingSafety.maximumSeconds - meetings.recordedSeconds <= MeetingRecordingSafety.countdownSeconds {
-                Text("Auto-saves in \(MeetingExport.durationLabel(max(0, MeetingRecordingSafety.maximumSeconds - meetings.recordedSeconds)))")
-                    .font(.footnote.monospacedDigit()).foregroundStyle(Zone.muted(scheme))
-            } else if meetings.labelsSpeakers, meetings.recordedSeconds > MeetingRecordingSafety.maximumSpeakerSeconds {
-                // Said while it can still change the plan, not after the transcript arrives.
-                Text("Past \(MeetingRecordingSafety.speakerLabel), so speaker labels will be skipped.")
-                    .font(.footnote).foregroundStyle(Zone.muted(scheme))
-            }
-        }
-        .multilineTextAlignment(.center)
-        .fixedSize(horizontal: false, vertical: true)
+        RecorderStatus(seconds: seconds, isPaused: isPaused, isInterrupted: isInterrupted,
+                       warning: warning, detail: detail) { perform(.resume) }
     }
 
     private var topBar: some View {
         HStack(spacing: 8) {
-            Button { meetings.showsRecorder = false } label: {
+            Button { perform(.hide) } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 18, weight: .semibold))
                     .frame(width: 44, height: 44)
@@ -100,11 +117,8 @@ struct MeetingRecorderView: View {
             }
             .accessibilityLabel("Hide. Recording continues")
             Spacer(minLength: 0)
-            Button {
-                draftTitle = meetings.recording?.title ?? ""
-                renaming = true
-            } label: {
-                Text(meetings.recording?.title ?? "Meeting")
+            Button { perform(.rename) } label: {
+                Text(title)
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
                     .dynamicTypeSize(...DynamicTypeSize.accessibility1)
@@ -112,7 +126,7 @@ struct MeetingRecorderView: View {
             }
             .accessibilityHint("Rename this meeting")
             Spacer(minLength: 0)
-            Button { showsInfo = true } label: {
+            Button { perform(.info) } label: {
                 Image(systemName: "info.circle")
                     .font(.system(size: 18, weight: .regular))
                     .frame(width: 44, height: 44)
@@ -126,56 +140,78 @@ struct MeetingRecorderView: View {
 
     private var controls: some View {
         HStack(alignment: .bottom, spacing: 0) {
-            RecorderControl(symbol: "xmark", label: "Cancel", diameter: 60) { confirmingCancel = true }
+            RecorderControl(symbol: "xmark", label: "Cancel", diameter: 60) { perform(.cancel) }
                 .accessibilityLabel("Cancel and delete the recording")
             Spacer(minLength: 12)
             RecorderControl(symbol: "stop.fill", label: "Stop", diameter: 84, prominent: true) {
-                Task { await meetings.stopRecording() }
+                perform(.stop)
             }
             .accessibilityLabel("Stop and transcribe")
             Spacer(minLength: 12)
-            RecorderControl(symbol: meetings.isPaused ? "play.fill" : "pause.fill",
-                            label: meetings.isPaused ? "Resume" : "Pause", diameter: 60) {
-                meetings.togglePause()
+            RecorderControl(symbol: isPaused ? "play.fill" : "pause.fill",
+                            label: isPaused ? "Resume" : "Pause", diameter: 60) {
+                perform(.pause)
             }
-            .disabled(meetings.isInterrupted)
-            .accessibilityLabel(meetings.isPaused ? "Resume recording" : "Pause recording")
+            .disabled(isInterrupted)
+            .accessibilityLabel(isPaused ? "Resume recording" : "Pause recording")
         }
         .padding(.horizontal, 8)
-    }
-
-    private var stateColor: Color {
-        meetings.isPaused || meetings.isInterrupted ? Zone.muted(scheme) : Zone.accentGraphic(scheme)
-    }
-
-    private var stateLabel: String {
-        if meetings.isInterrupted { return "Interrupted" }
-        return meetings.isPaused ? "Paused" : "Recording"
     }
 
 
 }
 
-/// The big clock, read in its own view so the twenty-a-second level updates never touch it.
-private struct TimelineLabel: View {
-    @Environment(MeetingCoordinator.self) private var meetings
+/// Reading elapsed time here keeps the controls and the recorder layout out of clock updates.
+private struct RecorderStatus: View {
+    let seconds: () -> Double
+    let isPaused: Bool
+    let isInterrupted: Bool
+    let warning: String?
+    let detail: () -> String?
+    let resume: () -> Void
+    @Environment(\.colorScheme) private var scheme
+
     var body: some View {
-        MeetingTimerText(seconds: meetings.recordedSeconds)
+        VStack(spacing: 12) {
+            MeetingTimerText(seconds: seconds())
+                .foregroundStyle(stateColor)
+            HStack(spacing: 0) {
+                StatusDot(color: stateColor, pulses: !isPaused && !isInterrupted, size: 8)
+                Text(stateLabel).font(.subheadline.weight(.medium)).foregroundStyle(Zone.ink(scheme))
+            }
+            .padding(.leading, -8)
+            if let warning {
+                Text(warning).font(.footnote).foregroundStyle(Zone.live)
+            }
+            if isInterrupted {
+                Button("Resume", action: resume).buttonStyle(ZoneInkPillButtonStyle())
+            } else if isPaused {
+                Text("Recording paused.")
+                    .font(.footnote).foregroundStyle(Zone.muted(scheme))
+            } else if let detail = detail() {
+                Text(detail).font(.footnote).foregroundStyle(Zone.muted(scheme))
+            }
+        }
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var stateColor: Color {
+        isPaused || isInterrupted ? Zone.muted(scheme) : Zone.accentTone(scheme)
+    }
+
+    private var stateLabel: String {
+        if isInterrupted { return "Interrupted" }
+        return isPaused ? "Paused" : "Recording"
     }
 }
 
 /// The edge meter, the only view that reads the levels.
 private struct RecorderEdge: View {
-    @AppStorage("meetingWaveformStyle") private var style = EdgeEqualizer.Style.flow.rawValue
     @Environment(MeetingCoordinator.self) private var meetings
-    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        let live = !meetings.isPaused && !meetings.isInterrupted
-        EdgeEqualizer(levels: meetings.levels, color: UIColor(live ? Zone.accentGraphic(scheme) : Zone.muted(scheme)), active: live,
-                      style: EdgeEqualizer.Style(rawValue: style) ?? .flow)
-            .accessibilityHidden(true)
-            .allowsHitTesting(false)
+        MeetingEdge(levels: meetings.levels, active: !meetings.isPaused && !meetings.isInterrupted)
     }
 }
 
@@ -194,9 +230,9 @@ private struct RecorderControl: View {
             VStack(spacing: 8) {
                 Image(systemName: symbol)
                     .font(.system(size: diameter * 0.32, weight: .bold))
-                    .foregroundStyle(prominent ? Zone.onAccent : Zone.ink(scheme))
+                    .foregroundStyle(prominent ? Zone.controlInk(scheme) : Zone.ink(scheme))
                     .frame(width: diameter, height: diameter)
-                    .background(prominent ? Zone.accent : Zone.card(scheme), in: Circle())
+                    .background(prominent ? Zone.controlFill(scheme) : Zone.card(scheme), in: Circle())
                     .overlay(Circle().strokeBorder(prominent ? .clear : Zone.rule(scheme), lineWidth: 1))
                 Text(label).font(.footnote.weight(.medium)).foregroundStyle(Zone.muted(scheme))
                     .lineLimit(1)

@@ -56,6 +56,17 @@ public final class RecordingJournal: @unchecked Sendable {
         self.process = process
         fileURL = directory.appendingPathComponent("\(process).jsonl")
         queue = DispatchQueue(label: "wtf.zayd.zone.journal.\(process)", qos: .utility)
+        queue.async { [self] in
+            let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+            for file in files where file.pathExtension == "jsonl" { Self.excludeFromBackup(file) }
+        }
+    }
+
+    private static func excludeFromBackup(_ file: URL) {
+        var url = file
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
     }
 
     /// The journal in the App Group container, or nil when the container is unreachable.
@@ -124,11 +135,9 @@ public final class RecordingJournal: @unchecked Sendable {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             if !FileManager.default.fileExists(atPath: fileURL.path) {
                 FileManager.default.createFile(atPath: fileURL.path, contents: nil)
-                var values = URLResourceValues()
-                values.isExcludedFromBackup = true
-                var url = fileURL
-                try? url.setResourceValues(values)
             }
+            Self.excludeFromBackup(directory)
+            Self.excludeFromBackup(fileURL)
             let handle = try FileHandle(forWritingTo: fileURL)
             bytes = Int(try handle.seekToEnd())
             self.handle = handle
@@ -160,6 +169,7 @@ public final class RecordingJournal: @unchecked Sendable {
             out.append(UInt8(ascii: "\n"))
         }
         try? out.write(to: fileURL, options: .atomic)
+        Self.excludeFromBackup(fileURL)
         bytes = out.count
         handle = try? FileHandle(forWritingTo: fileURL)
         _ = try? handle?.seekToEnd()

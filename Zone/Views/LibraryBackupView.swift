@@ -10,6 +10,7 @@ extension UTType {
 
 struct LibraryBackupView: View {
     @Environment(DictationCoordinator.self) private var coordinator
+    @Environment(AppSettings.self) private var settings
     @Environment(MeetingCoordinator.self) private var meetings
     @Environment(\.colorScheme) private var scheme
     @State private var manager = LibraryBackupManager.shared
@@ -31,12 +32,12 @@ struct LibraryBackupView: View {
                             showsExport = true
                         } catch { message = error.localizedDescription }
                     }
-                } label: { Label("Export all notes and recordings", systemImage: "square.and.arrow.up") }
+                } label: { Label("Export a Zone backup", systemImage: "square.and.arrow.up") }
                 .disabled(manager.isWorking || meetings.isRecording)
                 Button { showsImport = true } label: { Label("Import a Zone backup", systemImage: "square.and.arrow.down") }
                     .disabled(manager.isWorking || meetings.isRecording)
             } header: { Text("Export and import") } footer: {
-                Text("Save a `.zonebackup` bundle to On My iPhone or iCloud Drive. Includes notes, history, meeting transcripts, speaker names, meeting audio, and a plain-text copy. Store backups outside Zone's own folder if you plan to delete the app.")
+                SettingsNote("Export and import", "Save or restore your library.", detail: "Save a `.zonebackup` bundle to On My iPhone or iCloud Drive. \(LinkCopy.backupContents) Open the keyboard with Full Access before exporting its kept words for the first time. Store backups outside Zone's own folder if you plan to delete the app.")
             }
             .listRowBackground(Zone.card(scheme))
 
@@ -54,10 +55,14 @@ struct LibraryBackupView: View {
                     Button("Stop automatic backups", role: .destructive) { manager.stopAutomaticBackups() }
                         .disabled(manager.isWorking)
                 }
-                if manager.isWorking { ProgressView("Saving backup…") }
-                if let error = manager.lastError { Text(error).foregroundStyle(.red).font(.footnote) }
+                if manager.isWorking {
+                    BoundedProgress(message: "The backup is taking longer than usual. If it stays here, reopen Zone and check the backup folder.") {
+                        ProgressView("Saving backup…")
+                    }
+                }
+                if let error = manager.lastError { Text(error).foregroundStyle(Zone.live).font(.footnote) }
             } header: { Text("Automatic folder backup") } footer: {
-                Text("Updates the chosen folder while Zone is open (within ~5 minutes of changes, or right after a meeting stops). Keeps older backed-up items even if you delete them in Zone. Last saved marks the local file write; iOS handles iCloud sync.")
+                SettingsNote("Automatic folder backup", "Save while Zone is open.", detail: "Saves to your folder while Zone is open. Deleting in Zone doesn’t delete the backup. iCloud may sync later.")
             }
             .listRowBackground(Zone.card(scheme))
         }
@@ -96,11 +101,14 @@ struct LibraryBackupView: View {
             }
         }
         .confirmationDialog("Import this backup?", isPresented: Binding(get: { importURL != nil }, set: { if !$0 { importURL = nil } })) {
-            Button("Import and keep history") {
+            Button("Import backup") {
                 guard let url = importURL else { return }
                 importURL = nil
                 Task {
-                    do { message = try await manager.restore(url, notes: coordinator.notes, meetings: meetings) }
+                    do {
+                        message = try await manager.restore(url, notes: coordinator.notes, meetings: meetings)
+                        await settings.refreshVocabularyCache()
+                    }
                     catch { message = manager.lastError ?? error.localizedDescription }
                 }
             }

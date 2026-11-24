@@ -4,6 +4,13 @@ import XCTest
 @testable import ZoneCore
 
 final class InactivityPolicyTests: XCTestCase {
+    func testMicReadySummaryForEveryDuration() {
+        for policy in InactivityPolicy.presets where !policy.isUnbounded {
+            XCTAssertEqual(policy.micReadySummary, "When you stop using the mic, it turns off after \(policy.label).")
+        }
+        XCTAssertEqual(InactivityPolicy(timeout: .infinity).micReadySummary, "The mic stays ready until you turn it off.")
+    }
+
     func testDefaultTimeoutIsFiveMinutes() {
         XCTAssertEqual(InactivityPolicy().timeout, 300)
     }

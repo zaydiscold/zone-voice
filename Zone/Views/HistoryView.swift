@@ -1,5 +1,6 @@
 // by zayd/cold @ zayd.wtf
 
+import Combine
 import SwiftUI
 import ZoneCore
 
@@ -10,6 +11,9 @@ struct HistoryView: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.scenePhase) private var scenePhase
     @Environment(LinkCoordinator.self) private var link: LinkCoordinator?
+    @Environment(AppSettings.self) private var settings: AppSettings?
+    @Environment(DictationCoordinator.self) private var coordinator: DictationCoordinator?
+    @Environment(MeetingCoordinator.self) private var meetings: MeetingCoordinator?
     /// Fixed records for the design screenshots; nil reads the real store.
     var preview: [TranscriptRecord]? = nil
     var previewRetention: HistoryRetention = .default
@@ -19,6 +23,9 @@ struct HistoryView: View {
     @State private var query = ""
     @State private var loaded = false
     @State private var confirmingDeleteAll = false
+    @State private var clipChangeFailed = false
+    @State private var historyDeleteFailed = false
+    @State private var failedDeleteRecord: TranscriptRecord?
     @State private var opened: TranscriptRecord?
     @State private var pendingRetention: HistoryRetention?
     @State private var confirmingRetention = false
@@ -33,6 +40,31 @@ struct HistoryView: View {
     @State private var selecting = false
     @State private var selected: Set<UUID> = []
     @State private var copiedCount = 0
+    /// Clipboard history: the newest few copies (or, while searching, the ones that match).
+    @State private var clipMarks: [UUID: [Range<Int>]] = [:]
+    @State private var clips: [ClipboardEntry] = []
+    @State private var clipTotal = 0
+    @State private var swipeDelete: ClipboardEntry?
+    @State private var openedClip: ClipboardEntry?
+    private static let shownClips = 3
+    private static let matchedClips = 12
+    /// The search's answer: where the found words are in each dictation, and what it read in
+    /// place of a word the library does not have. The index is kept between the once-a-second
+    /// reloads and rebuilt only when the dictations changed.
+    @State private var marks: [UUID: [Range<Int>]] = [:]
+    @State private var searchNote: String?
+    @State private var searchIndex: HistorySearchIndex?
+    /// The search looks at dictations (and kept copies, when that is on), or at every list: the
+    /// same words in notes and meetings.
+    @State private var scope: LibraryScope = .here
+    @State private var finder = LibraryFinder()
+    @State private var libraryRevision = 0
+    @State private var target: LibraryTarget?
+    private var searching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var elsewhere: [LibraryFinder.Group] { searching && finder.answered == query ? finder.groups : [] }
+    /// The copies to draw: none the moment the switch is off, even before the next read empties
+    /// `clips`, so turning clipboard history off never leaves copies on screen or in a search.
+    private var visibleClips: [ClipboardEntry] { settings?.clipboardHistoryEnabled == true ? clips : [] }
 
     private var history: TranscriptHistory? { TranscriptHistory.shared }
 
@@ -55,11 +87,11 @@ struct HistoryView: View {
                     Text("Shared storage couldn't open. Reopen Zone and try again; existing dictations are untouched.")
                 }
                 .listRowBackground(Zone.paper(scheme))
-            } else if records.isEmpty && loaded {
+            } else if records.isEmpty && visibleClips.isEmpty && loaded {
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
                         Image(systemName: retention == .off ? "clock.badge.xmark" : "clock.arrow.circlepath")
-                            .font(.system(size: 26)).foregroundStyle(Zone.accentText(scheme))
+                            .font(.system(size: 26)).foregroundStyle(Zone.accentTone(scheme))
                         Text(emptyTitle).font(.headline).foregroundStyle(Zone.ink(scheme))
                         Text(emptyDetail).font(.subheadline).foregroundStyle(Zone.muted(scheme))
                             .fixedSize(horizontal: false, vertical: true)
@@ -69,25 +101,33 @@ struct HistoryView: View {
                 .listRowBackground(Zone.paper(scheme))
             }
 
+            if preview == nil, !selecting, let settings { clipboardSection(settings) }
+
+            if let searchNote, !records.isEmpty {
+                Text(searchNote)
+                    .font(.subheadline).foregroundStyle(Zone.muted(scheme))
+                    .listRowInsets(EdgeInsets(top: 8, leading: 20, bottom: 0, trailing: 20))
+                    .listRowBackground(Zone.paper(scheme))
+                    .listRowSeparator(.hidden)
+                    .accessibilityIdentifier("history.searchSummary")
+            }
+
             // The dictations sit on the paper, a hairline apart, under their day: a list, not a
             // stack of cards. Settings below them keep the system's grouped rows.
             ForEach(days, id: \.title) { day in
                 Section {
                     ForEach(day.records) { record in
-                        LibraryRow(kind: .dictation, text: record.text,
+                        // A search shows the words around what it found, lit.
+                        let found = marks[record.id].map { LibrarySearch.excerpt(record.text, marks: $0) }
+                        LibraryRow(kind: .dictation, text: found?.text ?? record.text, whole: record.text,
+                                   marks: found?.marks ?? [],
                                    detail: HomeLibraryView.detail(record.createdAt.formatted(date: .omitted, time: .shortened),
                                                                   quiet: HomeLibraryView.quietStatus(record.status)),
                                    alert: HomeLibraryView.alertStatus(record.status), recoveredFrom: record.recoveredFrom,
-                                   showsCopy: !selecting,
+                                   showsCopy: !selecting, copiedDictationID: record.id,
                                    onOpen: { if selecting { toggle(record) } else { opened = record } },
                                    onDelete: { delete(record) })
                             .tag(record.id)
-                            // A full swipe deleted at once; now the swipe shows Delete and a second,
-                            // deliberate tap deletes.
-                            .swipeActions(allowsFullSwipe: false) {
-                                Button(role: .destructive) { delete(record) } label: { Label("Delete", systemImage: "trash") }
-                                    .tint(Zone.live)
-                            }
                             .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 12))
                             .listRowBackground(Zone.paper(scheme))
                             .listRowSeparatorTint(Zone.rule(scheme))
@@ -105,6 +145,13 @@ struct HistoryView: View {
                 .listSectionSeparator(.hidden)
             }
 
+            // The same words in notes and meetings: counted under the dictations, listed under Everything.
+            if scope == .everything {
+                LibraryFoundSections(groups: elsewhere) { target = $0 }
+            } else {
+                LibraryElsewhereRow(groups: elsewhere) { scope = .everything }
+            }
+
             Section {
                 Picker("Keep dictations for", selection: Binding(get: { retention }, set: { requestRetention($0) })) {
                     ForEach(HistoryRetention.allCases, id: \.self) { Text($0.label).tag($0) }
@@ -117,6 +164,7 @@ struct HistoryView: View {
             } footer: {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(LinkCopy.historyFooter(pairedNames))
+                    Text("Automatic expiry and Off remove transcripts, not stats. Reset words and stats in Settings to clear the counts.")
                         .accessibilityIdentifier("history.footer")
                     if library.words > 0 {
                         // How little all of it takes, against the library it would take to fill.
@@ -136,7 +184,23 @@ struct HistoryView: View {
         .listStyle(.plain)
         .disabled(mutationInProgress)
         .scrollContentBackground(.hidden)
-        .searchable(text: $query, prompt: "Search your dictations")
+        .searchable(text: $query, prompt: settings?.clipboardHistoryEnabled == true ? "Search dictations and copies" : "Search your dictations")
+        .searchScopes($scope) {
+            Text("Dictations").tag(LibraryScope.here)
+            Text("Everything").tag(LibraryScope.everything)
+        }
+        .alert("Could not change the saved copy", isPresented: $clipChangeFailed) { Button("OK") {} }
+        .confirmClipboardDeletion($swipeDelete, delete: deleteClip)
+        .opensLibraryTargets($target)
+        .onReceive(NotificationCenter.default.publisher(for: .init("ZoneLibraryDidChange"))
+            .merge(with: NotificationCenter.default.publisher(for: MeetingStore.finishedMeetingDidChange))
+            .receive(on: RunLoop.main)) { _ in libraryRevision &+= 1 }
+        .task(id: LibraryQuery(words: query, revision: libraryRevision)) {
+            guard preview == nil else { return }
+            if searching { try? await Task.sleep(for: .milliseconds(140)) }
+            guard !Task.isCancelled else { return }
+            await finder.search(query, kinds: [.notes, .meetings], notes: coordinator?.notes.notes ?? [], meetings: meetings?.meetings ?? [])
+        }
         .navigationTitle("History")
         .zoneBackButton()
         .toolbar(.visible, for: .navigationBar)
@@ -164,6 +228,8 @@ struct HistoryView: View {
                         .disabled(selected.isEmpty)
                     Button {
                         Clipboard.copy(selectionText)
+                        let counts = selectedRecords.map { ($0.id, $0.wordCount) }
+                        DictationCoordinator.history { $0.confirmKept(counts) }
                         Haptics.success()
                         copiedCount = selected.count
                     } label: {
@@ -177,19 +243,28 @@ struct HistoryView: View {
         .confirmationDialog("Delete all dictations?", isPresented: $confirmingDeleteAll, titleVisibility: .visible) {
             Button("Delete all", role: .destructive) { deleteAll() }
         } message: {
-            Text(["This can't be undone. Notes are untouched.", LinkCopy.deleteNote(pairedNames, keeping: keepingNames)].compactMap { $0 }.joined(separator: " "))
+            Text(["This can't be undone. Notes and stats are kept.", LinkCopy.deleteNote(pairedNames, keeping: keepingNames)].compactMap { $0 }.joined(separator: " "))
         }
         .sheet(item: $opened) { record in RecordSheet(record: record, onDelete: { delete(record); opened = nil }) }
+        .alert("Some dictation history could not be deleted. Try again.", isPresented: $historyDeleteFailed) {
+            Button("Try again") {
+                if let failedDeleteRecord { delete(failedDeleteRecord) } else { confirmingDeleteAll = true }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .sheet(item: $openedClip) { clip in
+            ClipSheet(entry: clip, onDelete: { deleteClip(clip); openedClip = nil }, onPin: { setPinned(clip, $0) })
+        }
         .confirmationDialog("Change retention?", isPresented: $confirmingRetention, titleVisibility: .visible) {
-            Button(pendingRetention == .off ? "Turn off and clear history" : "Delete older dictations", role: .destructive) {
+            Button(pendingRetention == .off ? "Turn off history" : "Delete older dictations", role: .destructive) {
                 if let pendingRetention { setRetention(pendingRetention) }
                 pendingRetention = nil
             }
             Button("Cancel", role: .cancel) { pendingRetention = nil }
         } message: {
             Text([pendingRetention == .off
-                  ? "Clears History and stops saving new dictations. Notes stay, and cut-off dictations are still rescued."
-                  : "Deletes dictations older than \(pendingRetention?.label.lowercased() ?? "that"). Notes are untouched.",
+                  ? "Stops saving finished dictations. Notes stay. Recovery files can still appear in backups or return as cut-off dictations. To clear those files too, use Delete everything in Settings > Your data > Delete data."
+                  : "Deletes dictations older than \(pendingRetention?.label.lowercased() ?? "that"). Notes and stats are kept.",
                   LinkCopy.agedOutNote(pairedNames)].compactMap { $0 }.joined(separator: " "))
         }
         .refreshable { await load() }
@@ -200,6 +275,79 @@ struct HistoryView: View {
                 await load()
                 do { try await Task.sleep(for: .seconds(1)) } catch { break }
             }
+        }
+    }
+
+    // MARK: Clipboard
+
+    /// What Zone kept from the clipboard, above the dictations: the newest few and a way to all
+    /// of them, or, while searching, the copies that match. Off, one row that leads to the switch.
+    @ViewBuilder
+    private func clipboardSection(_ settings: AppSettings) -> some View {
+        if settings.clipboardHistoryEnabled ? !(searching && visibleClips.isEmpty) : !searching {
+            Section {
+                ForEach(visibleClips) { clip in
+                    ClipRow(entry: clip, marks: clipMarks[clip.id] ?? [], onOpen: { openedClip = clip }, onDelete: { deleteClip(clip) }, onSwipeDelete: { swipeDelete = clip },
+                            onPin: { setPinned(clip, !clip.pinned) })
+                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 12))
+                        .listRowBackground(Zone.paper(scheme))
+                        .listRowSeparatorTint(Zone.rule(scheme))
+                }
+                NavigationLink {
+                    ClipboardHistoryView()
+                } label: {
+                    LabeledContent(clipboardLinkTitle(settings, searching: searching),
+                                   value: settings.clipboardHistoryEnabled ? "" : "Off")
+                        .font(.subheadline)
+                        .foregroundStyle(Zone.ink(scheme))
+                }
+                .accessibilityIdentifier("history.clipboard.all")
+                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
+                .listRowBackground(Zone.paper(scheme))
+                .listRowSeparatorTint(Zone.rule(scheme))
+            } header: {
+                Text("Clipboard").font(.subheadline.weight(.semibold)).foregroundStyle(Zone.ink(scheme))
+                    .textCase(nil)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 14)
+                    .padding(.bottom, 4)
+                    .background(Zone.paper(scheme))
+                    .listRowInsets(EdgeInsets())
+            }
+            .listSectionSeparator(.hidden)
+        }
+    }
+
+    private func clipboardLinkTitle(_ settings: AppSettings, searching: Bool) -> String {
+        guard settings.clipboardHistoryEnabled else { return "Keep what you copy" }
+        if searching { return "Search all copies" }
+        switch clipTotal {
+        case 0: return "No copies yet"
+        case 1: return "Clipboard history"
+        default: return "All \(clipTotal) copies"
+        }
+    }
+
+    private func deleteClip(_ clip: ClipboardEntry) {
+        mutationInProgress = true
+        loadToken = UUID()
+        Task {
+            let saved = await Task.detached { ClipboardHistory.shared?.delete(id: clip.id) }.value
+            clipChangeFailed = saved != true
+            mutationInProgress = false
+            await load()
+        }
+    }
+
+    private func setPinned(_ clip: ClipboardEntry, _ pinned: Bool) {
+        mutationInProgress = true
+        loadToken = UUID()
+        Task {
+            let saved = await Task.detached { ClipboardHistory.shared?.setPinned(id: clip.id, pinned) }.value
+            clipChangeFailed = saved != true
+            mutationInProgress = false
+            await load()
         }
     }
 
@@ -225,12 +373,16 @@ struct HistoryView: View {
     }
 
     private var emptyTitle: String {
-        if !query.isEmpty { return "Nothing matches “\(query)”" }
+        if !query.isEmpty { return elsewhere.isEmpty ? "Nothing matches “\(query)”" : "No dictation matches “\(query)”" }
         return retention == .off ? "History is off" : "No dictations yet"
     }
 
     private var emptyDetail: String {
-        if !query.isEmpty { return "Searches the text of every saved dictation." }
+        if !query.isEmpty {
+            return settings?.clipboardHistoryEnabled == true
+                ? "Search reads every word of every saved dictation and kept copy, and close spellings too."
+                : "Search reads every word of every saved dictation, and close spellings too."
+        }
         return retention == .off
             ? "New dictations aren't saved. Change retention below, or find cut-off dictations here."
             : (retention == .untilDeleted
@@ -246,7 +398,11 @@ struct HistoryView: View {
             totalRecords = preview.count
             library = preview.reduce(into: (words: 0, bytes: 0)) { $0.words += $1.wordCount; $0.bytes += $1.text.utf8.count }
             retention = previewRetention
-            records = query.isEmpty ? preview : preview.filter { $0.text.localizedCaseInsensitiveContains(query) }
+            let answer = HistorySearchIndex.answer(query, in: preview, cached: searchIndex)
+            records = answer.map { answer in preview.filter { answer.marks[$0.id] != nil } } ?? preview
+            marks = answer?.marks ?? [:]
+            searchNote = answer?.note
+            searchIndex = answer?.index ?? searchIndex
             loaded = true
             return
         }
@@ -255,18 +411,45 @@ struct HistoryView: View {
         let q = query
         let token = UUID()
         loadToken = token
-        let (found, kept) = await Task.detached(priority: .userInitiated) {
-            (history.records(), history.retention)
+        // The search and the word count walk the whole library, so they run with the read, off
+        // the main thread: this happens every second while History is open.
+        let clipsOn = settings?.clipboardHistoryEnabled == true
+        // Read here, on the main actor: the detached read below cannot touch the view's statics.
+        let clipLimit = q.isEmpty ? Self.shownClips : Self.matchedClips
+        let savedRecordings = Set(coordinator?.notes.notes.compactMap(\.recordingID) ?? [])
+        let cached = searchIndex
+        let (found, kept, shown, size, answer, copies, copyCount, copyMarks) = await Task.detached(priority: .userInitiated) {
+            let found = history.records().filter { $0.status != .note && !savedRecordings.contains($0.id) }
+            let answer = HistorySearchIndex.answer(q, in: found, cached: cached)
+            let shown = answer.map { answer in found.filter { answer.marks[$0.id] != nil } } ?? found
+            let size = found.reduce(into: (words: 0, bytes: 0)) { $0.words += $1.wordCount; $0.bytes += $1.text.utf8.count }
+            // The same search runs over what was copied, so one field finds either. Nothing is
+            // read from the clipboard store while the switch is off.
+            var copies: [ClipboardEntry] = []
+            var copyMarks: [UUID: [Range<Int>]] = [:]
+            var copyCount = 0
+            if clipsOn, let clipboard = ClipboardHistory.shared {
+                let all = clipboard.entries()
+                copyCount = all.count
+                let result = ClipboardHistory.matches(q, copies: all)
+                copies = Array(result.copies.prefix(clipLimit))
+                copyMarks = result.marks
+            }
+            return (found, history.retention, shown, size, answer, copies, copyCount, copyMarks)
         }.value
         guard !Task.isCancelled, !mutationInProgress, token == loadToken, q == query else { return }
-        // This runs every second while History is open. Assign only what changed: rewriting
-        // identical state re-renders every row, and a row's long-press menu or a picker menu
-        // that is open at that moment can be rebuilt empty underneath the finger.
-        let shown = q.isEmpty ? found : found.filter { $0.text.localizedCaseInsensitiveContains(q) }
+        if clipMarks != copyMarks { clipMarks = copyMarks }
+        if clips != copies { clips = copies }
+        if clipTotal != copyCount { clipTotal = copyCount }
+        // Assign only what changed: rewriting identical state re-renders every row, and a row's
+        // long-press menu or a picker menu that is open at that moment can be rebuilt empty
+        // underneath the finger.
         if totalRecords != found.count { totalRecords = found.count }
-        let size = found.reduce(into: (words: 0, bytes: 0)) { $0.words += $1.wordCount; $0.bytes += $1.text.utf8.count }
         if library != size { library = size }
         if records != shown { records = shown }
+        if marks != (answer?.marks ?? [:]) { marks = answer?.marks ?? [:] }
+        if searchNote != answer?.note { searchNote = answer?.note }
+        if let index = answer?.index, index.records != cached?.records { searchIndex = index }
         if retention != kept { retention = kept }
         if !loaded { loaded = true }
     }
@@ -300,7 +483,9 @@ struct HistoryView: View {
         loadToken = UUID()
         mutationInProgress = true
         Task {
-            await Task.detached { history.delete(id: record.id) }.value
+            let saved = await Task.detached { history.delete(id: record.id) }.value
+            failedDeleteRecord = saved ? nil : record
+            historyDeleteFailed = !saved
             mutationInProgress = false
             await load()
         }
@@ -312,10 +497,43 @@ struct HistoryView: View {
         loadToken = UUID()
         mutationInProgress = true
         Task {
-            await Task.detached { history.deleteAll() }.value
+            let erased = await Task.detached { history.deleteAllWithRecovery(clearingStats: false) }.value
+            failedDeleteRecord = nil
+            historyDeleteFailed = !erased
             mutationInProgress = false
             await load()
         }
+    }
+}
+
+/// History's search over its dictations: the same `LibrarySearch` the Notes page uses, so a word
+/// in another form, a close spelling or a sound-alike finds a dictation here too. The dictations
+/// stay under their days, newest first; the search decides which ones show and lights the words.
+struct HistorySearchIndex: Sendable {
+    let records: [TranscriptRecord]
+    let search: LibrarySearch
+
+    struct Answer: Sendable {
+        let marks: [UUID: [Range<Int>]]
+        /// Said above the results when the search looked past the words as typed.
+        let note: String?
+        let index: HistorySearchIndex
+    }
+
+    /// nil when there is nothing to search for. Reuses `cached` while the dictations are the same.
+    static func answer(_ query: String, in records: [TranscriptRecord], cached: HistorySearchIndex?) -> Answer? {
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        let index = cached?.records == records ? cached! : HistorySearchIndex(
+            records: records,
+            search: LibrarySearch(documents: records.map { .init(id: $0.id, text: $0.text, date: $0.createdAt) }))
+        let result = index.search.search(query)
+        var note: String?
+        if result.widened {
+            note = "No dictation has every word. These have some."
+        } else if let respelled = result.respelled.first, let shown = respelled.found.first {
+            note = "No “\(respelled.typed)”. Showing \(shown)."
+        }
+        return Answer(marks: Dictionary(result.hits.map { ($0.id, $0.ranges) }, uniquingKeysWith: { first, _ in first }), note: note, index: index)
     }
 }
 
@@ -328,7 +546,6 @@ struct RecordSheet: View {
     let record: TranscriptRecord
     let onDelete: () -> Void
     @State private var copied = false
-    @State private var cleaning = false
     @State private var confirmingDelete = false
 
     var body: some View {
@@ -346,39 +563,45 @@ struct RecordSheet: View {
                     Text(record.text).font(.body).foregroundStyle(Zone.ink(scheme)).textSelection(.enabled)
                     Text("\(record.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(record.wordCount) words")
                         .font(.footnote).foregroundStyle(Zone.muted(scheme))
-                    if let recoveredFrom = record.recoveredFrom { RecoveredFromLabel(date: recoveredFrom) }
-                    HStack(spacing: 10) {
-                        Button(copied ? "Copied" : "Copy") {
-                            Clipboard.copy(record.text)
-                            Haptics.success()
-                            copied = true
-                        }
-                        .buttonStyle(ZonePrimaryButtonStyle())
-                        ShareLink(item: record.text) { Text("Share") }.buttonStyle(ZoneQuietButtonStyle(fullWidth: true))
+                    if let note = KeyboardCapture.historyNote(engine: record.engine, source: record.source) {
+                        Text(note).font(.footnote).foregroundStyle(Zone.muted(scheme))
+                            .accessibilityIdentifier("history.recognizer")
                     }
-                    Button("Clean up") { cleaning = true }.buttonStyle(ZoneQuietButtonStyle(fullWidth: true))
-                    Button("Delete", role: .destructive) { confirmingDelete = true }
-                        .font(.subheadline.weight(.medium)).foregroundStyle(Zone.live)
-                        .frame(minHeight: 44)
-                        .confirmationDialog("Delete this dictation?", isPresented: $confirmingDelete, titleVisibility: .visible) {
-                            Button("Delete dictation", role: .destructive, action: onDelete)
-                        } message: {
-                            Text(LibraryRow.deleteMessage(link: link))
-                        }
+                    if let recoveredFrom = record.recoveredFrom { RecoveredFromLabel(date: recoveredFrom) }
+
                 }
                 .padding(24)
+            }
+            .safeAreaInset(edge: .bottom) {
+                VStack(spacing: 12) {
+                    Hairline()
+                    SavedTextActions(text: record.text, copied: copied, prefix: "record", copy: {
+                        Clipboard.copy(record.text)
+                        let id = record.id, count = record.wordCount
+                        DictationCoordinator.history { $0.confirmKept(id: id, words: count) }
+                        Haptics.success()
+                        copied = true
+                    }, delete: { confirmingDelete = true }) {
+                        EmptyView()
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+                .background(Zone.paper(scheme))
+            }
+            .confirmationDialog("Delete this dictation?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+                Button("Delete dictation", role: .destructive, action: onDelete)
+            } message: {
+                Text(LibraryRow.deleteMessage(link: link))
             }
             .navigationTitle("Dictation")
             .zoneBackButton()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                // Copy is the large key under the words; a second one up here drew as "..." in
-                // the narrow bar slot.
                 ZoneBarItem(.confirmationAction, prominent: true) { Button("Done") { dismiss() } }
             }
             .zoneScreen()
         }
-        .sheet(isPresented: $cleaning) { CleanupSheet(text: record.text) }
         .presentationDetents([.medium, .large])
     }
 }

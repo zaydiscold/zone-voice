@@ -73,6 +73,19 @@ final class InsertionDeciderTests: XCTestCase {
         XCTAssertEqual(moved, .offerInsert(reason: "field changed"))
     }
 
+    func testOriginallyEmptyAnonymousFieldMustStillBeEmpty() {
+        func decision(_ current: String?, original: String? = "") -> InsertionDecision {
+            let blank = DictationRequest(id: id, generation: 2, createdAt: Date(), inputSession: nil, contextBefore: original)
+            return InsertionDecider.decide(result: result(session: nil), request: blank, ledger: InsertionLedger(),
+                                           currentInputSession: nil, currentContextBefore: current, ownsRequest: true)
+        }
+        XCTAssertEqual(decision("a different draft"), .offerInsert(reason: "field changed"))
+        XCTAssertEqual(decision(" "), .offerInsert(reason: "field changed"))
+        XCTAssertEqual(decision("a different draft", original: nil), .offerInsert(reason: "field changed"))
+        XCTAssertEqual(decision(""), .insertNow)
+        XCTAssertEqual(decision(nil), .insertNow)
+    }
+
     func testOldResultsAreIgnored() {
         let old = DictationResult(requestID: id, generation: 2, text: "hello", audioSeconds: 1, createdAt: Date().addingTimeInterval(-20 * 60), inputSession: "S1")
         let decision = InsertionDecider.decide(result: old, request: request(), ledger: InsertionLedger(), currentInputSession: "S1", ownsRequest: true)

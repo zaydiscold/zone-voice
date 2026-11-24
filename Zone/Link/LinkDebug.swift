@@ -43,6 +43,7 @@ enum LinkDebug {
             return arguments[index + 1]
         }
         if arguments.contains("-zoneLinkForgetAll") {
+            UserDefaults.standard.removeObject(forKey: LinkCoordinator.usedCodeKey)
             for computer in link.computers { link.forget(computer.endpointID) }
         }
         if let count = value("-zoneLinkSeed").flatMap({ Int($0) }), count > 0 {
@@ -52,6 +53,7 @@ enum LinkDebug {
             await restoreOlderNotes(count, notes: notes)
         }
         if let text = value("-zoneLinkPair") {
+            link.beginPairingInput()
             link.offerPairing(text)
             if arguments.contains("-zoneLinkAutoConfirm") { link.confirmPairing() }
         }

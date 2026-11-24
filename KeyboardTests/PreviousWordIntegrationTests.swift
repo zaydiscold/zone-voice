@@ -87,6 +87,9 @@ final class PreviousWordIntegrationTests: XCTestCase {
         func forgetTypo() {
             let key = "zone.keyboard.learnedWords"
             UserDefaults.standard.set((UserDefaults.standard.stringArray(forKey: key) ?? []).filter { $0 != "centwr" }, forKey: key)
+            // The shared corrector outlives the test: without this a second run in the same
+            // process still holds the word and keeps "centwr" as typed.
+            SpellingStore.current?.forget("centwr")
         }
         forgetTypo()
         defer { forgetTypo() }

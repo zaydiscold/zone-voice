@@ -20,7 +20,7 @@ final class LinkFlashPaletteTests: XCTestCase {
 
     private func plan() throws -> LinkFlashPlan {
         try LinkFlash.plan(items: FlashFixtures.library(dictations: 120), phone: FlashFixtures.phone, key: key,
-                           codesPerPicture: LinkFlashMode.color.codesPerPicture)
+                           session: 0xDA4F_4E45, codesPerPicture: LinkFlashMode.color.codesPerPicture, nonce: Data(0..<12))
     }
 
     // MARK: The contract with the computer's reader

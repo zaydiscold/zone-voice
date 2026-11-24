@@ -7,17 +7,51 @@ import ZoneCore
 /// Lets the system play the standard key click for this input view.
 final class ClickableInputView: UIInputView, UIInputViewAudioFeedback {
     var enableInputClicksWhenVisible: Bool { true }
+    var foldChanged: ((CGRect?) -> Void)?
+
+    override func updateConstraints() {
+        #if ZONE_DUO_REGIONS
+        if #available(iOS 27.1, *) {
+            foldChanged?(reservedRegions(kind: .division).first?.frame)
+        }
+        #endif
+        super.updateConstraints()
+    }
 }
 
 final class KeyboardViewController: UIInputViewController {
     private let store = UserDefaultsSharedStore()
-    private let lastPreferences = LastKeyboardPreferences()
+    private var keyboardVisibleForSettings = false
     private var model: KeyboardModel?
     private var mic: MicController?
+    private var clipboard: ClipboardController?
     private var hosting: UIHostingController<KeyboardRootView>?
     private var keyGrid: KeyGridView?
     private var emojiPanel: EmojiPanelView?
     private var heightConstraint: NSLayoutConstraint?
+    /// Where everything the keyboard draws sits: the full width, or the one-handed column.
+    private let column = UILayoutGuide()
+    private var contentLeading: NSLayoutConstraint?
+    private var emojiLeading: NSLayoutConstraint?
+    private var columnBottom: NSLayoutConstraint?
+    private var division: CGRect?
+    private let splitButton = UIButton(type: .system)
+
+    private var prefersSplit = DuoKeyboard.prefersSplit
+    private var duo: DuoKeyboard = .ordinary
+    private var windowInset: CGFloat = 0
+    // The size-injected host uses the shipping controller without substituting its views.
+    var displayGeometry: (UIView) -> (isDuo: Bool, size: CGSize, origin: CGFloat) = { input in
+        guard let screen = input.window?.screen else { return (false, .zero, 0) }
+        return (DuoKeyboard.isCurrentDevice, screen.bounds.size, input.convert(input.bounds, to: screen.coordinateSpace).minX)
+    }
+
+    private var columnLeading: NSLayoutConstraint?
+    private var columnTrailing: NSLayoutConstraint?
+    /// The column's place last laid out, so a change can cross-fade once instead of every pass.
+    private var shownColumn: (x: CGFloat, width: CGFloat)?
+    private var shownColumnInput: CGFloat = 0
+    private let oneHandedPanel = OneHandedPanel()
     private var observations: [DarwinObservation] = []
     private var lexiconRequestGeneration = 0
 
@@ -25,11 +59,11 @@ final class KeyboardViewController: UIInputViewController {
     /// hosts (compact phones, split layouts) so the keyboard never exceeds what the system expects.
     /// Dictate face: the compact surface, about a quarter of the screen with the system's own row.
     private func keyboardHeight(for width: CGFloat) -> CGFloat {
-        if mic?.mode == .dictate { return Self.dictateHeight }
+        if mic?.displayMode == .dictate { return Self.dictateHeight }
         // Exactly the strip plus the key rows (KeyGridMetrics: three pitches and one key, then
         // the bottom inset) and a 4 pt breath under the strip. The old formula left 7 pt of
         // slack that collected above the first row.
-        let metrics = KeyGridMetrics.standard(width: width)
+        let metrics = duo.metrics(width: width, windowInset: windowInset)
         return KeyboardRootView.stripHeight + 4 + 3 * metrics.rowPitch + metrics.keyHeight + metrics.bottomInset
     }
 
@@ -45,7 +79,7 @@ final class KeyboardViewController: UIInputViewController {
     /// system animate the host's content inset with it.
     private func animateHeightChange() {
         guard let input = inputView else { return }
-        let width = view.window?.bounds.width ?? UIScreen.main.bounds.width
+        let width = inputView?.bounds.width ?? view.bounds.width
         let target = keyboardHeight(for: width)
         KeyboardLog.mic.info("mode \(String(describing: self.mic?.mode), privacy: .public): height \(target, privacy: .public)")
         setHeight(target)
@@ -68,23 +102,38 @@ final class KeyboardViewController: UIInputViewController {
         updateDictationKey()
     }
 
-    /// Opens the companion app's home screen (the strip's wordmark).
-    func openZone() {
-        open(ZoneContract.homeURL)
-    }
-
     override func viewDidLoad() {
         super.viewDidLoad()
         let input = ClickableInputView(frame: .zero, inputViewStyle: .keyboard)
         input.allowsSelfSizing = true
         inputView = input
+        input.addLayoutGuide(column)
+        let leading = column.leadingAnchor.constraint(equalTo: input.leadingAnchor)
+        let trailing = column.trailingAnchor.constraint(equalTo: input.trailingAnchor)
+        let top = column.topAnchor.constraint(equalTo: input.topAnchor)
+        let bottom = column.bottomAnchor.constraint(equalTo: input.bottomAnchor)
+        columnBottom = bottom
+        input.foldChanged = { [weak self, weak input] frame in
+            guard self?.division != frame else { return }
+            self?.division = frame
+            input?.setNeedsLayout()
+        }
+        NSLayoutConstraint.activate([
+            leading, trailing,
+            top, bottom,
+        ])
+        columnLeading = leading
+        columnTrailing = trailing
 
         let model = KeyboardModel(proxy: self)
         let mic = MicController(store: store, proxy: self, feedback: model.feedback)
         self.model = model
         self.mic = mic
         mic.dictationOpening = { [weak model] in model?.dictationOpening ?? .automatic }
+        mic.onTypingStripOwnershipChanged = { [weak model] owns in model?.setDictationOwnsStrip(owns) }
         mic.onDictationInserted = { [weak model] text in model?.dictationInserted(text) }
+        mic.onDictationRemoved = { [weak model] in model?.dictationRemoved() }
+        mic.captureHost = { [weak self] in self?.view }
         model.onWordCorrected = { [weak mic] original, replacement in
             mic?.wordCorrectedByHand(original: original, replacement: replacement)
         }
@@ -100,7 +149,21 @@ final class KeyboardViewController: UIInputViewController {
             self?.animateHeightChange()
         }
 
-        let root = KeyboardRootView(model: model, mic: mic, controller: self)
+        // Clipboard history (off unless the app's switch is on): the preferences and the field are
+        // read when a look happens, never kept.
+        let clipboard = ClipboardController(
+            source: SystemClipboard(), history: ClipboardHistory.shared, seen: SharedClipboardSeenStore(),
+            settings: { [weak model] in
+                let preferences = model?.preferences ?? KeyboardPreferences()
+                return .init(enabled: preferences.clipboardHistoryEnabled, skipsSecrets: preferences.clipboardSkipsSecrets, automatic: preferences.clipboardAutomatic)
+            },
+            field: { [weak self] in self?.gate.traits.clipboardField ?? .secret },
+            hasOpenAccess: { [weak self] in self?.hasOpenAccess ?? false })
+        self.clipboard = clipboard
+        gate.onClipboardFieldChange = { [weak clipboard] in clipboard?.check() }
+        model.pasteSaving = clipboard.saving
+
+        let root = KeyboardRootView(model: model, mic: mic, clipboard: clipboard)
         let hosting = UIHostingController(rootView: root)
         hosting.view.backgroundColor = .clear
         // iOS 27 gives the keyboard's input view a top safe-area inset (about 17 pt, measured
@@ -110,11 +173,13 @@ final class KeyboardViewController: UIInputViewController {
         addChild(hosting)
         input.addSubview(hosting.view)
         hosting.view.translatesAutoresizingMaskIntoConstraints = false
+        let contentLeading = hosting.view.leadingAnchor.constraint(equalTo: column.leadingAnchor)
+        self.contentLeading = contentLeading
         NSLayoutConstraint.activate([
-            hosting.view.leadingAnchor.constraint(equalTo: input.leadingAnchor),
-            hosting.view.trailingAnchor.constraint(equalTo: input.trailingAnchor),
-            hosting.view.topAnchor.constraint(equalTo: input.topAnchor),
-            hosting.view.bottomAnchor.constraint(equalTo: input.bottomAnchor),
+            contentLeading,
+            hosting.view.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            hosting.view.topAnchor.constraint(equalTo: column.topAnchor),
+            hosting.view.bottomAnchor.constraint(equalTo: column.bottomAnchor),
         ])
         hosting.didMove(toParent: self)
         self.hosting = hosting
@@ -125,10 +190,10 @@ final class KeyboardViewController: UIInputViewController {
         input.addSubview(grid)
         grid.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            grid.leadingAnchor.constraint(equalTo: input.leadingAnchor),
-            grid.trailingAnchor.constraint(equalTo: input.trailingAnchor),
-            grid.topAnchor.constraint(equalTo: input.topAnchor, constant: KeyboardRootView.stripHeight),
-            grid.bottomAnchor.constraint(equalTo: input.bottomAnchor),
+            grid.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            grid.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            grid.topAnchor.constraint(equalTo: column.topAnchor, constant: KeyboardRootView.stripHeight),
+            grid.bottomAnchor.constraint(equalTo: column.bottomAnchor),
         ])
         keyGrid = grid
 
@@ -136,13 +201,27 @@ final class KeyboardViewController: UIInputViewController {
         let emoji = EmojiPanelView(model: model, mic: mic, controller: self)
         input.addSubview(emoji)
         emoji.translatesAutoresizingMaskIntoConstraints = false
+        let emojiLeading = emoji.leadingAnchor.constraint(equalTo: column.leadingAnchor)
+        self.emojiLeading = emojiLeading
         NSLayoutConstraint.activate([
-            emoji.leadingAnchor.constraint(equalTo: input.leadingAnchor),
-            emoji.trailingAnchor.constraint(equalTo: input.trailingAnchor),
-            emoji.topAnchor.constraint(equalTo: input.topAnchor, constant: KeyboardRootView.stripHeight),
-            emoji.bottomAnchor.constraint(equalTo: input.bottomAnchor),
+            emojiLeading,
+            emoji.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            emoji.topAnchor.constraint(equalTo: column.topAnchor, constant: KeyboardRootView.stripHeight),
+            emoji.bottomAnchor.constraint(equalTo: column.bottomAnchor),
         ])
         emojiPanel = emoji
+
+        splitButton.addTarget(self, action: #selector(toggleSplit), for: .touchUpInside)
+        splitButton.isHidden = true
+        splitButton.accessibilityIdentifier = "keyboard.duo.split"
+        input.addSubview(splitButton)
+
+        // The one-handed side panel sits under the keys, so the keys' edge margin
+        // (`KeyGridView.edgeSlop`) wins a touch the two share.
+        oneHandedPanel.isHidden = true
+        oneHandedPanel.onChoose = { [weak model] hand in model?.chooseHand(hand) }
+        input.insertSubview(oneHandedPanel, belowSubview: grid)
+        observeHand()
 
         // The host can flip light and dark while the keyboard stays up; re-read the traits then.
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (controller: KeyboardViewController, _) in
@@ -152,10 +231,13 @@ final class KeyboardViewController: UIInputViewController {
             controller.model?.refreshTraits()
         }
         // The stored face's height before the system first measures the input view.
-        setHeight(keyboardHeight(for: UIScreen.main.bounds.width))
+        setHeight(keyboardHeight(for: input.bounds.width))
 
         observations = [
             DarwinNotifier.observe(.statusChanged) { [weak self] in self?.mic?.handleStatusChanged() },
+            DarwinNotifier.observe(.quickSettingsPublished) { [weak self] in
+                self?.refreshPendingSettings()
+            },
             DarwinNotifier.observe(.resultReady) { [weak self] in self?.mic?.handleResultReady() },
             DarwinNotifier.observe(.sessionChanged) { [weak self] in self?.mic?.handleSessionChanged() },
         ]
@@ -209,6 +291,8 @@ final class KeyboardViewController: UIInputViewController {
             self.model?.setSystemDark(self.systemStyleIsDark)
             self.model?.refreshTraits()
             self.mic?.keyboardDidAppear()
+            // Offer a new copy inside Recent when clipboard history is on.
+            self.clipboard?.keyboardBecameLive()
             // Once per appearance: how close this process runs to its limit.
             KeyboardMemory.logAppearance()
         }
@@ -217,6 +301,14 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        if let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: ZoneContract.appGroup) {
+            try? KeyboardCapture.finishAudioErase(in: group, temporary: FileManager.default.temporaryDirectory) {
+                LocalDictationHost.shared.cancel()
+            }
+        }
+        Task.detached(priority: .utility) { SharedMiniModel.sweepRecordings() }
+        keyboardVisibleForSettings = true
+        refreshPendingSettings()
         gate.willAppear()
         // Before any work of its own: the app needs the head start, not the keyboard.
         DarwinNotifier.post(.keyboardShown)
@@ -237,7 +329,7 @@ final class KeyboardViewController: UIInputViewController {
         isAppearing = true
         mic?.restoreStoredMode()
         isAppearing = false
-        let width = view.window?.bounds.width ?? UIScreen.main.bounds.width
+        let width = inputView?.bounds.width ?? view.bounds.width
         setHeight(keyboardHeight(for: width))
     }
 
@@ -299,15 +391,26 @@ final class KeyboardViewController: UIInputViewController {
             // Going live can run the mic's checks before Full Access reads true (a host callback
             // often arrives before `viewDidAppear`). Give the mic the settled answer.
             self?.mic?.accessSettled()
+            self?.clipboard?.keyboardBecameLive()
             self?.handOffSystemFieldIfNeeded()
+        }
+    }
+
+    private func refreshPendingSettings() {
+        guard keyboardVisibleForSettings, let mic else { return }
+        Task { [weak self] in
+            await mic.preferenceReader.refresh()
+            guard let self, self.keyboardVisibleForSettings, let model = self.model else { return }
+            let preferences = mic.readPreferences()
+            if model.preferences != preferences { model.apply(preferences) }
+            self.clipboard?.refreshSettings()
         }
     }
 
     /// The app's switches from the shared store, or the last ones read when it gave nothing back.
     private func readPreferences(at moment: String) -> KeyboardPreferences {
-        let stored = store.storedKeyboardPreferences
-        let preferences = lastPreferences.resolve(stored: stored)
-        KeyboardLog.typing.info("preferences at \(moment, privacy: .public): record \(stored == nil ? "missing" : "read", privacy: .public), swipe \(preferences.swipeTypingEnabled, privacy: .public), paste \(preferences.showsPasteKey, privacy: .public), suggestions \(preferences.showSuggestions, privacy: .public)")
+        let preferences = KeyboardSettingReader.shared.current()
+        KeyboardLog.typing.info("preferences at \(moment, privacy: .public): swipe \(preferences.swipeTypingEnabled, privacy: .public), paste \(preferences.showsPasteKey, privacy: .public), suggestions \(preferences.showSuggestions, privacy: .public)")
         return preferences
     }
 
@@ -362,16 +465,19 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        keyboardVisibleForSettings = false
         // The field is going away: from here reads answer from the last live ones (`TextProxyGate`).
         gate.willDisappear()
         model?.keyboardWillDisappear()
         mic?.keyboardWillDisappear()
+        clipboard?.keyboardWillDisappear()
         TouchAdaptationStore.save()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         gate.didDisappear()
+        if #available(iOS 26, *) { ZoneModelSpeech.shared.keyboardDidDisappear() }
     }
 
     /// The host makes a new controller for nearly every appearance, and UIKit keeps each old
@@ -391,6 +497,147 @@ final class KeyboardViewController: UIInputViewController {
     override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
         KeyboardMemory.handleWarning(emojiPanelOpen: model?.showsEmoji == true)
+    }
+
+    // MARK: One-handed column
+
+    /// Re-arms after every change, as Observation reports once per registration.
+    private func observeHand() {
+        guard let model else { return }
+        withObservationTracking {
+            _ = model.hand
+            _ = model.preferences.oneHandedWidth
+            _ = model.explicitDark
+            _ = model.systemDark
+            _ = model.appearanceVersion
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.observeHand()
+                self.layoutColumn(animated: true)
+            }
+        }
+    }
+
+    #if ZONE_DUO_SNAPSHOT
+    func setSnapshotStyle(_ style: UIUserInterfaceStyle, split: Bool) {
+        overrideUserInterfaceStyle = style
+        model?.setSystemDark(style == .dark)
+        prefersSplit = split
+        model?.refreshFullAccess(reloadVocabulary: false)
+        model?.apply(KeyboardPreferences(showsPasteKey: true))
+    }
+    #endif
+
+    @objc private func toggleSplit() {
+        prefersSplit.toggle()
+        DuoKeyboard.prefersSplit = prefersSplit
+        layoutColumn(animated: false)
+    }
+
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        layoutColumn(animated: false)
+    }
+
+    /// Narrows everything the keyboard draws toward one thumb, or gives it the full width back,
+    /// and puts the side panel in the space left over. Runs on every layout pass (rotation, a new
+    /// width) and when the hand or the width setting changes; it touches the views only when the
+    /// column moved.
+    private func layoutColumn(animated: Bool) {
+        guard let input = inputView, let model, let keyGrid else { return }
+        let width = input.bounds.width
+        guard width > 0 else { return }
+        let (isDuo, size, origin) = displayGeometry(input)
+        duo = DuoKeyboard(isDuo: isDuo, screen: size)
+        windowInset = max(0, origin)
+        let fold = division.flatMap { $0.intersects(input.bounds) ? $0 : nil }
+        let across = fold.flatMap { $0.width > $0.height ? $0 : nil }
+        // Tabletop normally has the entire input view below the fold. If a host
+        // spans a horizontal division, reserve space from that division down
+        // and ask for the normal key height above it. Keep the caps bottom-aligned.
+        let reservedBottom = across.map { max(0, input.bounds.maxY - $0.minY) } ?? 0
+        columnBottom?.constant = -reservedBottom
+        let metrics = duo.metrics(width: width, windowInset: windowInset)
+        let safe = duo == .ordinary ? UIEdgeInsets.zero : input.safeAreaInsets
+        let position = DuoKeyPlacement(pose: duo, width: width, center: size.width / 2 - origin,
+                                      side: metrics.sideInset, safeLeft: safe.left, safeRight: safe.right,
+                                      division: across == nil ? fold : nil, prefersSplit: prefersSplit)
+        let available = width - position.leading - position.trailing
+        let target = duo.allowsOneHand ? OneHandedLayout.column(width: available, fraction: model.preferences.oneHandedWidth, hand: model.hand) : nil
+        let gridChanged = keyGrid.duo != duo || keyGrid.windowInset != windowInset || keyGrid.splitKeys != position.split
+        keyGrid.duo = duo
+        keyGrid.windowInset = windowInset
+        keyGrid.splitKeys = position.split
+        setHeight(keyboardHeight(for: width) + reservedBottom)
+        // All panels use one uninterrupted thumb area. Keep the same SwiftUI tree
+        // across folds so an open picker, dictation or history selection survives.
+        let rightColumn = position.split ? available / 2 + max(20, (fold?.width ?? 0) / 2) : 0
+        let toggleWidth: CGFloat = 74
+        contentLeading?.constant = position.offersSplit && !position.split ? metrics.sideInset + toggleWidth : rightColumn
+        emojiLeading?.constant = rightColumn
+        splitButton.frame = CGRect(x: position.leading + metrics.sideInset, y: 0,
+                                   width: toggleWidth, height: KeyboardRootView.stripHeight)
+        let title = position.split ? "Full" : "Split"
+        let theme = KeyboardTheme(isDark: model.explicitDark ?? model.systemDark)
+        let label = NSAttributedString(string: title, attributes: [
+            .font: UIFont.preferredFont(forTextStyle: .subheadline),
+            .foregroundColor: theme.isDark ? theme.accentToneUIColor : UIColor(theme.text),
+            .underlineStyle: theme.isDark ? 0 : NSUnderlineStyle.single.rawValue,
+            .underlineColor: theme.accentToneUIColor
+        ])
+        if splitButton.currentAttributedTitle != label { splitButton.setAttributedTitle(label, for: .normal) }
+        splitButton.accessibilityLabel = position.split ? "Full keyboard" : "Split keyboard"
+        splitButton.isHidden = !position.offersSplit || position.forced
+        let lead = position.leading + (target?.x ?? 0)
+        let trail = width - lead - (target?.width ?? available)
+        if gridChanged { keyGrid.sync() }
+        let isDark = model.explicitDark ?? model.systemDark
+        if let side = model.hand.side {
+            oneHandedPanel.configure(side: side.other, isDark: isDark)
+        }
+        let moved = target?.x != shownColumn?.x || target?.width != shownColumn?.width || width != shownColumnInput || columnLeading?.constant != lead || columnTrailing?.constant != -trail
+        guard moved else { return }
+        let wasOneHanded = shownColumn != nil
+        shownColumn = target
+        shownColumnInput = width
+        let apply = {
+            let x = target?.x ?? 0
+            self.columnLeading?.constant = lead
+            self.columnTrailing?.constant = -trail
+            keyGrid.edgeSlop = target == nil ? (0, 0) : x > 0 ? (Self.panelEdgeSlop, 0) : (0, Self.panelEdgeSlop)
+            self.placePanel()
+            self.oneHandedPanel.isHidden = target == nil
+            input.layoutIfNeeded()
+        }
+        KeyboardLog.typing.info("one-handed column: \(target.map { "x \($0.x) width \($0.width)" } ?? "full", privacy: .public) of \(width, privacy: .public)")
+        // A quick cross-fade, not a slide: the keys are laid out again at their new size, so
+        // animating the frame would stretch them. Only a change the person made animates.
+        if animated, view.window != nil, wasOneHanded || target != nil {
+            UIView.transition(with: input, duration: UIAccessibility.isReduceMotionEnabled ? 0.12 : 0.2,
+                              options: [.transitionCrossDissolve, .allowUserInteraction, .beginFromCurrentState], animations: apply)
+        } else {
+            apply()
+        }
+    }
+
+    /// Points of the side panel next to the keys that still type the edge key: a hurried tap at "q"
+    /// or "p" can land just past it, and on the full keyboard the screen edge stops it. 10 pt keeps
+    /// that a letter and leaves the panel's buttons at least 26 pt of their own (36 pt minimum panel).
+    static let panelEdgeSlop: CGFloat = 10
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        placePanel()
+    }
+
+    /// The panel fills the keyboard's height beside the column, whatever the face's height is now.
+    private func placePanel() {
+        guard let input = inputView, let shownColumn else { return }
+        let width = input.bounds.width
+        let x = shownColumn.x > 0 ? 0 : shownColumn.width
+        let frame = CGRect(x: x, y: 0, width: width - shownColumn.width, height: input.bounds.height)
+        if oneHandedPanel.frame != frame { oneHandedPanel.frame = frame }
     }
 
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
@@ -456,6 +703,7 @@ extension KeyboardViewController: TextProxyActions {
 
     func reloadFieldTraits() { gate.reloadTraitsIfStale() }
     var allowsAutocorrection: Bool { gate.traits.allowsAutocorrection }
+    var allowsEmojiShortcodes: Bool { gate.traits.allowsEmojiShortcodes }
     var allowsSwipeTyping: Bool { gate.traits.allowsSwipeTyping }
     var allowsSmartQuotes: Bool { gate.traits.allowsSmartQuotes }
     var allowsSmartDashes: Bool { gate.traits.allowsSmartDashes }
@@ -486,10 +734,12 @@ extension KeyboardViewController: TextProxyActions {
     }
 
     /// On a device this is the real Full Access switch. The Simulator neither enforces Full
-    /// Access nor reliably lets automation flip the switch, so simulator builds report true;
-    /// the whole branch is compiled out of device builds.
+    /// Access nor reliably lets automation flip the switch. Debug walkthroughs can exercise
+    /// the declined path before the keyboard appears.
     var hasOpenAccess: Bool {
-        #if targetEnvironment(simulator)
+        #if DEBUG && targetEnvironment(simulator)
+        return !UserDefaults.standard.bool(forKey: "ZoneSimulateNoFullAccess")
+        #elseif targetEnvironment(simulator)
         return true
         #else
         return hasFullAccess
@@ -506,9 +756,22 @@ extension KeyboardViewController: TextProxyActions {
             return
         }
         context.open(url) { [weak self] opened in
+            // The phone's journal has taps after which Zone never launched, or launched seconds
+            // late; this says whether iOS accepted the open at all.
+            KeyboardLog.journal?.log("keyboardOpenedApp", recording: ZoneContract.requestID(from: url),
+                                     ["opened": String(opened)])
             guard !opened else { return }
             DispatchQueue.main.async {
-                self?.model?.openURLFallback?(url)
+                guard let self else { return }
+                // Zone already has this tap (it is recording it): a second open would only
+                // bring Zone to the front again once the person is back in their app.
+                if ZoneContract.Destination(url: url) != nil, self.mic?.state.allowsPanel != true { return }
+                let id = ZoneContract.requestID(from: url)
+                guard ColdStart.secondOpenStillNeeded(status: self.store.status, requestID: id) else {
+                    KeyboardLog.journal?.log("keyboardOpenSkipped", recording: id, ["reason": "alreadyRecording"])
+                    return
+                }
+                self.model?.openURLFallback?(url)
             }
         }
     }

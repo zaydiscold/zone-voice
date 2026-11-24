@@ -26,17 +26,8 @@ public enum InsertionDecider {
         ownsRequest: Bool,
         now: Date = Date()
     ) -> InsertionDecision {
-        if ledger.consumedResultID == result.requestID {
-            return .ignore(reason: "already inserted")
-        }
-        if result.generation <= ledger.droppedGeneration {
-            return .ignore(reason: "cancelled")
-        }
-        if result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return .ignore(reason: "no speech")
-        }
-        if now.timeIntervalSince(result.createdAt) > maxAge {
-            return .ignore(reason: "stale")
+        if let reason = unavailableReason(for: result, ledger: ledger, now: now) {
+            return .ignore(reason: reason)
         }
         if ledger.claimedResultID == result.requestID {
             return .offerRecovery
@@ -52,10 +43,27 @@ public enum InsertionDecider {
         // No session identifiers at all: fall back to the text before the cursor, which must
         // still end with what it ended with at request time.
         guard currentInputSession == nil else { return .offerInsert(reason: "field changed") }
-        if let expected = request?.contextBefore, !expected.isEmpty {
-            let current = currentContextBefore ?? ""
-            return current.hasSuffix(expected) ? .insertNow : .offerInsert(reason: "field changed")
+        let current = currentContextBefore ?? ""
+        guard let expected = request?.contextBefore, !expected.isEmpty else {
+            return current.isEmpty ? .insertNow : .offerInsert(reason: "field changed")
         }
-        return .insertNow
+        return current.hasSuffix(expected) ? .insertNow : .offerInsert(reason: "field changed")
+    }
+
+    /// Checked again when an offered result is claimed. The offer can outlive the handoff.
+    public static func unavailableReason(for result: DictationResult, ledger: InsertionLedger, now: Date) -> String? {
+        if ledger.consumedResultID == result.requestID {
+            return "already inserted"
+        }
+        if result.generation <= ledger.droppedGeneration {
+            return "cancelled"
+        }
+        if result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "no speech"
+        }
+        if now.timeIntervalSince(result.createdAt) > maxAge {
+            return "stale"
+        }
+        return nil
     }
 }

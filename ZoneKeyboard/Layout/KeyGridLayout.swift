@@ -34,3 +34,18 @@ enum KeyGridLayout {
         }
     }
 }
+
+extension KeyGridLayout {
+    /// G, V and Space occur on both halves. Page keys remain at their usual outside edges.
+    static func split(_ rows: [[Key]]) -> (rows: [[Key]], cuts: [Int]) {
+        var cuts: [Int] = []
+        let keys = rows.enumerated().map { index, row in
+            let middle = index == 3 ? row.firstIndex(of: .space)! : row.count / 2
+            let duplicate = index == 3 || !row.count.isMultiple(of: 2)
+            let cut = middle + (duplicate ? 1 : 0)
+            cuts.append(cut)
+            return Array(row[..<cut]) + Array(row[middle...])
+        }
+        return (keys, cuts)
+    }
+}

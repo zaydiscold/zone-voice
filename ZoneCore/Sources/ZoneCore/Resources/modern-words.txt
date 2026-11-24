@@ -184,6 +184,8 @@ dawg	7000
 otw	8000
 ttys	8000
 yessir	8000	yesair,yeser
+og	30000
+ig	30000
 Gmail	2500
 Siri	2500
 Alexa	2500
@@ -896,7 +898,24 @@ yday	40000
 yh	40000
 yk	40000
 yw	40000
+mfer	6000c
+mfers	7741c
+dogshit	6000c
+idgaf	6000c
+dgaf	11173c
+shitter	7583c
+shitters	12513c
+shithole	8463c
+shitpost	14359c	shitbust
+shitposting	17132c	shitbusting,shitpusting
+shitcoin	14359c
+shitcoins	18385c
+fuckery	16030c
+shitshow	16030c
+pissy	22024c
+enshittification	22024c
 ffs	9050
+shitload	18385c
 glazer	17132
 Clawd	6000
 Clawdbot	6000
@@ -1049,3 +1068,4 @@ ayy	30000
 grats	8000
 mayhaps	8000
 wsg	30000
+fking	8000c

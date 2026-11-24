@@ -4,11 +4,15 @@ import XCTest
 @testable import ZoneCore
 
 final class ZoneLinksTests: XCTestCase {
-    func testInviteCarriesBothLinksOnTheirOwnLines() {
-        let lines = ZoneLinks.invite.components(separatedBy: "\n")
-        XCTAssertTrue(lines.contains { $0.hasSuffix(ZoneLinks.appStore.absoluteString) })
-        XCTAssertTrue(lines.contains { $0.hasSuffix(ZoneLinks.testFlight.absoluteString) })
-        XCTAssertTrue(ZoneLinks.invite.hasPrefix(ZoneLinks.pitch))
+    func testInviteSharesOnlyTheAppStoreLink() throws {
+        let detector = try NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+        for paired in [false, true] {
+            let invite = ZoneLinks.invite(sendsToComputer: paired)
+            let links = detector.matches(in: invite, range: NSRange(invite.startIndex..., in: invite))
+            XCTAssertEqual(links.compactMap(\.url), [ZoneLinks.appStore])
+            XCTAssertFalse(invite.contains("TestFlight"))
+            XCTAssertTrue(invite.hasPrefix(ZoneLinks.pitch))
+        }
     }
 
     func testLinksAreTheRealListings() {
@@ -16,7 +20,6 @@ final class ZoneLinksTests: XCTestCase {
         XCTAssertTrue(ZoneLinks.appStore.path.hasSuffix("/id6830955448"))
         // No storefront in the path: each friend lands on their own country's store.
         XCTAssertFalse(ZoneLinks.appStore.path.hasPrefix("/us/"))
-        XCTAssertEqual(ZoneLinks.testFlight.absoluteString, "https://testflight.apple.com/join/cStumGN1")
     }
 
     func testInviteHasNoLeadingIndentation() {

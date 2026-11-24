@@ -86,4 +86,84 @@ final class SpokenNumbersTests: XCTestCase {
         XCTAssertEqual(TextStyle.formal.apply("we have forty five people"), "We have 45 people.")
         XCTAssertEqual(TextStyle.casual.apply("Nine thirty"), "9:30")
     }
+
+    // MARK: Numbers agree, and the texting styles write digits
+
+    private func texted(_ text: String) -> String { SpokenNumbers.writingDigits(text, small: .digits) }
+
+    /// "8 or 9 maybe seven" (Zayd's phone, 2026-11-19): a lone small number beside digits is a digit.
+    func testALoneSmallNumberAgreesWithDigitsBesideIt() {
+        XCTAssertEqual(SpokenNumbers.writingDigits("eight or nine, maybe seven, any time after then"),
+                       "8 or 9, maybe 7, any time after then")
+        XCTAssertEqual(SpokenNumbers.writingDigits("eight or nine? Maybe seven. Anytime after then."),
+                       "8 or 9? Maybe 7. Anytime after then.")
+        XCTAssertEqual(SpokenNumbers.writingDigits("at 8:30 or maybe nine if that works"), "at 8:30 or maybe 9 if that works")
+        XCTAssertEqual(SpokenNumbers.writingDigits("around 10, or seven"), "around 10, or 7")
+    }
+
+    func testAgreementLeavesCountsTitlesAndFarNumbersAlone() {
+        // A number counting something is not standing on its own.
+        XCTAssertEqual(SpokenNumbers.writingDigits("at 5 pm two people came"), "at 5 pm two people came")
+        XCTAssertEqual(SpokenNumbers.writingDigits("I got 12 emails and three calls"), "I got 12 emails and three calls")
+        // Too far away to be the same thought.
+        XCTAssertEqual(SpokenNumbers.writingDigits("I have 12 things to do before I leave and then maybe seven"),
+                       "I have 12 things to do before I leave and then maybe seven")
+        XCTAssertEqual(SpokenNumbers.writingDigits("at 8 we watched Seven, it was good"), "at 8 we watched Seven, it was good")
+        XCTAssertEqual(SpokenNumbers.writingDigits("around seven"), "around seven")
+        XCTAssertEqual(SpokenNumbers.writingDigits("2026, maybe one"), "2026, maybe one")
+    }
+
+    func testAgreementIsStableOnASecondPass() {
+        for text in ["twelve nine. okay", "forty five people and then, well, maybe seven", "eight or nine, maybe seven",
+                     "T three or four, five"] {
+            let once = SpokenNumbers.writingDigits(text)
+            XCTAssertEqual(SpokenNumbers.writingDigits(once), once, text)
+            let textedOnce = texted(text)
+            XCTAssertEqual(texted(textedOnce), textedOnce, text)
+        }
+    }
+
+    func testTextingWritesSmallNumbersAsDigits() {
+        XCTAssertEqual(texted("I'll probably get out of here around seven"), "I'll probably get out of here around 7")
+        XCTAssertEqual(texted("the first three lines are great"), "the first 3 lines are great")
+        XCTAssertEqual(texted("Two things I noticed"), "2 things I noticed")
+        XCTAssertEqual(texted("broke two fingers. The other two buttons aren't"), "broke 2 fingers. The other 2 buttons aren't")
+        XCTAssertEqual(texted("an hour or two ago"), "an hour or 2 ago")
+        XCTAssertEqual(texted("noon to two or something"), "noon to 2 or something")
+        XCTAssertEqual(texted("handle all of those two."), "handle all of those 2.")
+        XCTAssertEqual(texted("we need nine, not ten"), "we need 9, not 10")
+    }
+
+    func testTextingKeepsOneFractionsSayingsTitlesAndSequences() {
+        for kept in ["this one works", "no one came", "one of them", "give me one second", "zero chance",
+                     "two thirds the size", "three quarters done", "high five", "take five", "on cloud nine",
+                     "I ate at Five Guys", "Take Two Interactive made it", "one two three go", "they came two by two",
+                     "catch one and two maybe", "one apple and two pears", "one shot and two supporting sentences"] {
+            XCTAssertEqual(texted(kept), kept, kept)
+        }
+    }
+
+    /// "No" was once a label like "number", which wrote "no 1 came" in every style.
+    func testNoOneAndNoTwoStayWords() {
+        XCTAssertEqual(SpokenNumbers.writingDigits("no one came and no two are alike"), "no one came and no two are alike")
+        XCTAssertEqual(SpokenNumbers.writingDigits("number one and number two"), "number 1 and number 2")
+    }
+
+    /// "One I hope that's done, but two there's a button": a point being made, not a count.
+    func testTextingKeepsTheNumberOfASpokenPoint() {
+        XCTAssertEqual(texted("So one I hope that's out the way but two like maybe these cards"),
+                       "So one I hope that's out the way but two like maybe these cards")
+        XCTAssertEqual(texted("that is imported. But two I want this to work"), "that is imported. But two I want this to work")
+        XCTAssertEqual(texted("open close notes but two there's a big button"), "open close notes but two there's a big button")
+        // A count in the same places is still a digit, and so is a number that is the subject.
+        XCTAssertEqual(texted("but two people came. Two things: go"), "but 2 people came. 2 things: go")
+        XCTAssertEqual(texted("Seven is fine. Two don't work and three just broke"), "7 is fine. 2 don't work and 3 just broke")
+    }
+
+    func testTextingLeavesLiteralsAndLargerNumbersAsBefore() {
+        XCTAssertEqual(texted("see example.com/two/three and v2"), "see example.com/two/three and v2")
+        XCTAssertEqual(texted("forty five miles in five minutes"), "45 miles in 5 minutes")
+        XCTAssertEqual(texted("twenty four seven"), "24/7")
+        XCTAssertEqual(texted("at nine thirty"), "at 9:30")
+    }
 }

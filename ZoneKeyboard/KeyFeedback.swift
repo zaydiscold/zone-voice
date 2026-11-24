@@ -18,7 +18,7 @@ final class KeyFeedback {
     /// Count of haptics fired, for the debug log; the Simulator has no Taptic Engine to feel.
     private var fired = 0
 
-    init(proxy: TextProxyActions) {
+    init(proxy: TextProxyActions?) {
         self.proxy = proxy
     }
 

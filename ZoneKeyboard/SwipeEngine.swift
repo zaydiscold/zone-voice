@@ -29,8 +29,13 @@ final class SwipeEngine: @unchecked Sendable {
     private var queue: DispatchQueue { Self.queue }
     private var decoder: SwipeDecoder?
     private var neural: SwipeNeuralScorer?
-    private static let learnedKey = "zone.swipe.corrections.v1"
-    private static let resetKey = "zone.swipe.reset.v1"
+    private let learnedKey: String
+    private let resetKey: String
+
+    init(split: Bool = false) {
+        learnedKey = split ? "zone.duo.split.corrections.v1" : "zone.swipe.corrections.v1"
+        resetKey = split ? "zone.duo.split.reset.v1" : "zone.swipe.reset.v1"
+    }
     private var learning = SwipeLearning()
     private var learns = false
     private var personalWords: [String] = []
@@ -49,8 +54,13 @@ final class SwipeEngine: @unchecked Sendable {
         queue.async {
             self.learns = learns
             self.personalWords = personalWords
+            if let shared = Self.shared {
+                if shared.decoder.context == nil { shared.decoder.setContextModel(WordPairs.shared) }
+                if shared.neural == nil { Self.shared?.neural = SwipeNeuralScorer() }
+                self.neural = Self.shared?.neural
+            }
             if self.decoder == nil {
-                if let data = UserDefaults.standard.data(forKey: Self.learnedKey), data.count < 1_000_000,
+                if let data = UserDefaults.standard.data(forKey: self.learnedKey), data.count < 1_000_000,
                    let saved = try? JSONDecoder().decode(SwipeLearning.self, from: data) { self.learning = saved }
                 if let shared = Self.shared ?? Self.build() {
                     // A decoder built just now has an empty personal index.
@@ -60,10 +70,10 @@ final class SwipeEngine: @unchecked Sendable {
                     self.neural = shared.neural
                 }
             }
-            if UserDefaults.standard.string(forKey: Self.resetKey) != reset {
+            if UserDefaults.standard.string(forKey: self.resetKey) != reset {
                 self.learning = SwipeLearning()
-                UserDefaults.standard.removeObject(forKey: Self.learnedKey)
-                UserDefaults.standard.set(reset, forKey: Self.resetKey)
+                UserDefaults.standard.removeObject(forKey: self.learnedKey)
+                UserDefaults.standard.set(reset, forKey: self.resetKey)
             }
             self.refreshWords()
         }
@@ -81,14 +91,18 @@ final class SwipeEngine: @unchecked Sendable {
         return (SwipeDecoder(words: words, tuning: tuning, context: pairs), SwipeNeuralScorer())
     }
 
-    func decode(_ points: [SwipePoint], layout: SwipeLayout, previous: String?,
+    /// `retryOf` is the swiped word the person just deleted at this spot. Someone who deletes a
+    /// swipe and swipes again usually wanted another word, so that word gets a score penalty on
+    /// the retry. A trace that ends squarely on the original final key still favors that
+    /// ending over a neighbor. Words with the same ending can still trade places.
+    func decode(_ points: [SwipePoint], layout: SwipeLayout, previous: String?, retryOf: String? = nil,
                 completion: @escaping @MainActor ([SwipeCandidate]) -> Void) {
         queue.async {
             if Self.personalWordsOwner != ObjectIdentifier(self) { self.refreshWords() }
             let context = SwipeContext(previousWord: previous, learning: self.learns ? self.learning : SwipeLearning())
             let geometric = self.decoder?.decode(points, layout: layout, context: context, limit: 96) ?? []
             let ranked = self.neural?.rank(geometric, points: points, layout: layout) ?? geometric
-            let result = Array(ranked.prefix(3))
+            let result = SwipeRetry.alternatives(ranked, retryOf: retryOf, endLetter: SwipeRetry.endLetter(points.last, layout: layout))
             DispatchQueue.main.async { MainActor.assumeIsolated { completion(result) } }
         }
     }
@@ -133,7 +147,7 @@ final class SwipeEngine: @unchecked Sendable {
 
     private func save() {
         guard let data = try? JSONEncoder().encode(learning) else { return }
-        UserDefaults.standard.set(data, forKey: Self.learnedKey)
+        UserDefaults.standard.set(data, forKey: self.learnedKey)
     }
 
     deinit {

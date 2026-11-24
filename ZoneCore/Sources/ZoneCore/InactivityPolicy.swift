@@ -42,6 +42,11 @@ public struct InactivityPolicy: Equatable, Sendable {
         isUnbounded ? nil : max(timeout, Self.minimumPauseLimit)
     }
 
+    public var micReadySummary: String {
+        isUnbounded ? "The mic stays ready until you turn it off."
+            : "When you stop using the mic, it turns off after \(label)."
+    }
+
     public var label: String {
         if isUnbounded { return "until I turn it off" }
         if timeout < 60 { return "\(Int(timeout)) seconds" }

@@ -17,17 +17,35 @@ public final class PersonalVocabulary: @unchecked Sendable {
         /// after a dictation ("versailles" to "Vercel"). Learned only, never typed in; a pair goes
         /// when its word leaves My Words.
         public var misheard: [String: String] = [:]
-        private enum CodingKeys: String, CodingKey { case version, words, learnsFromCorrections, handles, learned, misheard }
+        public var typedWords: [String] = []
+        public var correctionChoices = DoubtMemory()
+        private enum CodingKeys: String, CodingKey { case version, words, learnsFromCorrections, handles, learned, misheard, typedWords, correctionChoices }
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             version = try c.decode(Int.self, forKey: .version)
             words = try c.decode([String].self, forKey: .words)
             learnsFromCorrections = try c.decodeIfPresent(Bool.self, forKey: .learnsFromCorrections) ?? true
-            handles = (try? c.decodeIfPresent([String].self, forKey: .handles)) ?? []
-            learned = (try? c.decodeIfPresent([String].self, forKey: .learned)) ?? []
-            misheard = (try? c.decodeIfPresent([String: String].self, forKey: .misheard)) ?? [:]
+            typedWords = try c.decodeIfPresent([String].self, forKey: .typedWords) ?? []
+            correctionChoices = try c.decodeIfPresent(DoubtMemory.self, forKey: .correctionChoices) ?? DoubtMemory()
+            handles = try c.decodeIfPresent([String].self, forKey: .handles) ?? []
+            learned = try c.decodeIfPresent([String].self, forKey: .learned) ?? []
+            misheard = try c.decodeIfPresent([String: String].self, forKey: .misheard) ?? [:]
         }
         public init(words: [String]) { self.words = words }
+
+        /// Keep local spelling, origin and correction conflicts. A restore never enables learning.
+        mutating func merge(_ incoming: Self) {
+            let existing = Set(words.map { $0.lowercased() })
+            words = PersonalVocabulary.normalized(words + incoming.words)
+            learned = PersonalVocabulary.prunedLearned(learned + incoming.learned.filter { !existing.contains($0) }, words: words)
+            let spellings = Dictionary(uniqueKeysWithValues: words.map { ($0.lowercased(), $0) })
+            for (heard, target) in incoming.misheard where misheard[heard.lowercased()] == nil {
+                misheard[heard.lowercased()] = spellings[target.lowercased()]
+            }
+            handles = PersonalVocabulary.normalizedHandles(handles + incoming.handles)
+            typedWords = PersonalVocabulary.normalized(typedWords + incoming.typedWords)
+            correctionChoices.merge(incoming.correctionChoices)
+        }
 
         /// The words typing, swipe and dictation write in their saved spelling: everything in
         /// `words`, less what `PersonalVocabulary.applied` leaves out.
@@ -123,6 +141,26 @@ public final class PersonalVocabulary: @unchecked Sendable {
         }
     }
 
+    public func restore(_ incoming: Document) throws {
+        guard incoming.version == 1 else { throw StoreError.unsupportedVersion }
+        _ = try update { $0.merge(incoming) }
+    }
+
+    /// Exchange just the extension's portable learning. Local removals since its last
+    /// successful exchange still apply if they happened while Full Access was off.
+    public func exchangeKeyboard(typed: [String], previously: [String], choices: DoubtMemory) throws -> Document {
+        let kept = Set(typed.map { $0.lowercased() })
+        let removed = Set(previously.map { $0.lowercased() }).subtracting(kept)
+        let snapshot = try document()
+        if snapshot.typedWords == typed, removed.isEmpty, snapshot.correctionChoices == choices { return snapshot }
+        return try update { document in
+            document.typedWords = Self.normalized(typed + document.typedWords.filter { !removed.contains($0.lowercased()) })
+            var merged = choices
+            merged.merge(document.correctionChoices)
+            document.correctionChoices = merged
+        }
+    }
+
     public func handles() throws -> [String] { try document().handles }
 
     /// A learned mishearing is applied only when what the recognizer wrote is not an everyday word:
@@ -166,6 +204,19 @@ public final class PersonalVocabulary: @unchecked Sendable {
     @discardableResult public func removeHandles(_ handles: [String]) throws -> [String] {
         let removed = Set(Self.normalizedHandles(handles))
         return try update { current in current.handles.removeAll { removed.contains($0) } }.handles
+    }
+
+    public func renameHandle(_ original: String, to spelling: String) throws -> [String] {
+        guard let name = Self.normalizedHandles([spelling]).first else { throw CocoaError(.fileWriteInvalidFileName) }
+        var found = false
+        let document = try update { current in
+            guard let index = current.handles.firstIndex(of: original) else { return }
+            found = true
+            current.handles[index] = name
+            current.handles = Self.normalizedHandles(current.handles)
+        }
+        guard found else { throw CocoaError(.fileNoSuchFile) }
+        return document.handles
     }
 
     /// Lowercase, without the @, and only the characters a handle can hold: "@Cold " is "cold" and
@@ -252,13 +303,15 @@ public final class PersonalVocabulary: @unchecked Sendable {
         return directory.deletingLastPathComponent()
             .appendingPathComponent(directory.lastPathComponent + "-2").appendingPathComponent(fileURL.lastPathComponent)
     }
-    private var storeURL: URL { FileManager.default.fileExists(atPath: ownedURL.path) ? ownedURL : fileURL }
+    public var storeURL: URL { FileManager.default.fileExists(atPath: ownedURL.path) ? ownedURL : fileURL }
 
     private func write(_ change: (inout Document) -> Void) throws -> Document {
         let fileURL = storeURL
         var directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var resources = URLResourceValues()
+        // Personal spellings travel in a Zone backup the person elects to make.
+        // Keep both possible App Group directories outside the automatic device backup.
         resources.isExcludedFromBackup = true
         try directory.setResourceValues(resources)
         var coordinationError: NSError?
@@ -266,7 +319,9 @@ public final class PersonalVocabulary: @unchecked Sendable {
         NSFileCoordinator().coordinate(writingItemAt: fileURL, options: .forMerging, error: &coordinationError) { url in
             result = Result {
                 var next = try self.read(url)
+                let previous = next
                 change(&next)
+                if next == previous { return next }
                 next.learned = Self.prunedLearned(next.learned, words: next.words)
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

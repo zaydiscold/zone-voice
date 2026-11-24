@@ -34,7 +34,10 @@ enum AppEntry {
 @Observable
 final class WhatsNewGate {
     /// Every version's notes, newest first, and the version this copy of Zone is.
-    let library: ReleaseNotesLibrary
+    private(set) var library = ReleaseNotesLibrary([])
+    @ObservationIgnored private let notesBundle: Bundle
+    @ObservationIgnored private let setupAtLaunch: Bool
+    @ObservationIgnored private var needsLibraryRead = true
     let installed: AppVersion?
     /// The build number, shown small on the history screen.
     let build: String
@@ -67,6 +70,8 @@ final class WhatsNewGate {
 
     init(setupFinished: Bool, store: WhatsNewStore = WhatsNewStore(), bundle: Bundle = .main) {
         self.store = store
+        notesBundle = bundle
+        setupAtLaunch = setupFinished
         let info = bundle.infoDictionary ?? [:]
         var version = info["CFBundleShortVersionString"] as? String ?? ""
         build = info["CFBundleVersion"] as? String ?? ""
@@ -75,15 +80,7 @@ final class WhatsNewGate {
         if let pretend = WhatsNewDebug.version { version = pretend }
         #endif
         installed = AppVersion(version)
-        let folder = bundle.resourceURL?.appendingPathComponent("ReleaseNotes", isDirectory: true)
-        let loaded = folder.map { ReleaseNotesLibrary.load(folder: $0) }
-            ?? (library: ReleaseNotesLibrary([]), problems: ["no ReleaseNotes folder in the bundle"])
-        library = loaded.library
-        for problem in loaded.problems { ZoneLog.coordinator.error("release notes: \(problem, privacy: .public)") }
-
-        let result = WhatsNewPolicy.launch(store.state, installed: installed, setupFinished: setupFinished, library: library)
-        store.state = result.state
-        owed = library.note(for: result.owed)
+        readLibraryIfNeeded()
 
         let center = NotificationCenter.default
         keyboardObservers = [
@@ -94,6 +91,19 @@ final class WhatsNewGate {
                 MainActor.assumeIsolated { self?.typing = false }
             },
         ]
+    }
+
+    func readLibraryIfNeeded() {
+        guard needsLibraryRead else { return }
+        let folder = notesBundle.resourceURL?.appendingPathComponent("ReleaseNotes", isDirectory: true)
+        let loaded = folder.map { ReleaseNotesLibrary.load(folder: $0) }
+            ?? (library: ReleaseNotesLibrary([]), problems: ["no ReleaseNotes folder in the bundle"])
+        needsLibraryRead = !loaded.problems.isEmpty || loaded.library.notes.isEmpty
+        library = loaded.library
+        for problem in loaded.problems { ZoneLog.coordinator.error("release notes: \(problem, privacy: .public)") }
+        let result = WhatsNewPolicy.launch(store.state, installed: installed, setupFinished: setupAtLaunch, library: library)
+        store.state = result.state
+        owed = library.note(for: result.owed)
     }
 
     /// The versions the history screen lists: this one and everything before it.
@@ -108,6 +118,7 @@ final class WhatsNewGate {
             wasInBackground = true
             milestone = nil
         case .active:
+            readLibraryIfNeeded()
             guard wasInBackground else { return }
             wasInBackground = false
             visitOpenedAt = ProcessInfo.processInfo.systemUptime

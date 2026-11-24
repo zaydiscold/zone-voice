@@ -19,8 +19,11 @@ public final class WordList: @unchecked Sendable {
         public let rank: Int
         /// The word with its dictionary casing (Monday, NASA, I'm).
         public let display: String
-        /// False for profanity and slurs: valid when typed, never offered (see wordlist-no-suggest.txt).
+        /// False for profanity and slurs (the file's `x` or `c` flag): valid when typed, never offered.
         public let isSuggestible: Bool
+        /// Everyday swearing (the file's `c` flag): still never offered as a completion or a next
+        /// word, but a typo may be fixed to it when no other word is as close (`neighbors`).
+        public let isCoarse: Bool
     }
 
     public struct Neighbor: Equatable {
@@ -37,6 +40,9 @@ public final class WordList: @unchecked Sendable {
     /// Set once, in `init`: the file's ranks, then `chat-ranks.txt` over them.
     private var ranks: [UInt32]
     private static let blockedBit: UInt32 = 1 << 31
+    /// Set beside `blockedBit` on a coarse word (`Entry.isCoarse`).
+    private static let coarseBit: UInt32 = 1 << 30
+    private static let flagBits: UInt32 = blockedBit | coarseBit
     /// One bit per distinct letter in the word (a...z, apostrophe); a cheap edit-distance prefilter.
     private let letterMasks: [UInt32]
     /// `entryStart[L]` is the index of the first entry of length `L`; `entryStart[maxWordLength + 1]` is `count`.
@@ -56,14 +62,16 @@ public final class WordList: @unchecked Sendable {
 
     /// One parsed copy per process, shared by autocorrect and text formatting (the keyboard had
     /// been parsing it twice: 9.5 ms and about 1.6 MB each). Loaded lazily and thread-safely.
-    nonisolated(unsafe) public static let shared: WordList? = loadBundled()
+    private static let cache = RetryingResource(loadBundled)
+    public static var shared: WordList? { cache.value() }
 
     /// The list shipped in the package. Nil only if the resource is missing or corrupt.
     public static func loadBundled() -> WordList? {
         guard let url = Bundle.module.url(forResource: "en-words", withExtension: "txt"),
               // Mapped, so the file's pages stay clean and leave the extension's footprint once parsed.
               let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return nil }
-        let chatRanks = Bundle.module.url(forResource: "chat-ranks", withExtension: "txt").flatMap { try? Data(contentsOf: $0) }
+        guard let ranksURL = Bundle.module.url(forResource: "chat-ranks", withExtension: "txt"),
+              let chatRanks = try? Data(contentsOf: ranksURL), !chatRanks.isEmpty else { return nil }
         return WordList(data: data, rankOverrides: chatRanks)
     }
 
@@ -110,8 +118,8 @@ public final class WordList: @unchecked Sendable {
                     i += 1
                 }
                 guard digits > 0, digits <= 9 else { ordered = false; return }
-                if i + 1 < n, p[i] == 0x09, p[i + 1] == 0x78 {
-                    rank |= Self.blockedBit
+                if i + 1 < n, p[i] == 0x09, p[i + 1] == 0x78 || p[i + 1] == 0x63 {
+                    rank |= p[i + 1] == 0x63 ? Self.flagBits : Self.blockedBit
                     i += 2
                 }
                 guard i >= n || p[i] == 0x0A else { ordered = false; return }
@@ -188,10 +196,10 @@ public final class WordList: @unchecked Sendable {
     private func applyRankOverrides(_ data: Data) {
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n") where !line.hasPrefix("#") {
             let fields = line.split(separator: "\t")
-            guard fields.count == 2, let rank = UInt32(fields[1]), rank < Self.blockedBit,
+            guard fields.count == 2, let rank = UInt32(fields[1]), rank < Self.coarseBit,
                   let key = Self.foldedKey(String(fields[0])), let index = findExact(key),
-                  rank < ranks[index] & ~Self.blockedBit else { continue }
-            ranks[index] = rank | (ranks[index] & Self.blockedBit)
+                  rank < ranks[index] & ~Self.flagBits else { continue }
+            ranks[index] = rank | (ranks[index] & Self.flagBits)
         }
     }
 
@@ -279,7 +287,8 @@ public final class WordList: @unchecked Sendable {
     /// Entries within `maxCost` weighted edits of `word`, cheapest first (ties by rank). Candidates
     /// are drawn from words of similar length that start with the typed first or second letter,
     /// which covers every single edit except an error on the very first key.
-    public func neighbors(of word: String, maxCost: Float, limit: Int, touches: [KeyTouch]? = nil) -> [Neighbor] {
+    /// Coarse words (`Entry.isCoarse`) are left out unless `includeCoarse`.
+    public func neighbors(of word: String, maxCost: Float, limit: Int, touches: [KeyTouch]? = nil, includeCoarse: Bool = false) -> [Neighbor] {
         guard limit > 0, let key = Self.foldedKey(word) else { return [] }
         let n = key.count
         let maxEdits = Int(maxCost.rounded(.up))
@@ -312,7 +321,7 @@ public final class WordList: @unchecked Sendable {
                         var index = letterStart[base + slot]
                         let end = letterStart[base + slot + 1]
                         while index < end {
-                            if ranks[index] & Self.blockedBit == 0,
+                            if ranks[index] & Self.blockedBit == 0 || (includeCoarse && ranks[index] & Self.coarseBit != 0),
                                (mask ^ letterMasks[index]).nonzeroBitCount <= maskBudget {
                                 let start = bytesBase + (index - first) * length
                                 let candidate = UnsafeBufferPointer(rebasing: all[start..<(start + length)])
@@ -329,7 +338,7 @@ public final class WordList: @unchecked Sendable {
         }
         found.sort { lhs, rhs in
             if lhs.cost != rhs.cost { return lhs.cost < rhs.cost }
-            return (ranks[lhs.index] & ~Self.blockedBit) < (ranks[rhs.index] & ~Self.blockedBit)
+            return (ranks[lhs.index] & ~Self.flagBits) < (ranks[rhs.index] & ~Self.flagBits)
         }
         return found.prefix(limit).map { Neighbor(entry: entry(at: $0.index), cost: $0.cost) }
     }
@@ -355,7 +364,7 @@ public final class WordList: @unchecked Sendable {
                     let start = base + (index - first) * length
                     let raw = ranks[index]
                     body(index, UnsafeBufferPointer(rebasing: all[start..<(start + length)]),
-                         Int(raw & ~Self.blockedBit), raw & Self.blockedBit == 0)
+                         Int(raw & ~Self.flagBits), raw & Self.blockedBit == 0)
                 }
             }
         }
@@ -368,7 +377,8 @@ public final class WordList: @unchecked Sendable {
         let start = byteStart[length] + (index - entryStart[length]) * length
         let display = String(decoding: bytes[start..<(start + length)], as: UTF8.self)
         let raw = ranks[index]
-        return Entry(index: index, rank: Int(raw & ~Self.blockedBit), display: display, isSuggestible: raw & Self.blockedBit == 0)
+        return Entry(index: index, rank: Int(raw & ~Self.flagBits), display: display, isSuggestible: raw & Self.blockedBit == 0,
+                     isCoarse: raw & Self.coarseBit != 0)
     }
 
     /// True when entry `index` is a suggestible word longer than `key` (lowercased ASCII, as

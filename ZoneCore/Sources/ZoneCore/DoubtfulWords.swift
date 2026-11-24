@@ -273,6 +273,20 @@ public struct DoubtMemory: Codable, Equatable, Sendable {
 
     public init() {}
 
+    /// Fill unused alternative slots with older suggestions, preserving the local ranking.
+    public mutating func merge(_ other: Self) {
+        guard self != other else { return }
+        let existing = Set(order)
+        let additions = other.order.filter { !existing.contains($0) }.suffix(max(0, Self.limit - order.count))
+        order.insert(contentsOf: additions, at: 0)
+        for key in order {
+            let current = entries[key] ?? []
+            let present = Set(current.map(DoubtfulWords.foldedKey))
+            let older = (other.entries[key] ?? []).filter { !present.contains(DoubtfulWords.foldedKey($0)) }
+            entries[key] = Array(older.suffix(max(0, 3 - current.count))) + current
+        }
+    }
+
     public func choices(for heard: String) -> [String] {
         (entries[DoubtfulWords.foldedKey(heard)] ?? []).reversed()
     }

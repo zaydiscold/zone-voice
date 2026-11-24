@@ -20,18 +20,30 @@ struct RootView: View {
     /// The sun for every card's shadow, worked out on each activation (see SunShadowModifier).
     @State private var sun = SunShadow.now()
     /// Home's navigation stack, renewed to pop back to Home.
+    @State private var copiedDraft: UUID?
+    @State private var keyboardPath: [ZoneContract.Destination] = []
     @State private var homeStackID = UUID()
     /// A rating ask held back by the note card or the Note saved page: it is asked again when
     /// the page is closed and no note is under way (see `askForReview`).
     @State private var reviewOwedAfterNote = false
     @State private var reviewRetries = 0
     @Environment(WhatsNewGate.self) private var whatsNew: WhatsNewGate?
+    /// `-zoneSetupTerminal` (Debug): the terminal-style setup at launch, even after setup.
+    @State private var terminalSetup = SetupTerminalLaunch.isRequested
+
+    private var keyboardFallbackEligible: Bool {
+        scenePhase == .active && settings.hasCompletedOnboarding &&
+            settings.dictatesInKeyboard && coordinator.keyboardPresence?.hasFullAccess == true
+    }
 
     var body: some View {
         @Bindable var coordinator = coordinator
         @Bindable var meetings = meetings
         Group {
-            if settings.hasCompletedOnboarding || setupDeferred {
+            if terminalSetup {
+                SetupTerminalView(onLater: { terminalSetup = false; setupDeferred = true },
+                                  onDone: { terminalSetup = false })
+            } else if settings.hasCompletedOnboarding || setupDeferred {
                 // Stacked above, not a safe-area inset: Home draws its own header under a hidden
                 // navigation bar, and an inset on the stack slid the strip over that header.
                 VStack(spacing: 0) {
@@ -42,15 +54,30 @@ struct RootView: View {
                         .background(Zone.paper(settings.appearance.colorScheme ?? systemScheme).ignoresSafeArea(edges: .top))
                         .animation(.spring(response: 0.36, dampingFraction: 0.86), value: coordinator.noteCard == nil)
                         .animation(.spring(response: 0.36, dampingFraction: 0.86), value: NoteCardOverlay.shared.reservedHeight)
-                    NavigationStack {
+                    NavigationStack(path: $keyboardPath) {
                         HomeView(resumeSetup: settings.hasCompletedOnboarding ? nil : { setupDeferred = false })
+                            .navigationDestination(for: ZoneContract.Destination.self) { destination in
+                                switch destination {
+                                case .settings: SettingsView()
+                                case .notes: NotesView()
+                                case .home: EmptyView()
+                                }
+                            }
                     }
                     // A new identity pops whatever was pushed over Home, for Added to Notes.
                     .id(homeStackID)
                 }
             } else {
-                OnboardingView(onLater: { setupDeferred = true })
+                OnboardingView(onLater: { setupDeferred = true }, onQuickSetup: { terminalSetup = true })
             }
+        }
+        .onChange(of: coordinator.keyboardDestination, initial: true) { _, destination in
+            guard let destination else { return }
+            coordinator.keyboardDestination = nil
+            guard !terminalSetup, settings.hasCompletedOnboarding || setupDeferred else { return }
+            showsTour = false
+            homeStackID = UUID()
+            keyboardPath = destination == .home ? [] : [destination]
         }
         // The Note saved page sits in Zone's own view tree rather than presenting over it, so
         // nothing it does can block a screen that must present (the keyboard's dictation
@@ -68,11 +95,40 @@ struct RootView: View {
         .onChange(of: coordinator.noteReveal) { _, reveal in
             // Added to Notes from a screen pushed over Home: back to Home first.
             guard reveal != nil, whatsNew?.homeInFront == false else { return }
+            keyboardPath = []
             homeStackID = UUID()
         }
-        .tint(Zone.accentText(settings.appearance.colorScheme ?? systemScheme))
+        .tint(Zone.inlineInk(settings.appearance.colorScheme ?? systemScheme))
+        .toggleStyle(SwitchToggleStyle(tint: Zone.accentTone(settings.appearance.colorScheme ?? systemScheme)))
         .preferredColorScheme(settings.appearance.colorScheme)
-        .onAppear { AccentStore.shared.applyToWindows() }
+        .disabled(!coordinator.failedNoteEdits.isEmpty)
+        .accessibilityHidden(!coordinator.failedNoteEdits.isEmpty)
+        .overlay {
+            if let edit = coordinator.failedNoteEdits.sorted(by: { $0.key.uuidString < $1.key.uuidString }).first {
+                Color.black.opacity(0.32).ignoresSafeArea()
+                    .onAppear { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Your edit was not saved").font(.headline)
+                    if let reason = coordinator.notes.lastError { Text(reason).font(.footnote) }
+                    ScrollView { Text(edit.value).textSelection(.enabled) }.frame(maxHeight: 220)
+                    HStack {
+                        Button(copiedDraft == edit.key ? "Copied" : "Copy") { Clipboard.copy(edit.value); copiedDraft = edit.key }
+                        Button("Try again") { _ = coordinator.saveNoteDraft(edit.key, text: edit.value) }
+                        Button("Dismiss") { coordinator.failedNoteEdits[edit.key] = nil }
+                    }
+                    .buttonStyle(ZoneKeyButtonStyle())
+                }
+                .zoneCard()
+                .padding()
+                .onDisappear { copiedDraft = nil }
+                .accessibilityAddTraits(.isModal)
+            }
+        }
+        .onChange(of: settings.appearance.colorScheme, initial: true) { _, scheme in
+            AccentStore.shared.windowStyle = scheme.map { $0 == .dark ? .dark : .light } ?? .unspecified
+        }
+        .onChange(of: settings.fasterDictation) { coordinator.updateMiniAcceleration(active: scenePhase == .active) }
+        .onChange(of: settings.accent) { coordinator.refreshIsland() }
         .fullScreenCover(isPresented: $coordinator.showsDictationScreen) {
             DictationView()
                 .preferredColorScheme(settings.appearance.colorScheme)
@@ -84,6 +140,9 @@ struct RootView: View {
         .sheet(isPresented: $showsTour) {
             TourView()
                 .preferredColorScheme(settings.appearance.colorScheme)
+        }
+        .task(id: keyboardFallbackEligible) {
+            if keyboardFallbackEligible { await settings.refreshKeyboardSpeechInForeground() }
         }
         .task(id: settings.hasCompletedOnboarding) { await offerTour() }
         .onReceive(NotificationCenter.default.publisher(for: DictateIntent.requested)) { _ in
@@ -104,6 +163,7 @@ struct RootView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
+            if phase == .active { AccentStore.shared.applyToWindows() }
             coordinator.scenePhaseChanged(phase)
             if phase != .inactive { meetings.scenePhaseChanged(active: phase == .active) }
             link.scenePhaseChanged(active: phase == .active)
@@ -171,7 +231,7 @@ extension RootView {
         if case .failed = coordinator.activity { failed = true }
         let isRecording = coordinator.activity.isBusy || coordinator.retryingAudioID != nil || meetings.isRecording
         let showsError = failed || coordinator.audioRecoveryWarning != nil || coordinator.holdNotice != nil
-            || coordinator.autoStopNotice != nil || meetings.lastError != nil || meetings.recordingWarning != nil
+            || coordinator.autoStopNotice != nil || coordinator.recordingCardStopMessage != nil || meetings.lastError != nil || meetings.recordingWarning != nil
         guard coordinator.reviews.claimAsk(isRecording: isRecording, showsError: showsError) else { return }
         requestReview()
     }
@@ -205,19 +265,20 @@ struct RecordingStrip: View {
         return HStack(spacing: 12) {
             Button { coordinator.showRecordingScreen() } label: {
                 HStack(spacing: 10) {
-                    StatusDot(color: Zone.accentGraphic, pulses: true)
+                    StatusDot(color: Zone.accentTone(scheme), pulses: true)
                     label
                         .font(.subheadline.weight(.semibold).monospacedDigit())
                         .foregroundStyle(Zone.ink(scheme))
                         .contentTransition(.numericText())
                     Spacer(minLength: 8)
-                    Text("Open").font(.footnote.weight(.medium)).foregroundStyle(Zone.accentText(scheme))
+                    Text("Open").font(.footnote.weight(.medium)).zoneAccentLink(scheme)
                 }
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityHint("Opens the recording screen")
+            .accessibilityIdentifier("recordingStrip.open")
             if case .recording = coordinator.activity {
                 RoundAction(symbol: "checkmark", label: "Stop and keep the words", prominent: true, diameter: 36) {
                     Task { await coordinator.stopDictation() }
@@ -228,7 +289,7 @@ struct RecordingStrip: View {
         .padding(.trailing, 6)
         .padding(.vertical, 4)
         .background { shape.fill(Zone.card(scheme)).sunShadow(scale: 0.8) }
-        .overlay(shape.strokeBorder(Zone.accentGraphic.opacity(0.45), lineWidth: 1))
+        .overlay(shape.strokeBorder(Zone.accentStroke(scheme).opacity(0.45), lineWidth: 1))
     }
 
     @ViewBuilder
@@ -240,7 +301,7 @@ struct RecordingStrip: View {
                 Text("\(title) · \(context.date.timeIntervalSince(startedAt).countdownLabel)")
             }
         default:
-            Text("Recognizing")
+            Text("Writing your words")
         }
     }
 }

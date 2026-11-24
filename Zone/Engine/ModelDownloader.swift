@@ -2,6 +2,7 @@
 
 import Foundation
 import UIKit
+import UserNotifications
 import ZoneCore
 
 // MARK: - Background model downloads
@@ -48,6 +49,7 @@ final class ModelDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Se
             task.cancel()
         }
     }
+    @TaskLocal static var allowsNewTransfers = true
     static let shared = ModelDownloader()
     static let sessionIdentifier = "wtf.zayd.zone.models"
 
@@ -82,6 +84,7 @@ final class ModelDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Se
         let inFlight = InFlight()
         progress(done.total, total)
         guard !missing.isEmpty else { return }
+        guard Self.allowsNewTransfers else { throw SpeechEngineError.notReady }
         try DiskSpace.ensureRoom(for: missing.reduce(0) { $0 + $1.bytes }, what: "this model")
 
         let running = await session.allTasks
@@ -315,6 +318,15 @@ private final class InFlight: @unchecked Sendable {
 /// Hands iOS's relaunch-for-downloads callback to the model downloader.
 final class ZoneAppDelegate: NSObject, UIApplicationDelegate {
     private var unlockObserver: NSObjectProtocol?
+
+    /// Before launch finishes, so a tap on one of Zone's notifications that launched Zone still
+    /// reaches it (`ZoneNotificationResponder`).
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        UNUserNotificationCenter.current().delegate = ZoneNotificationResponder.shared
+        IslandLostNotice.registerCategory()
+        return true
+    }
 
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {

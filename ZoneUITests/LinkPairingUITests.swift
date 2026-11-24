@@ -17,7 +17,7 @@ final class LinkPairingUITests: XCTestCase {
     /// notes as seen: `VersionHistoryUITests` leave What's New owed in the simulator, and its
     /// sheet, shown first, would keep the Computers screen and Flash from opening.
     private var settledVersion: [String] {
-        let version = Bundle(for: Self.self).infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.4"
+        let version = Bundle(for: Self.self).infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.6"
         return ["-zoneWhatsNewAfter", version]
     }
 
@@ -35,6 +35,69 @@ final class LinkPairingUITests: XCTestCase {
 
     override func setUp() {
         continueAfterFailure = false
+    }
+
+    func testHoldComputerOffersSyncAndForget() {
+        let app = launch(["-zoneLinkAutoConfirm", "-zoneLinkComputers"])
+        let name = app.staticTexts["computers.name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 30))
+        XCTAssertEqual(name.label, "UI test box")
+        name.press(forDuration: 1.1)
+        XCTAssertTrue(app.buttons["Copy"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Share"].exists)
+        XCTAssertTrue(app.buttons["Send by Flash"].exists)
+        let photo = XCTAttachment(screenshot: app.screenshot())
+        photo.name = "computer-hold"
+        photo.lifetime = .keepAlways
+        add(photo)
+        app.buttons["Forget this computer"].firstMatch.tap()
+        let confirmation = app.sheets["Forget UI test box?"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        XCTAssertTrue(confirmation.buttons["Forget this computer"].exists)
+        let cancel = confirmation.buttons["Cancel"]
+        if cancel.exists {
+            cancel.tap()
+        } else {
+            // A compact popover exposes its cancel action as the surrounding dismiss region.
+            let dismiss = app.otherElements["PopoverDismissRegion"]
+            XCTAssertTrue(dismiss.exists)
+            dismiss.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)).tap()
+        }
+        XCTAssertTrue(confirmation.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(name.isHittable)
+    }
+
+    func testExternalCodeIsIgnoredAndTheSameCodeCanBePastedInComputers() throws {
+        let app = XCUIApplication()
+        app.launchArguments = settledVersion + ["-zone.settings.onboardingDone", "YES", "-zone.tour.seen", "YES", "-zoneLinkForgetAll"]
+        app.open(try XCTUnwrap(URL(string: link)))
+        let settings = app.buttons["home.settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 30))
+        let question = app.alerts["Send your Zone library to UI test box?"]
+        XCTAssertFalse(question.exists)
+        settings.tap()
+        let computers = app.descendants(matching: .any)["settings.computers"].firstMatch
+        for _ in 0..<12 where !computers.isHittable { app.swipeUp() }
+        computers.tap()
+        let paste = app.buttons["computers.paste"]
+        XCTAssertTrue(paste.waitForExistence(timeout: 10))
+        paste.tap()
+        let field = app.alerts.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        field.tap()
+        field.typeText(link)
+        app.alerts.buttons["Pair"].tap()
+        XCTAssertTrue(question.waitForExistence(timeout: 10))
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "pairing-after-return"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        question.buttons["Cancel"].tap()
+        XCTAssertTrue(paste.isHittable)
+        XCTAssertFalse(app.switches["computers.sending"].exists)
     }
 
     func testSendPairsTheComputerAndFlashCanShowItsCodes() {
@@ -401,7 +464,12 @@ final class LinkPairingUITests: XCTestCase {
         app.swipeUp()
         XCTAssertTrue(app.descendants(matching: .any)["computers.getZone"].waitForExistence(timeout: 5), "Get Zone for your computer")
         XCTAssertTrue(app.descendants(matching: .any)["computers.shareZone"].exists)
-        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'open Zone and choose Pair a phone'")).firstMatch.exists)
+        let help = app.buttons["About Computers"]
+        for _ in 0..<4 where !help.isHittable { app.swipeUp() }
+        XCTAssertTrue(help.isHittable)
+        help.tap()
+        let pairingStep = app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'open Zone and choose Pair a phone'")).firstMatch
+        XCTAssertTrue(pairingStep.waitForExistence(timeout: 5))
     }
 
     /// Send text to your computer: typed text is queued for the paired computer at once. This

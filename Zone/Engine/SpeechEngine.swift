@@ -141,7 +141,7 @@ enum EngineKind: String, CaseIterable, Identifiable, Codable, Sendable {
             if #available(iOS 26.0, *) {
                 return AppleSpeechEngine(module: self == .appleSpeech ? .speech : .dictation)
             }
-            return UnavailableEngine(kind: self, reason: "Apple's on-device recognizer needs iOS 26.")
+            return UnavailableEngine(kind: self, reason: "Apple's on-device speech model needs iOS 26.")
         }
     }
 
@@ -155,7 +155,7 @@ enum EngineKind: String, CaseIterable, Identifiable, Codable, Sendable {
 
     /// The engine Diagnostics selected, or the recommendation. Retired choices migrate.
     /// A release build has no Diagnostics, so it always runs the product engine: a choice saved
-    /// by an older build that had one (Apple's recognizer, a Neural Engine variant) moves back.
+    /// by an older build that had one (Apple's speech model, a Neural Engine variant) moves back.
     static var selected: EngineKind {
         get {
             guard let raw = UserDefaults.standard.string(forKey: defaultsKey),
@@ -264,7 +264,7 @@ enum SpeechModel: String, CaseIterable, Identifiable, Sendable {
     /// Zero where it has not been measured; the library then shows only measured storage.
     var approximatePreparedBytes: Int64 {
         switch self {
-        case .fluidSpeechMini: return 1_300_000_000
+        case .fluidSpeechMini: return WorkerStorage.preparedBytes
         default: return 0
         }
     }

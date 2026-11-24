@@ -6,7 +6,11 @@ import SwiftUI
 struct ZoneWatchApp: App {
     @StateObject private var notes = WatchNotesModel()
     var body: some Scene {
-        WindowGroup { WatchNotesView().environmentObject(notes) }
+        WindowGroup {
+            WatchNotesView()
+                .environmentObject(notes)
+                .tint(Color(hex: notes.accent.darkHex))
+        }
     }
 }
 
@@ -19,7 +23,6 @@ struct WatchNotesView: View {
                 Button { showsComposer = true } label: {
                     Label("New note", systemImage: "mic.fill")
                 }
-                .tint(.purple)
                 .disabled(!model.canSave)
                 if let error = model.error { Text(error).font(.footnote).foregroundStyle(.orange) }
                 if model.notes.isEmpty {

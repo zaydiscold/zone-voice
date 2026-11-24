@@ -61,15 +61,18 @@ final class KeyGridPrediction {
         let wanted = prefix
         pending.insert(wanted)
         Self.queue.async {
-            let table = WordList.shared.flatMap { NextLetterModel.likelihood(after: wanted, in: $0) }
+            let words = WordList.shared
+            let table = words.flatMap { NextLetterModel.likelihood(after: wanted, in: $0) }
+            let loaded = words != nil
             DispatchQueue.main.async { [weak self] in
-                MainActor.assumeIsolated { self?.store(table, for: wanted) }
+                MainActor.assumeIsolated { self?.store(table, for: wanted, loaded: loaded) }
             }
         }
     }
 
-    private func store(_ table: NextLetterLikelihood?, for prefix: String) {
+    private func store(_ table: NextLetterLikelihood?, for prefix: String, loaded: Bool) {
         pending.remove(prefix)
+        guard loaded else { return }
         cache[prefix] = .some(table)
         order.append(prefix)
         if order.count > Self.cacheLimit {

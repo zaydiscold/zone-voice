@@ -2,6 +2,7 @@
 
 import UIKit
 import UniformTypeIdentifiers
+import ZoneCore
 
 /// Every copy of dictated or transcribed text. Local only, so Universal Clipboard never sends it
 /// to the person's other devices ("Your voice never leaves your iPhone"), and it expires, so it
@@ -14,7 +15,9 @@ enum Clipboard {
 
     static func copy(_ text: String, automatic: Bool = false, now: Date = Date()) {
         UIPasteboard.general.setItems(
-            [[UTType.utf8PlainText.identifier: text]],
+            // The second type marks the copy as Zone's own, so clipboard history does not keep
+            // a dictation or a note a second time (`ClipboardPolicy.ownType`). It holds nothing.
+            [[UTType.utf8PlainText.identifier: text, ClipboardPolicy.ownType: Data()]],
             options: [
                 .localOnly: true,
                 .expirationDate: now.addingTimeInterval(automatic ? automaticLifetime : explicitLifetime),

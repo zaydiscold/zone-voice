@@ -40,6 +40,37 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
         }
     }
 
+    /// What the style does, in a line, under its name in Settings > Text style.
+    public var summary: String {
+        switch self {
+        case .casual: return "Few commas and no closing period."
+        case .veryCasual: return "All lowercase, no commas or periods."
+        case .formal: return "Full punctuation and full words."
+        case .excited: return "Full punctuation, and sentences end with an exclamation mark."
+        }
+    }
+
+    /// One thing said out loud, as a speech model writes it down. Settings shows it in each style.
+    public static let exampleSpeech = "Hey, sorry, does later tonight work? I'm gonna be free around seven, maybe eight."
+
+    /// `exampleSpeech` the way this style writes it, made by the same code as a dictation, so the
+    /// example in Settings cannot say something the keyboard does not do. `autoCapitalization` is
+    /// the keyboard's setting, which Casual follows.
+    public func example(autoCapitalization: Bool = true) -> String {
+        let lowercase = followsAutoCapitalization && !autoCapitalization
+        return insertion(of: Self.exampleSpeech, contextBefore: "", fieldCapitalizesSentences: true,
+                         opening: lowercase ? .lowercase : .capital, autoCapitalization: autoCapitalization)
+    }
+
+    /// The texting styles write two to nine as digits ("around 7", "2 things"); spelling a small
+    /// number out is formal writing (`SpokenNumbers.Small`).
+    public var writesSmallNumbersAsDigits: Bool { self == .casual || self == .veryCasual }
+
+    /// Casual is typed text, so its capitals follow the keyboard's Auto-Capitalization setting the
+    /// way typing does. Formal and Excited are written sentences and always start with a capital;
+    /// Very casual has no capitals to begin with.
+    public var followsAutoCapitalization: Bool { self == .casual }
+
     /// Whether insertion may capitalize the start of a sentence when the field asks for it. Very
     /// casual is all lowercase by design, so the field's capitals must not undo it.
     public var allowsSentenceCapitals: Bool { self != .veryCasual }
@@ -58,17 +89,19 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
     /// `california` removes the filler "like" (`CaliforniaMode`); also Beta, and off by default.
     /// `searchField` is a search bar or address bar: the words are a query, so the period or
     /// exclamation mark a style ends on is left off ("Amazon." finds nothing in Passwords).
+    /// With Auto-Capitalization off, Casual lowercases every word unless caps lock is on.
     public func insertion(of transcript: String, contextBefore: String?, fieldCapitalizesSentences: Bool,
                           personalWords: [String] = [], opening: DictationOpening = .automatic,
                           mentions: Bool = false, handles: [String] = [], systemWords: [String] = [],
                           spokenCorrections: Bool = false, capsLockDropsPunctuation: Bool = false,
-                          emoticons: Bool = true, smallOrdinals: Bool = false, california: CaliforniaMode = .off,
-                          searchField: Bool = false, misheard: [String: String] = [:]) -> String {
+                          emoticons: Bool = true, smallOrdinals: Bool = false, numbers: NumberPreferences = .init(), california: CaliforniaMode = .off,
+                          searchField: Bool = false, misheard: [String: String] = [:],
+                          autoCapitalization: Bool = true) -> String {
         let text = insertion(of: transcript, contextBefore: contextBefore, fieldCapitalizesSentences: fieldCapitalizesSentences,
                              personalWords: personalWords, opening: opening, mentions: mentions, handles: handles,
                              systemWords: systemWords, spokenCorrections: spokenCorrections,
-                             capsLockDropsPunctuation: capsLockDropsPunctuation, emoticons: emoticons, smallOrdinals: smallOrdinals,
-                             california: california, misheard: misheard)
+                             capsLockDropsPunctuation: capsLockDropsPunctuation, emoticons: emoticons, smallOrdinals: smallOrdinals, numbers: numbers,
+                             california: california, misheard: misheard, autoCapitalization: autoCapitalization)
         guard searchField else { return text }
         // A question keeps its mark, and an ellipsis is not an ending.
         var query = Substring(text)
@@ -80,7 +113,8 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
                            personalWords: [String], opening: DictationOpening,
                            mentions: Bool, handles: [String], systemWords: [String],
                            spokenCorrections: Bool, capsLockDropsPunctuation: Bool,
-                           emoticons: Bool, smallOrdinals: Bool, california: CaliforniaMode, misheard: [String: String]) -> String {
+                           emoticons: Bool, smallOrdinals: Bool, numbers: NumberPreferences, california: CaliforniaMode, misheard: [String: String],
+                           autoCapitalization: Bool) -> String {
         let ownWords = personalWords
         let personalWords = BuiltInVocabulary.withNames(personalWords + SystemLexiconSpelling.formattingWords(systemWords))
         // Let the joiner decide sentence boundaries, but capitalize before restoring literals.
@@ -97,7 +131,7 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
         var prepared = transform(transcript, capitalize: capitalizes, ownWords: ownWords, capsLock: opening == .capsLock,
                                  continuesSentence: continues, mentions: mentions, handles: handles, systemWords: systemWords,
                                  wordsBefore: continues ? Self.lastWords(of: contextBefore) : [],
-                                 spokenCorrections: spokenCorrections, emoticons: emoticons, smallOrdinals: smallOrdinals, california: california,
+                                 spokenCorrections: spokenCorrections, emoticons: emoticons, smallOrdinals: smallOrdinals, numbers: numbers, california: california,
                                  misheard: misheard)
         // Continuing mid-sentence: the model still capitalizes its first word ("And so..."), so
         // a second dictation after a stop read "...it works And so". Lower it when the text
@@ -125,7 +159,9 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
             joined = prepared.suppressesLeadingSpace ? prepared.text : TextJoiner.join(
                 contextBefore: contextBefore, transcript: prepared.text, capitalizeSentences: false)
         }
-        return prepared.restore(joined)
+        // Casual with Auto-Capitalization off is all lowercase: names, brands and links too.
+        let result = prepared.restore(joined)
+        return followsAutoCapitalization && !autoCapitalization && opening != .capsLock ? result.lowercased() : result
     }
 
     /// Caps lock: every letter a capital. Placeholders for links and other literals carry no
@@ -156,13 +192,53 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
 
     public func apply(_ text: String, personalWords: [String] = [], mentions: Bool = false,
                       handles: [String] = [], systemWords: [String] = [], spokenCorrections: Bool = false,
-                      emoticons: Bool = true, smallOrdinals: Bool = false, california: CaliforniaMode = .off,
-                      misheard: [String: String] = [:]) -> String {
+                      emoticons: Bool = true, smallOrdinals: Bool = false, numbers: NumberPreferences = .init(), california: CaliforniaMode = .off,
+                      misheard: [String: String] = [:], autoCapitalization: Bool = true) -> String {
         let prepared = transform(text, capitalize: allowsSentenceCapitals, ownWords: personalWords,
                                  mentions: mentions, handles: handles, systemWords: systemWords,
-                                 spokenCorrections: spokenCorrections, emoticons: emoticons, smallOrdinals: smallOrdinals, california: california,
+                                 spokenCorrections: spokenCorrections, emoticons: emoticons, smallOrdinals: smallOrdinals, numbers: numbers, california: california,
                                  misheard: misheard)
-        return prepared.restore(prepared.text)
+        let rendered = prepared.restore(prepared.text)
+        return self == .casual && !autoCapitalization ? rendered.lowercased() : rendered
+    }
+
+    /// Correct transcript words while retaining what was said, including fillers and spoken commands.
+    public static func meetingTranscript(_ text: String, personalWords: [String], systemWords: [String],
+                                         misheard: [String: String]) -> String {
+        let numbered = writingNumbers(text, small: .asSaid)
+        let protected = ProtectedText(numbered)
+        let named = correctedNames(protected.masked, ownWords: personalWords,
+                                   systemWords: SystemLexiconSpelling.formattingWords(systemWords),
+                                   surnames: ContactSurnames.candidates(systemWords), handles: [],
+                                   mentions: false, misheard: misheard, lowercaseNames: false)
+        let vocabulary = BuiltInVocabulary.withNames(personalWords + SystemLexiconSpelling.formattingWords(systemWords))
+        let cased = SpokenFormatting.writingKnownNames(named.text, words: vocabulary + named.names)
+        return protected.restore(capitalizingPronounI(cased))
+    }
+
+    private static func correctedNames(_ text: String, ownWords: [String], systemWords: [String],
+                                       surnames: Set<String>, handles: [String], mentions: Bool,
+                                       misheard: [String: String], lowercaseNames: Bool) -> (text: String, names: [String]) {
+        var source = text
+        source = SystemLexiconSpelling.correct(source, words: systemWords, explicitWords: ownWords, mentions: mentions)
+        if !ownWords.isEmpty {
+            source = PersonalWordMatcher(words: ownWords, rank: Self.personalWordRank).correct(source)
+        }
+        // What the person retyped right after an earlier dictation ("Versailles" as "Vercel").
+        source = PersonalVocabulary.applyingMisheard(source, misheard, rank: Self.wordRank)
+        source = BuiltInVocabulary.correctingMishearings(source, personalWords: ownWords + systemWords + handles)
+        // Casual is how people text: a company's name is spelled right but takes no capital
+        // ("openai", "claude code"). Formal and excited write it the company's way.
+        source = ModernVocabulary.correcting(source, personalWords: ownWords + systemWords + handles,
+                                             lowercaseNames: lowercaseNames)
+        // "Sarah Brown" is then one name, kept whole by the styles that lowercase prose.
+        return ContactSurnames.capitalizing(source, surnames: surnames)
+    }
+
+    private static func writingNumbers(_ text: String, small: SpokenNumbers.Small, listComma: String? = nil, listDigits: Bool = false) -> String {
+        guard SpokenNumbers.mightContainNumber(text, small: small) else { return text }
+        let literals = ProtectedText(text, exposingClockCandidates: true)
+        return literals.restore(SpokenNumbers.writingDetectedNumbers(literals.masked, small: small, listComma: listComma, listDigits: listDigits))
     }
 
     /// Name spelling only, before a user transcript is saved; no style or punctuation changes.
@@ -182,7 +258,7 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
                            continuesSentence: Bool = false, mentions: Bool = false,
                            handles: [String] = [], systemWords: [String] = [],
                            wordsBefore: [String] = [], spokenCorrections: Bool = false,
-                           emoticons: Bool = true, smallOrdinals: Bool = false, california: CaliforniaMode = .off,
+                           emoticons: Bool = true, smallOrdinals: Bool = false, numbers: NumberPreferences = .init(), california: CaliforniaMode = .off,
                            misheard: [String: String] = [:]) -> SpokenFormatting.Result {
         let surnames = ContactSurnames.candidates(systemWords)
         let systemWords = SystemLexiconSpelling.formattingWords(systemWords)
@@ -194,16 +270,18 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
         // "U.S.A." is written "USA", the way people text it (Zayd, November 15).
         trimmed = SpelledLetters.droppingAbbreviationPeriods(trimmed)
         // Spoken repairs read the recognizer's own punctuation, so they run before casual drops
-        // its commas ("Tuesday, scratch that, Wednesday"), and before literals are masked, which
-        // would hide "4.30" from the clock-time pass. None of them can change a word with no
-        // space in it, so a URL or path is never edited. Self-corrections remove words, so they
-        // run only when the person turned them on; stutters and clock times always run.
+        // its commas ("Tuesday, scratch that, Wednesday"). Self-corrections remove words and
+        // run only when the person turns them on. Stutters and clock times always run.
         if spokenCorrections {
             trimmed = SpokenRepair.applyingSelfCorrections(trimmed, isPlainCommonWord: Self.isPlainCommonWord)
         }
         // Ordinals first, so "twenty first" is 21st and not "20 first".
-        trimmed = SpokenOrdinals.writing(SpokenRepair.collapsingStutters(trimmed), small: smallOrdinals)
-        trimmed = SpokenRepair.americanClockTimes(SpokenNumbers.writingDigits(trimmed))
+        let smallNumbers = numbers.small(in: self)
+        trimmed = SpokenOrdinals.writing(SpokenRepair.collapsingStutters(trimmed), small: smallOrdinals, numericDates: smallNumbers.isExplicit)
+        let listComma = writesSmallNumbersAsDigits && (trimmed.contains(",") || trimmed.contains(where: \.isNewline))
+            ? SpokenFormatting.placeholderPrefix(lead: "\u{E004}", avoiding: trimmed) : nil
+        trimmed = Self.writingNumbers(trimmed, small: smallNumbers,
+                                      listComma: listComma, listDigits: self == .veryCasual)
         // A recording stopped mid-sentence ends "I went to the." and a long one cut there reads
         // "the. My dog". That period is the recognizer's guess at the end of the audio.
         trimmed = Self.joiningUnfinishedSentences(trimmed, keeping: personalWords)
@@ -228,19 +306,9 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
         // A misheard personal word ("Dahlson" for Dahlsson) takes the stored spelling before
         // commands and casing run; literal spans are already masked. Built-in names are matched
         // only from their listed mishearings, so a stranger's Zahid is not turned into Zayd.
-        source = SystemLexiconSpelling.correct(source, words: systemWords, explicitWords: ownWords, mentions: mentions)
-        if !ownWords.isEmpty {
-            source = PersonalWordMatcher(words: ownWords, rank: Self.personalWordRank).correct(source)
-        }
-        // What the person retyped right after an earlier dictation ("Versailles" as "Vercel").
-        source = PersonalVocabulary.applyingMisheard(source, misheard, rank: Self.wordRank)
-        source = BuiltInVocabulary.correctingMishearings(source, personalWords: ownWords + systemWords + handles)
-        // Casual is how people text: a company's name is spelled right but takes no capital
-        // ("openai", "claude code"). Formal and excited write it the company's way.
-        source = ModernVocabulary.correcting(source, personalWords: ownWords + systemWords + handles,
-                                             lowercaseNames: self == .casual || self == .veryCasual)
-        // "Sarah Brown" is then one name, kept whole by the styles that lowercase prose.
-        let named = ContactSurnames.capitalizing(source, surnames: surnames)
+        let named = Self.correctedNames(source, ownWords: ownWords, systemWords: systemWords, surnames: surnames,
+                                        handles: handles, mentions: mentions, misheard: misheard,
+                                        lowercaseNames: self == .casual || self == .veryCasual)
         source = named.text
         // "quote hello quote" and the recognizer's "on quote" become the commands below.
         source = SpokenQuotes.normalizing(source)
@@ -266,8 +334,16 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
         out = Self.etcExpression.stringByReplacingMatches(
             in: out, range: NSRange(out.startIndex..., in: out), withTemplate: "etc")
         out = Self.loweringRecognizerRestarts(out)
+        // The recognizer title-cases ordinary words it takes for a name ("my calendar says AI
+        // Summit, great Naming Convention"). Casual texts them lowercase, like it texts brands.
+        if self == .casual {
+            out = Self.loweringTitleCasedCommonWords(out, keeping: personalWords + named.names,
+                                                     continuesSentence: continuesSentence)
+        }
         formatted.refreshBoundaries(after: out)
         guard !out.isEmpty else { formatted.text = ""; return formatted }
+        // Before the capitals, so "'cause" opening a sentence becomes "Because".
+        if self == .formal { out = Self.formalWording(out) }
         if capitalize, !protected.startsWithLiteral {
             out = Self.capitalizeFirst(out)
         }
@@ -282,8 +358,7 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
         case .excited:
             // Every sentence is excited, not only the last: a period before the next sentence
             // becomes an exclamation mark. Ellipses, numbers and abbreviations (masked) stay.
-            out = Self.innerSentenceStop.stringByReplacingMatches(
-                in: out, range: NSRange(out.startIndex..., in: out), withTemplate: "!")
+            out = Self.excitedSentenceEndings(out)
             if !protected.endsWithLiteral && !formatted.endsWithToken && !Self.endsUnfinished(out) {
                 out = Self.ensureEnding(out, with: "!")
             }
@@ -319,6 +394,7 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
                 restored = written
             }
         }
+        if let listComma { restored = restored.replacingOccurrences(of: listComma, with: ",") }
         formatted.text = restored
         return formatted
     }
@@ -333,7 +409,7 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
     /// Lowercase in casual like the list above, but only from capitals, so the names Ty and Al
     /// and the words "af" and "og" in another language are never touched.
     private static let casualCapitalAcronyms = try! NSRegularExpression(
-        pattern: #"(?<![\p{L}\p{N}_'’\-.])(?:TS|PMO|FR|AI|WYD|HMU|ILY|ILYSM|JK|OMW|TY|TYSM|IDC|IDGAF|IDEK|STFU|LMFAO|WYA|IYKYK|IRL|DMs?|GG|AF|ASAP|ONG|ICL|POV|FOMO|YOLO|TMI|BFF|OG|GOAT|HBU|WBU|NBD|OFC|TBF|FML|SMFH|IMY|SYBAU|GNG|WTV|WTH|BFFR)(?![\p{L}\p{N}_'’\-.])"#)
+        pattern: #"(?<![\p{L}\p{N}_'’\-.])(?:TS|PMO|FR|AI|WYD|HMU|ILY|ILYSM|JK|OMW|TY|TYSM|IDC|IDGAF|IDEK|STFU|LMFAO|WYA|IYKYK|IRL|DMs?|GG|AF|ASAP|ONG|ICL|POV|FOMO|YOLO|TMI|BFF|OG|GOAT|HBU|WBU|NBD|OFC|TBF|FML|SMFH|IMY|SYBAU|GNG|WTV|WTH|BFFR)(?![\p{L}\p{N}_'’\-]|\.[\p{L}\p{N}])"#)
 
     /// Two letters said as shorthand arrive as "T-S" or "T S". A hyphenated pair that is one of
     /// the acronyms above is joined; spaced, only "T S", which is nothing else.
@@ -454,7 +530,8 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
     /// Spoken asides that string together with commas but are not list items. Texting acronyms
     /// are asides too: "TBH, I don't care, LOL" is not a three-item list.
     private static let discourseWords: Set<String> = Set(["okay", "ok", "so", "yeah", "yep", "well", "honestly", "like",
-        "right", "anyway", "basically", "actually", "fine", "great", "sure", "cool", "i think", "i mean", "you know", "hey", "hi"])
+        "right", "anyway", "basically", "actually", "fine", "great", "sure", "cool", "i think", "i mean", "you know", "hey", "hi",
+        "yes", "no", "nah", "nope", "hello", "sorry", "thanks", "alright", "wait", "oh", "kinda", "please"])
         .union(casualAcronymWords.split(separator: "|").map(String.init))
 
     private static func isList(_ sentence: String) -> Bool {
@@ -586,6 +663,120 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
         return out
     }
 
+    private static let titleRunToken = try! NSRegularExpression(pattern: #"[\p{L}][\p{L}\p{N}'’\-]*"#)
+
+    /// Casual only: capitals the recognizer put on words that cannot be part of a name.
+    /// A run of capitalized words is lowercased when every capitalized word in it is an ordinary
+    /// word (in the word list, not a given name such as "Mark", not one of `keeping`: My Words,
+    /// contacts, built-in names) and the run shows it is not a name:
+    /// - one of its words is the -ing form of a common verb ("Naming Convention", "Search Field
+    ///   Typing"), which names rarely are ("Thanksgiving" is no verb's -ing form), or
+    /// - it is one word right after a comma that is a pronoun, function or filler word
+    ///   (", Yeah", ", Maybe", ", It's"), the recognizer starting a sentence over.
+    /// The word list stores every word lowercase ("china", "thanksgiving"), so plain common words
+    /// alone ("Apple", "App Store", "Rocket Money") are never enough and keep their capitals.
+    /// A run that opens a sentence keeps its first capital and is judged on the rest.
+    static func loweringTitleCasedCommonWords(_ text: String, keeping: [String], continuesSentence: Bool = false) -> String {
+        let source = text as NSString
+        let kept = Set(keeping.flatMap { $0.lowercased().split(whereSeparator: { $0 == " " || $0 == "-" }).map(String.init) })
+        struct Token { let range: NSRange; let word: String }
+        let tokens = titleRunToken.matches(in: text, range: NSRange(location: 0, length: source.length))
+            .map { Token(range: $0.range, word: source.substring(with: $0.range)) }
+        func isTitle(_ word: String) -> Bool {
+            guard word.count > 1, word.first?.isUppercase == true, !word.hasPrefix("I'"), !word.hasPrefix("I’") else { return false }
+            return word.dropFirst().allSatisfy { !$0.isUppercase }
+        }
+        func isAcronym(_ word: String) -> Bool {
+            word.count > 1 && word.allSatisfy { $0.isUppercase || $0.isNumber }
+        }
+        func ordinary(_ word: String) -> Bool {
+            let lower = word.lowercased()
+            return !kept.contains(lower) && !givenNames.contains(lower) && isPlainCommonWord(lower)
+        }
+        /// Whether the word at `location` starts a sentence: the text's start or after an ending
+        /// mark, a colon, a newline or a masked span. Only a letter, digit or comma continues one.
+        func opensSentence(_ location: Int) -> Bool {
+            var index = location - 1
+            while index >= 0, let scalar = UnicodeScalar(source.character(at: index)), scalar == " " || scalar == "\t" { index -= 1 }
+            guard index >= 0, let scalar = UnicodeScalar(source.character(at: index)) else { return !continuesSentence }
+            let character = Character(scalar)
+            return !(character.isLetter || character.isNumber || character == "," || character == "'" || character == "’")
+        }
+        func previousMark(_ location: Int) -> Character? {
+            var index = location - 1
+            while index >= 0, source.character(at: index) == 0x20 { index -= 1 }
+            guard index >= 0, let scalar = UnicodeScalar(source.character(at: index)) else { return nil }
+            return Character(scalar)
+        }
+        func normalized(_ word: String) -> String { word.lowercased().replacingOccurrences(of: "’", with: "'") }
+        func onlySpaces(between a: Token, and b: Token) -> Bool {
+            let gap = source.substring(with: NSRange(location: NSMaxRange(a.range), length: b.range.location - NSMaxRange(a.range)))
+            return !gap.isEmpty && gap.allSatisfy { $0 == " " }
+        }
+        var lowered: [NSRange] = []
+        var index = 0
+        while index < tokens.count {
+            guard isTitle(tokens[index].word) || isAcronym(tokens[index].word) else { index += 1; continue }
+            var run = [tokens[index]]
+            var next = index + 1
+            while next < tokens.count, isTitle(tokens[next].word) || isAcronym(tokens[next].word),
+                  onlySpaces(between: run[run.count - 1], and: tokens[next]) {
+                run.append(tokens[next]); next += 1
+            }
+            index = next
+            var candidates = run
+            if opensSentence(run[0].range.location) {
+                // The opening capital is the sentence's; it may still be part of a name.
+                guard isAcronym(run[0].word) || ordinary(run[0].word) else { continue }
+                candidates.removeFirst()
+            }
+            let titles = candidates.filter { isTitle($0.word) }
+            guard !titles.isEmpty, titles.allSatisfy({ ordinary($0.word) }) else { continue }
+            let afterComma = !opensSentence(run[0].range.location) && previousMark(run[0].range.location) == ","
+            let restart = run.count == 1 && afterComma && restartWords.contains(normalized(titles[0].word))
+            // "Evening Spring Court", "Running Springs Road": a place keeps its capitals.
+            if let last = run.last, placeWords.contains(last.word.lowercased()) { continue }
+            guard restart || titles.contains(where: { isVerbIngForm($0.word) }) else { continue }
+            lowered += titles.map(\.range)
+        }
+        guard !lowered.isEmpty else { return text }
+        let out = NSMutableString(string: text)
+        for range in lowered.reversed() {
+            let word = source.substring(with: range)
+            out.replaceCharacters(in: range, with: word.prefix(1).lowercased() + word.dropFirst())
+        }
+        return out as String
+    }
+
+    /// Pronouns, function and filler words that never name anything: a capital on one right after
+    /// a comma is the recognizer starting over. "May", "Will" and "See" are names too.
+    private static let restartWords: Set<String> = closedClassWords.subtracting(namesAmongClosedClass).subtracting(["i"])
+        .union(["yeah", "yep", "yup", "yes", "okay", "ok", "maybe", "anyway", "anyways", "whatever", "anything",
+                "something", "everything", "nothing", "honestly", "basically", "literally", "actually", "also",
+                "cuz", "'cause", "kinda", "sorta", "gonna", "wanna", "please", "thanks", "sure", "nope", "like",
+                "well", "just", "really", "still", "even", "oh", "wait", "alright", "totally", "definitely",
+                "probably", "though", "hmm", "right", "that'd", "that's", "there's", "here's", "we're",
+                "they're", "you're", "he's", "she's", "it'll", "we'll", "you'll", "don't", "didn't"])
+
+    /// Nouns that end like an -ing form of a word ("even", "wed", "build") but name a thing.
+    private static let ingNouns: Set<String> = ["evening", "morning", "building", "ceiling", "wedding", "pudding",
+        "darling", "sterling", "viking", "herring", "shilling", "farthing", "lightning", "offspring", "inkling"]
+    /// The last word of a street, place or venue name.
+    private static let placeWords: Set<String> = ["court", "street", "avenue", "road", "lane", "drive", "way",
+        "boulevard", "place", "park", "center", "centre", "hall", "bridge", "square", "plaza", "springs",
+        "heights", "hills", "valley", "beach", "station", "airport", "mall", "school", "college", "university"]
+
+    /// "naming" is "name" + ing, "typing" "type", "running" "run": the -ing form of a common word.
+    /// "Thanksgiving", "Sterling" and "King" are not, so they stay names.
+    static func isVerbIngForm(_ word: String) -> Bool {
+        let lower = word.lowercased()
+        guard lower.count > 5, lower.hasSuffix("ing"), !ingNouns.contains(lower) else { return false }
+        let stem = String(lower.dropLast(3))
+        var bases = [stem, stem + "e"]
+        if let last = stem.last, stem.count > 2, stem.dropLast().last == last { bases.append(String(stem.dropLast())) }
+        return bases.contains { base in base.count > 2 && isPlainCommonWord(base) }
+    }
+
     /// Words a sentence cannot end on: articles, possessive determiners and "and"/"or". English
     /// does end sentences on prepositions ("what is it for") and on "his" and "her" ("it's
     /// his"), so those are left out.
@@ -643,7 +834,7 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
     /// The whole previous word is lowercase (so "This Is Us" is not "is Us"); the capital is group 1;
     /// the next word is lowercase or the pronoun "I", which is never a sign of a title.
     private static let restartCapital = try! NSRegularExpression(
-        pattern: #"(?<![\p{L}\p{N}'’])\p{Ll}[\p{Ll}'’]*[ \t]+(\p{Lu}\p{Ll}+(?:['’]\p{Ll}+)?)(?=[ \t]+(?:\p{Ll}|I(?:['’]\p{Ll}+)?(?![\p{L}\p{N}])))"#)
+        pattern: #"(?<![\p{L}\p{N}'’])\p{Ll}[\p{Ll}'’]*[ \t]+(\p{Lu}\p{Ll}+(?:['’]\p{Ll}+)?)(?=[ \t]+(?:\p{Ll}|[0-9]{1,2}:[0-5][0-9](?![\p{L}\p{N}:])|I(?:['’]\p{Ll}+)?(?![\p{L}\p{N}])))"#)
 
     /// After a spoken comma, semicolon or colon the next word continues the sentence, so a
     /// recognizer capital there comes down; after a spoken period, question mark or
@@ -689,15 +880,6 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
     private static let etcExpression = try! NSRegularExpression(
         pattern: #"(?<![\p{L}\p{N}_'’\-])(?:ETC|Etc)(?![\p{L}\p{N}_'’\-])"#)
 
-    /// First names (the BSD propernames list, lowercased) that the word list also files as
-    /// ordinary words ("john", "mark", "grace"): after a spoken comma a capital on one is kept.
-    /// Names that are mostly verbs or function words ("will", "may") were left out.
-    static let givenNames: Set<String> = {
-        guard let url = Bundle.module.url(forResource: "given-names", withExtension: "txt"),
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        return Set(text.split(separator: "\n").map(String.init))
-    }()
-
     /// The bundled word list, loaded once, decides what counts as ordinary English.
     private static var commonWords: WordList? { WordList.shared }
     static let wordRank: @Sendable (String) -> Int? = { word in commonWords?.lookup(word)?.rank }
@@ -715,6 +897,32 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
         return rank < 40_000
     }
 
+    /// Whether the word right after `range` (one space away) is capitalized and not a first name,
+    /// or the word right before is, inside a sentence: the shorthand is part of a name.
+    static func touchesName(_ text: String, around range: Range<String.Index>) -> Bool {
+        func isNamePart(_ word: Substring) -> Bool {
+            guard let first = word.first, first.isUppercase, word.count > 1,
+                  word.dropFirst().allSatisfy({ !$0.isUppercase }) else { return false }
+            // The name list has "Summit" and "Mark"; a common word counts only as a known given name.
+            let lower = word.lowercased()
+            return !(SpokenMentions.firstNames.contains(lower) && (!isPlainCommonWord(lower) || givenNames.contains(lower)))
+        }
+        let after = text[range.upperBound...]
+        if after.first == " " {
+            let word = after.dropFirst().prefix(while: { $0.isLetter })
+            if isNamePart(word) { return true }
+        }
+        let before = text[..<range.lowerBound]
+        if before.last == " " {
+            let head = before.dropLast()
+            let word = head.reversed().prefix(while: { $0.isLetter })
+            let start = head.index(head.endIndex, offsetBy: -word.count)
+            let mark = head[..<start].last(where: { $0 != " " })
+            if let mark, mark.isLetter || mark.isNumber || mark == ",", isNamePart(head[start...]) { return true }
+        }
+        return false
+    }
+
     private static func relaxedCasual(_ text: String) -> String {
         let source = text as NSString
         var pieces: [String] = []
@@ -728,6 +936,9 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
         var lowered = pieces.joined()
         for match in casualCapitalAcronyms.matches(in: lowered, range: NSRange(lowered.startIndex..., in: lowered)).reversed() {
             guard let range = Range(match.range, in: lowered) else { continue }
+            // Shorthand inside a name keeps its capitals: "AI Summit" on a calendar is a title,
+            // and "ai Summit" reads as a typo. "DM Sarah" still becomes "dm Sarah".
+            if Self.touchesName(lowered, around: range) { continue }
             lowered.replaceSubrange(range, with: lowered[range].lowercased())
         }
         // Only a conversational opener followed by a subject loses its optional comma.
@@ -808,6 +1019,32 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
     private static let abbreviations: Set<String> = ["etc", "vs", "inc", "ltd", "approx", "mr", "mrs", "ms", "dr", "prof",
         "jr", "sr", "st", "no", "fig", "est", "dept", "gen", "col", "sgt", "capt", "min", "max", "ave", "blvd"]
 
+    /// Speech models write fast speech the way it sounds: "gonna", "wanna", "cuz". Formal writes
+    /// the words that were meant. Group 1 is the word; the replacement keeps its first capital.
+    private static let formalWordings: [(NSRegularExpression, String)] = [
+        (#"gonna"#, "going to"), (#"wanna(?=[ \t]+(?:a|an|the|some|this|that|these|those|any|more|another|it|one)\b)"#, "want"),
+        (#"wanna"#, "want to"), (#"(?<=(?:['’]s|['’]ve)[ \t])gotta"#, "got to"),
+        (#"(?<=\b(?:he|she|it)[ \t])gotta"#, "has to"), (#"gotta"#, "have to"),
+        (#"kinda"#, "kind of"), (#"sorta"#, "sort of"), (#"lemme"#, "let me"), (#"gimme"#, "give me"),
+        (#"dunno"#, "don't know"), (#"(?:['’]cause|['’]?cuz|['’]?coz)"#, "because"), (#"outta"#, "out of"),
+        (#"lotta"#, "lot of"), (#"tryna"#, "trying to"), (#"hafta"#, "have to"), (#"shoulda"#, "should have"),
+        (#"coulda"#, "could have"), (#"woulda"#, "would have"), (#"musta"#, "must have"),
+        (#"i(?:['’]m{1,2}|mm|m['’]m)a"#, "I'm going to"), (#"['’]em"#, "them"),
+    ].map { (try! NSRegularExpression(pattern: #"(?<![\p{L}\p{N}_'’\-])("# + $0.0 + #")(?![\p{L}\p{N}_'’\-])"#,
+                                      options: [.caseInsensitive]), $0.1) }
+
+    static func formalWording(_ text: String) -> String {
+        var out = text
+        for (expression, wording) in formalWordings {
+            for match in expression.matches(in: out, range: NSRange(out.startIndex..., in: out)).reversed() {
+                guard let range = Range(match.range(at: 1), in: out) else { continue }
+                let capital = out[range].first(where: \.isLetter)?.isUppercase == true
+                out.replaceSubrange(range, with: capital ? wording.prefix(1).uppercased() + wording.dropFirst() : wording)
+            }
+        }
+        return out
+    }
+
     /// "Hello there. this is great" becomes "Hello there. This is great". A period after an
     /// abbreviation or a single letter ("Dr. brown", "J. smith") is not a sentence end.
     static func capitalizingSentences(_ text: String) -> String {
@@ -847,7 +1084,18 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
     /// followed by a capitalized next sentence. A closing quote may follow the period and an
     /// opening quote or bracket may precede the next sentence.
     private static let innerSentenceStop = try! NSRegularExpression(
-        pattern: #"(?<![.\d])\.(?!\.)(?=["”’']?[ \t]+["“‘'(\[]?\p{Lu})"#)
+        pattern: #"(?m)(^[ \t]*[0-9]+)?(?<!\.)\.(?!\.)(?=["”’']?[ \t]+["“‘'(\[]?\p{Lu})"#)
+
+    private static func excitedSentenceEndings(_ text: String) -> String {
+        let stops = innerSentenceStop.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        guard !stops.isEmpty else { return text }
+        let result = NSMutableString(string: text)
+        // A line starting "1. Read" is a numbered list. Only sentence stops change.
+        for stop in stops where stop.range(at: 1).location == NSNotFound {
+            result.replaceCharacters(in: stop.range, with: "!")
+        }
+        return result as String
+    }
 
     private static func ensureEnding(_ text: String, with mark: String) -> String {
         let end = contentEnd(in: text)
@@ -908,7 +1156,10 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
                 !candidate.contains(where: { $0.isWhitespace })
         }
 
-        init(_ text: String) {
+        private static let clockCandidate = try! NSRegularExpression(
+            pattern: #"^(?:[0-9]{1,2}\.[0-5][0-9]|[ap]\.m\.)$"#, options: [.caseInsensitive])
+
+        init(_ text: String, exposingClockCandidates: Bool = false) {
             // A fixed-length nonce avoids growing a prefix one character at a time when the
             // transcript itself contains a long run of private-use characters.
             // Letter-free, so the personal-word pass cannot rewrite part of a placeholder.
@@ -922,6 +1173,10 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
                 guard var range = Range(match.range, in: text) else { continue }
                 // URL/path terminal sentence punctuation belongs to the prose, not the literal.
                 let candidate = text[range]
+                if exposingClockCandidates,
+                   Self.clockCandidate.firstMatch(in: String(candidate), range: NSRange(location: 0, length: match.range.length)) != nil {
+                    continue
+                }
                 if candidate.contains("://") || candidate.hasPrefix("/") || candidate.hasPrefix("~/") ||
                     Self.isBareDomain(candidate) {
                     while range.upperBound > range.lowerBound,
@@ -947,7 +1202,7 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
             endsWithLiteral = ends
         }
 
-        func restore(_ text: String) -> String {
+        func restore(_ text: String, lowercaseWords: Bool = false) -> String {
             guard !literals.isEmpty else { return text }
             // One scan, rather than replacing each marker through the whole transcript.
             let source = text as NSString
@@ -957,7 +1212,8 @@ public enum TextStyle: String, Codable, CaseIterable, Sendable {
                 guard let match, let index = Int(source.substring(with: match.range(at: 1))),
                       literals.indices.contains(index) else { return }
                 pieces.append(source.substring(with: NSRange(location: cursor, length: match.range.location - cursor)))
-                pieces.append(literals[index])
+                let literal = literals[index]
+                pieces.append(lowercaseWords && literal.allSatisfy(\.isLetter) ? literal.lowercased() : literal)
                 cursor = NSMaxRange(match.range)
             }
             pieces.append(source.substring(from: cursor))

@@ -86,13 +86,20 @@ final class CompiledProgramReadaheadTests: XCTestCase {
         XCTAssertEqual(report.files, 1)
         XCTAssertEqual(report.bytes, Int64(6 << 20 + 123))
         XCTAssertEqual(report.bytesRead, 0)
+        XCTAssertEqual(report.bytesInMemory, Int64(6 << 20 + 123))
     }
 
     func testAnEvictedProgramIsReadBackWhole() throws {
         let file = try program(entry: "H", bytes: 8 << 20 + 5)
         try evict(file)
         let report = CompiledProgramReadahead.read([file], chunkBytes: 1 << 20, concurrency: 3)
-        XCTAssertEqual(report.bytesRead, Int64(8 << 20 + 5), "every chunk, including the short last one, is read")
+        // Not `bytesRead == size`: reading chunks in order makes the kernel read ahead, so a later
+        // chunk (or the 5-byte tail) is often in memory before its turn and is rightly skipped.
+        // That assertion failed about one run in four with nothing else running. What must hold:
+        // every chunk, the short last one included, was read or found in memory, something was
+        // read, and the whole file is in memory afterwards.
+        XCTAssertEqual(report.bytesRead + report.bytesInMemory, Int64(8 << 20 + 5), "every chunk is accounted for")
+        XCTAssertGreaterThanOrEqual(report.bytesRead, Int64(1 << 20), "an evicted file is read, not skipped")
         XCTAssertEqual(CompiledProgramReadahead.residency(of: [file])[file] ?? 0, 1, accuracy: 0.001)
     }
 
@@ -100,7 +107,9 @@ final class CompiledProgramReadaheadTests: XCTestCase {
         let file = try program(entry: "I", bytes: 3 << 20)
         try evict(file)
         let report = CompiledProgramReadahead.read([file], chunkBytes: 1_000_000, concurrency: 64)
-        XCTAssertEqual(report.bytesRead, Int64(3 << 20))
+        XCTAssertEqual(report.bytesRead + report.bytesInMemory, Int64(3 << 20))
+        XCTAssertGreaterThan(report.bytesRead, 0)
+        XCTAssertEqual(CompiledProgramReadahead.residency(of: [file])[file] ?? 0, 1, accuracy: 0.001)
     }
 
     func testLearnsOnlyTheFilesInMemoryAndHonorsExclusions() throws {
@@ -118,7 +127,9 @@ final class CompiledProgramReadaheadTests: XCTestCase {
 
         try evict(used)
         let report = try XCTUnwrap(program.prefetch())
-        XCTAssertEqual(report.bytesRead, Int64(2 << 20))
+        XCTAssertEqual(report.bytesRead + report.bytesInMemory, Int64(2 << 20))
+        XCTAssertGreaterThan(report.bytesRead, 0)
+        XCTAssertEqual(CompiledProgramReadahead.residency(of: [used])[used] ?? 0, 1, accuracy: 0.001)
     }
 
     func testNoCacheRootTurnsItOff() {

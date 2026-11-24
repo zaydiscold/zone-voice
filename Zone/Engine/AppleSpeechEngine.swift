@@ -5,7 +5,7 @@ import Foundation
 import ZoneCore
 import Speech
 
-/// Apple's on-device recognizer (iOS 26): `SpeechTranscriber` or `DictationTranscriber`.
+/// Apple's on-device speech model (iOS 26): `SpeechTranscriber` or `DictationTranscriber`.
 ///
 /// No weights ship in our bundle: the language asset is installed and shared by the system,
 /// and recognition runs out of process. A `SpeechAnalyzer` finishes for good once finalized,
@@ -53,7 +53,7 @@ final class AppleSpeechEngine: SpeechEngine {
         let locale = module == .speech
             ? await SpeechTranscriber.supportedLocale(equivalentTo: english)
             : await DictationTranscriber.supportedLocale(equivalentTo: english)
-        guard let locale else { throw SpeechEngineError.unavailable("Apple's recognizer does not support English here.") }
+        guard let locale else { throw SpeechEngineError.unavailable("Apple's speech model does not support English here.") }
         let prepared = Self.makeModule(module, locale: locale)
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [prepared.module]) {
             progress(0, "system speech asset")
@@ -78,7 +78,7 @@ final class AppleSpeechEngine: SpeechEngine {
             locale = await DictationTranscriber.supportedLocale(equivalentTo: english)
         }
         guard let locale else {
-            throw SpeechEngineError.unavailable("Apple's recognizer does not support English here.")
+            throw SpeechEngineError.unavailable("Apple's speech model does not support English here.")
         }
         let warm = Self.makeModule(module, locale: locale)
         if await AssetInventory.status(forModules: [warm.module]) != .installed,
@@ -120,10 +120,14 @@ final class AppleSpeechEngine: SpeechEngine {
     }
 
     func beginUtterance() throws -> UtteranceSession {
+        try beginUtterance(submission: nil)
+    }
+
+    func beginUtterance(submission: AudioModelSubmission?) throws -> UtteranceSession {
         lock.lock()
         defer { lock.unlock() }
         guard ready, let locale else { throw SpeechEngineError.notReady }
-        return AppleSpeechUtterance(module: Self.makeModule(module, locale: locale), format: analyzerFormat, hints: hints)
+        return AppleSpeechUtterance(module: Self.makeModule(module, locale: locale), format: analyzerFormat, hints: hints, submission: submission)
     }
 
     func unload() {
@@ -187,7 +191,7 @@ final class AppleSpeechUtterance: UtteranceSession {
     private let run: Task<(SpeechAnalyzer, Task<String, Error>), Error>
     private let progress = TextBox()
 
-    init(module: AppleSpeechEngine.PreparedModule, format: AVAudioFormat?, hints: [String]) {
+    init(module: AppleSpeechEngine.PreparedModule, format: AVAudioFormat?, hints: [String], submission: AudioModelSubmission? = nil) {
         let (stream, continuation) = AsyncStream<(AnalyzerInput, Int)>.makeStream(bufferingPolicy: .bufferingOldest(256))
         self.continuation = continuation
         converter = SampleConverter(target: format)
@@ -207,6 +211,7 @@ final class AppleSpeechUtterance: UtteranceSession {
             do {
                 try await analyzer.start(inputSequence: stream.map { input, count in
                     backlog.release(count)
+                    if count > 0 { try submission?.record() }
                     return input
                 })
                 return (analyzer, collector)

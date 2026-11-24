@@ -56,7 +56,7 @@ final class SpokenQuotesAndFacesTests: XCTestCase {
     }
 
     func testFacesStayWordsWhenDescribedOrFormalOrOff() {
-        for said in ["Send a smiley face", "She made a sad face", "I saw her crying face", "Draw two smiley faces",
+        for said in ["Send a smiley face", "She made a sad face", "I saw her crying face", "Draw 2 smiley faces",
                      "The winky face emoji"] {
             XCTAssertEqual(casual(said), said, said)
         }

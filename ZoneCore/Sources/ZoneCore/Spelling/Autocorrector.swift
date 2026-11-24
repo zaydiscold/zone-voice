@@ -13,6 +13,8 @@ public struct Suggestion: Equatable, Sendable {
         case completion
         /// A whole next word, offered between words; tapping it writes the word and a space.
         case prediction
+        // Box the caret anchor so cached word suggestions keep their compact representation.
+        indirect case emoji(anchor: EmojiShortcode, word: String, spaced: Bool, session: String)
     }
 
     public let text: String
@@ -133,11 +135,12 @@ public final class Autocorrector {
     /// fixes. They were only protected as typed, so one slip in one ("soacebar") matched nothing
     /// and stayed. One slip, five letters or more, each at its own frequency rank, so a
     /// dictionary word that fits as well still wins.
-    private lazy var modernCorrections: [(key: [UInt8], display: String, rank: Int)] = ModernVocabulary.correctionWords.compactMap {
-        // Swearing and slurs are kept as typed, never reached by a slip (`correctionWords`).
+    private lazy var modernCorrections: [(key: [UInt8], display: String, rank: Int, isCoarse: Bool)] = ModernVocabulary.correctionWords.compactMap {
+        // Slurs and sexual slang are kept as typed, never reached by a slip (`correctionWords`).
+        // Everyday swearing is reached only as the main list's is (`Candidate.isCoarse`).
         guard let key = WordList.foldedKey($0.word), key.count >= Self.minimumModernCorrectionLength,
               words.lookup(String(decoding: key, as: UTF8.self)) == nil else { return nil }
-        return (key: key, display: $0.word, rank: $0.rank)
+        return (key: key, display: $0.word, rank: $0.rank, isCoarse: ModernVocabulary.coarseWords.contains($0.word.lowercased()))
     }
     static let minimumModernCorrectionLength = 5
 
@@ -154,9 +157,10 @@ public final class Autocorrector {
                     EditCost.cost(typed, $0, substitutions: substitutions, limit: Self.ownCorrectionMaximumCost, scratch: &scratch)
                 }
                 guard cost <= Self.ownCorrectionMaximumCost else { continue }
+                if modern.isCoarse, modern.key.starts(with: key) { continue }
                 found.append(Candidate(text: modern.display, cost: cost, rank: modern.rank, length: modern.key.count,
                                        firstLetterMatches: modern.key[0] == key[0],
-                                       startsLowercase: modern.display.first?.isLowercase == true))
+                                       startsLowercase: modern.display.first?.isLowercase == true, isCoarse: modern.isCoarse))
             }
         }
         return found
@@ -398,6 +402,53 @@ public final class Autocorrector {
         memo = nil
     }
 
+    /// Drops a kept word, so it is corrected again like any other.
+    public func forget(_ word: String) {
+        guard let key = WordList.foldedKey(word) else { return }
+        let lower = String(decoding: key, as: UTF8.self)
+        learnedWords.remove(lower)
+        keptSlips[lower] = nil
+        memo = nil
+    }
+
+    /// Kept words that are one slip from an everyday word, with that word (`everydayWordBehindKept`).
+    /// A word is kept by undoing its correction, which also happens by accident: "bsby" kept
+    /// once was never fixed again, and swipe wrote it for every "baby" (November 20). Such a
+    /// word is still left as typed, but the row offers the everyday word, and the keyboard
+    /// keeps it out of swipe and forgets it when that offer is taken.
+    public private(set) var keptSlips: [String: String] = [:]
+
+    public func setKeptSlips(_ slips: [String: String]) {
+        keptSlips = slips.filter { learnedWords.contains($0.key) }
+        memo = nil
+    }
+
+    /// The everyday word autocorrect would write for a kept word had the person not kept it, when
+    /// the kept word is a single slip of the keys from it. Nil when autocorrect would leave the
+    /// word alone or write anything else (a rare word, a name, two words, a word further away).
+    /// Lowercase words only: a capital the person kept is a name.
+    public func everydayWordBehindKept(_ word: String) -> String? {
+        guard let key = WordList.foldedKey(word), word == word.lowercased() else { return nil }
+        let lower = String(decoding: key, as: UTF8.self)
+        guard learnedWords.contains(lower), !ownWords.contains(lower) else { return nil }
+        learnedWords.remove(lower)
+        memo = nil
+        defer {
+            learnedWords.insert(lower)
+            memo = nil
+        }
+        // One key beside the right one, two letters swapped or a letter doubled: nothing further.
+        // A new word autocorrect would also rewrite ("skrrt" to "sorry") is not a slip of it.
+        guard let fix = evaluate(lower).replacement, let entry = words.lookup(fix), entry.display == fix,
+              fix == fix.lowercased(), entry.isSuggestible, entry.rank < Self.keptSlipMaximumRank,
+              words.neighbors(of: lower, maxCost: EditCost.adjacentSubstitution, limit: 4).contains(where: { $0.entry.index == entry.index })
+        else { return nil }
+        return fix
+    }
+
+    /// "baby" is 2,780; past this the word behind a kept one is too rare to call the kept one a slip.
+    static let keptSlipMaximumRank = 10_000
+
     // MARK: Evaluation
 
     /// - Parameters:
@@ -456,6 +507,8 @@ public final class Autocorrector {
         var entryIndex: Int?
         /// What following the previous word adds to the score (`contextShift`); 0 without one.
         var context: Float = 0
+        /// Everyday swearing (`WordList.Entry.isCoarse`): applied only with no other reading as close.
+        var isCoarse = false
 
         /// Lower is better: edit cost plus a gentle frequency term, with a nudge for keeping
         /// the first letter.
@@ -473,6 +526,8 @@ public final class Autocorrector {
     static let maxSearchCost: Float = 2.0
     /// A candidate this cheap leads on geometry alone when the next one costs clearly more.
     static let geometryLeadCost: Float = 1.0
+    /// A coarse word is applied only when every other candidate costs at least this much more.
+    static let coarseLead: Float = 0.25
     static let requiredMargin: Float = 0.2
     /// ...and costs at least this much less than the runner-up, it needs only this score margin.
     static let geometryGap: Float = 0.15
@@ -518,6 +573,17 @@ public final class Autocorrector {
         }
         // A word the person kept or saved is theirs as typed, even over a shortcut on it.
         if learnedWords.contains(lower) || ownWords.contains(lower) {
+            // Kept, but one slip from an everyday word ("bsby" for "baby"): a keyboard taught a
+            // typo by one accidental undo, Zone's or Apple's. Zayd (November 23): fix it, as a
+            // keyboard should fix the typos another one learned. Space writes the everyday word;
+            // the kept spelling stays in the row, and My Words keeps a spelling on purpose.
+            if !ownWords.contains(lower), let fix = keptSlips[lower] {
+                if casing == .lower || (casing == .capitalized && autoCapitalized) {
+                    return corrected(typed, to: Self.cased(fix, like: casing), lower: lower, casing: casing)
+                }
+                let offer = Suggestion(text: Self.cased(fix, like: casing), kind: .correction, autoApplies: false)
+                return Evaluation(typed: typed, suggestions: fill([Suggestion(text: typed, kind: .literal), offer], lower: lower, casing: casing))
+            }
             return accepted(typed, lower: lower, casing: casing)
         }
         // Their iPhone text replacements come next, before the words Zone ships with: an "ily"
@@ -531,6 +597,9 @@ public final class Autocorrector {
             return corrected(typed, to: phrase, lower: lower, casing: casing)
         }
         if personalWords.contains(lower) {
+            if casing == .lower || (casing == .capitalized && autoCapitalized), let fix = shorthandSlip(lower, touches: touches) {
+                return corrected(typed, to: Self.cased(fix, like: casing), lower: lower, casing: casing)
+            }
             return accepted(typed, lower: lower, casing: casing)
         }
         if let override = Self.overrides[lower] {
@@ -582,7 +651,16 @@ public final class Autocorrector {
         }
         let vouched = systemKnows(lower, typed: typed, casing: casing, autoCapitalized: autoCapitalized)
         let maxCost: Float = lower.count >= 3 ? Self.maxSearchCost : Self.confidentCost
-        var ranked = words.neighbors(of: lower, maxCost: maxCost, limit: Self.candidateLimit, touches: touches).map { neighbor in
+        // One search finds the coarse words too. The others keep every place they would have had
+        // without them, and a coarse word counts only one slip away.
+        let found = words.neighbors(of: lower, maxCost: maxCost, limit: Self.candidateLimit + 8, touches: touches, includeCoarse: true)
+        let listed = found.filter { !$0.entry.isCoarse }.prefix(Self.candidateLimit)
+        // Never as the rest of a word still being typed ("shi", "bitc" on the way to "bitcoin"):
+        // that would be a completion, and the row would show it to everyone typing "shirt".
+        let coarse = found.filter {
+            $0.entry.isCoarse && $0.cost <= Self.confidentCost && !$0.entry.display.lowercased().hasPrefix(lower)
+        }.prefix(2)
+        var ranked = (listed + coarse).map { neighbor in
             // A slip that lands on "cant" or "wont" means the contraction, as typing them does.
             let override = Self.overrides[neighbor.entry.display]
             let entry = override.map { words.lookup($0) } ?? neighbor.entry
@@ -591,7 +669,7 @@ public final class Autocorrector {
                       length: neighbor.entry.display.count,
                       firstLetterMatches: neighbor.entry.display.utf8.first.map { ($0 | 0x20) == key[0] } ?? false,
                       startsLowercase: neighbor.entry.display.first?.isLowercase == true,
-                      entryIndex: entry?.index)
+                      entryIndex: entry?.index, isCoarse: neighbor.entry.isCoarse)
         }
         ranked += ownNeighbors(of: key, touches: touches)
         ranked += modernNeighbors(of: key, touches: touches)
@@ -608,6 +686,23 @@ public final class Autocorrector {
         // hides the real alternative ("what a") and fakes a confident margin.
         var seen = Set<String>()
         ranked = ranked.filter { seen.insert($0.text.lowercased()).inserted }
+        // A typo becomes a swear word only when the keys say so by themselves: one slip, and no
+        // other reading within `coarseLead` of it ("fuxk", "bullshti", "fuckign"). Then it goes
+        // first whatever the ranks say. In every other case the swear words step aside and the
+        // rest is decided exactly as if they were not in the list ("shjt" is as near "shut",
+        // "djck" as near "duck").
+        var coarseOffer: Candidate?
+        var coarseLeads = false
+        if let best = ranked.filter(\.isCoarse).min(by: { $0.cost < $1.cost }) {
+            ranked.removeAll(where: \.isCoarse)
+            let nearest = ranked.map(\.cost).min() ?? .infinity
+            if best.cost + Self.coarseLead <= nearest {
+                coarseLeads = true
+                ranked.insert(best, at: 0)
+            } else if best.cost <= nearest + Self.coarseLead {
+                coarseOffer = best
+            }
+        }
 
         var suggestions = [literal(typed)]
         for (offset, candidate) in ranked.prefix(2).enumerated() {
@@ -624,11 +719,20 @@ public final class Autocorrector {
             let preservesCapitalizedWord = casing != .capitalized || autoCapitalized || candidate.isSplit || candidate.isOwn ||
                 (candidate.cost <= Self.geometryLeadCost && candidate.startsLowercase &&
                  candidate.text.lowercased().first == lower.first)
-            let auto = offset == 0 && !vouched && hasClearLead && preservesCapitalizedWord &&
+            let auto = offset == 0 && !vouched && (hasClearLead || coarseLeads) && preservesCapitalizedWord &&
                 shouldAutoApply(candidate, typedLength: lower.count)
             suggestions.append(Suggestion(text: Self.cased(candidate.text, like: casing), kind: .correction, autoApplies: auto))
         }
-        if !vouched, let guess = systemGuess(for: lower, casing: casing, shown: suggestions) {
+        // About as close as the best other reading: shown in the last place, for whoever meant it.
+        if let coarseOffer {
+            let offer = Suggestion(text: Self.cased(coarseOffer.text, like: casing), kind: .correction, autoApplies: false)
+            if suggestions.count < Self.maxSuggestions {
+                suggestions.append(offer)
+            } else if let last = suggestions.last, last.kind == .correction, !last.autoApplies {
+                suggestions[suggestions.count - 1] = offer
+            }
+        }
+        if !vouched, coarseOffer == nil, let guess = systemGuess(for: lower, casing: casing, shown: suggestions) {
             if suggestions.count < Self.maxSuggestions {
                 suggestions.append(guess)
             } else if let last = suggestions.last, last.kind == .correction, !last.autoApplies {
@@ -737,6 +841,42 @@ public final class Autocorrector {
         return fix
     }
 
+    /// Two-letter texting shorthand ("og", "ig") sits one key from a word typed fifty to two
+    /// hundred times as often (in chat "of" is typed 230 times for each "og", "if" 52 times for
+    /// each "ig"). It is kept as typed unless the tap says the thumb was aiming at the other key:
+    /// within about a sixth of a key of it, or a quarter when the other word is one of the ten
+    /// commonest. A thumb with the fast profile's spread lands that far off its key about once in
+    /// 25 taps, so past that line the slip is the likelier reading.
+    ///
+    /// Without touch evidence (text typed where the taps are not known) only a shorthand beside
+    /// one of the ten commonest words gives way: "og" is "of", as it was before "og" was a
+    /// word, and "ig" and "ik" stay.
+    func shorthandSlip(_ lower: String, touches: [KeyTouch]?) -> String? {
+        let key = Array(lower.utf8)
+        guard key.count == 2, ModernVocabulary.ordinaryWords.contains(lower) else { return nil }
+        let touches = touches?.count == 2 ? touches : nil
+        var best: (word: String, cost: Float)?
+        for position in 0..<2 {
+            for letter in UInt8(ascii: "a")...UInt8(ascii: "z") where letter != key[position] {
+                let cost = KeyboardProximity.substitutionCost(typed: key[position], as: letter, touch: touches?[position] ?? .center)
+                guard cost <= Self.twoLetterMaximumCost, cost < best?.cost ?? .infinity else { continue }
+                var other = key
+                other[position] = letter
+                guard let word = words.lookup(String(decoding: other, as: UTF8.self)), word.isSuggestible,
+                      word.rank < Self.shorthandRivalMaximumRank, word.display.first?.isLowercase == true else { continue }
+                let veryCommon = word.rank < Self.shorthandVeryCommonRank
+                if touches == nil ? veryCommon : cost <= (veryCommon ? Self.swapRivalCost : Self.shorthandSlipCost) {
+                    best = (word.display, cost)
+                }
+            }
+        }
+        return best?.word
+    }
+
+    static let shorthandRivalMaximumRank = 540
+    static let shorthandVeryCommonRank = 10
+    /// `boundaryCost + distanceWeight * (1 - 2t)` for a tap `t` = 0.35 of a key from its center.
+    static let shorthandSlipCost: Float = 0.22
     static let doubledKeyMaximumRank = 300
     /// A one-key reading of a swapped pair wins when its tap sat this close to the other key.
     static let swapRivalCost: Float = 0.3

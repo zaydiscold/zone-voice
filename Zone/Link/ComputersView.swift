@@ -23,8 +23,24 @@ struct ComputersView: View {
         #endif
     }
 
+    private func computerActions(_ computer: PairedComputer) -> [LibraryRow.Action] {
+        var actions: [LibraryRow.Action] = [.init(title: "Send by Flash", symbol: "qrcode") { link.flashTarget = computer }]
+        if !computer.isPaused && !link.syncing.contains(computer.endpointID) {
+            actions.append(.init(title: "Sync now", symbol: "arrow.clockwise") { link.syncNow(computer.endpointID) })
+            actions.append(.init(title: "Send everything again", symbol: "arrow.up") { link.sendEverythingAgain(computer.endpointID) })
+        }
+        return actions
+    }
+
     var body: some View {
         Form {
+            Section {
+                DisclosureGroup("Transcribe with my GPU (beta)") {
+                    Text("Run a transcription server on your computer. Zone can reach it over your private network (for example, through Tailscale).")
+                        .font(.subheadline)
+                    NavigationLink("Set up keyboard recognition") { KeyboardVoiceSettings() }
+                }
+            }
             if link.isPaired {
                 Section {
                     Button { showsClips = true } label: {
@@ -33,14 +49,14 @@ struct ComputersView: View {
                                 Text(LinkClipCopy.row)
                                 Text(clipNote)
                                     .font(.footnote)
-                                    .foregroundStyle(Zone.muted(scheme))
+                                    .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .accessibilityIdentifier("computers.sendTextNote")
                             }
                             Spacer(minLength: 0)
                             Image(systemName: "chevron.right")
                                 .font(.footnote.weight(.semibold))
-                                .foregroundStyle(Zone.muted(scheme))
+                                .foregroundStyle(.secondary)
                                 .accessibilityHidden(true)
                         }
                     }
@@ -50,6 +66,25 @@ struct ComputersView: View {
             }
             ForEach(link.computers) { computer in
                 Section {
+                    HStack(spacing: 8) {
+                        Text(computer.name)
+                            .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
+                            .accessibilityIdentifier("computers.name")
+                        if computer.isPaused {
+                            Text("Paused")
+                                .font(.caption2.weight(.semibold))
+                                .textCase(nil)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .overlay(Capsule().strokeBorder(Zone.rule(scheme), lineWidth: 1))
+                                .accessibilityIdentifier("computers.paused")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .modifier(RowMenu(text: computer.name, actions: computerActions(computer),
+                                      deleteTitle: "Forget this computer", delete: { forgetting = computer }))
                     Toggle("Send to this computer", isOn: Binding(get: { !computer.isPaused },
                                                                 set: { link.setSending($0, to: computer.endpointID) }))
                         .accessibilityIdentifier("computers.sending")
@@ -62,7 +97,7 @@ struct ComputersView: View {
                     }
                     LabeledContent("Items sent", value: computer.itemsSent.formatted())
                     if let error = computer.lastError {
-                        Text(error).font(.footnote).foregroundStyle(.red)
+                        Text(error).font(.footnote).foregroundStyle(Zone.live)
                             .accessibilityIdentifier("computers.error")
                     }
                     Button("Sync now") { link.syncNow(computer.endpointID) }
@@ -78,25 +113,11 @@ struct ComputersView: View {
                             Text("No connection? Send by Flash")
                             Text("Offline QR transfer when Wi-Fi or networks block traffic.")
                                 .font(.footnote)
-                                .foregroundStyle(Zone.muted(scheme))
+                                .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     .accessibilityIdentifier("computers.flash")
-                } header: {
-                    HStack(spacing: 8) {
-                        Text(computer.name)
-                        if computer.isPaused {
-                            Text("Paused")
-                                .font(.caption2.weight(.semibold))
-                                .textCase(nil)
-                                .foregroundStyle(Zone.muted(scheme))
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .overlay(Capsule().strokeBorder(Zone.rule(scheme), lineWidth: 1))
-                                .accessibilityIdentifier("computers.paused")
-                        }
-                    }
                 } footer: {
                     VStack(alignment: .leading, spacing: 6) {
                         if computer.isPaused {
@@ -111,11 +132,11 @@ struct ComputersView: View {
             }
 
             Section {
-                Button { showsScanner = true } label: {
+                Button { link.beginPairingInput(); showsScanner = true } label: {
                     Label("Pair a computer", systemImage: "qrcode.viewfinder")
                 }
                 .accessibilityIdentifier("computers.pair")
-                Button { showsPaste = true } label: {
+                Button { link.beginPairingInput(); showsPaste = true } label: {
                     Label("Paste link", systemImage: "doc.on.clipboard")
                 }
                 .accessibilityIdentifier("computers.paste")
@@ -135,7 +156,7 @@ struct ComputersView: View {
                 }
                 .buttonStyle(.borderless)
             } footer: {
-                SettingsNote("Sync dictations, notes, and meeting transcripts straight to your computer so local tools and AI agents can query them.", points: [
+                SettingsNote("Computers", "Read your library on your computer.", detail: "Sync dictations, notes, and meeting transcripts straight to your computer so local tools and AI agents can query them.", points: [
                     "**Pair:** on your computer, open Zone and choose Pair a phone (or run `zone pair`), then scan the QR code.",
                     "**Install:** Get Zone for your computer opens the download page, or tap Share to send the link to your computer.",
                     "**Beta:** nothing is sent until you pair a computer.",
@@ -149,7 +170,8 @@ struct ComputersView: View {
             .listRowBackground(Zone.card(scheme))
         }
         .scrollContentBackground(.hidden)
-        .tint(Zone.accentText(scheme))
+        .tint(Zone.inlineInk(scheme))
+        .onDisappear { link.endPairingInput() }
         .navigationTitle("Computers")
         .zoneBackButton()
         .navigationBarTitleDisplayMode(.inline)

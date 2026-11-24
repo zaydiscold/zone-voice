@@ -30,12 +30,19 @@ public enum CompiledProgramReadahead {
         public var bytes: Int64 = 0
         /// Bytes actually read: chunks already in memory are skipped.
         public var bytesRead: Int64 = 0
+        /// Bytes of the chunks skipped because every page was in memory when their turn came.
+        /// Not only a warm model: once a few chunks have been read in order, the kernel reads
+        /// ahead by itself, so later chunks of a cold file are often here too (measured on
+        /// macOS 26.1: two whole 1 MiB chunks and the short tail of every 8 MiB file read in
+        /// order). `bytesRead + bytesInMemory` is the size of everything asked for.
+        public var bytesInMemory: Int64 = 0
         public var seconds: Double = 0
 
-        public init(files: Int = 0, bytes: Int64 = 0, bytesRead: Int64 = 0, seconds: Double = 0) {
+        public init(files: Int = 0, bytes: Int64 = 0, bytesRead: Int64 = 0, bytesInMemory: Int64 = 0, seconds: Double = 0) {
             self.files = files
             self.bytes = bytes
             self.bytesRead = bytesRead
+            self.bytesInMemory = bytesInMemory
             self.seconds = seconds
         }
     }
@@ -115,6 +122,7 @@ public enum CompiledProgramReadahead {
                 let pages = (chunk.length + page - 1) / page
                 if mincore(file.base + chunk.offset, chunk.length, &residency) == 0,
                    !residency[0..<pages].contains(where: { ($0 & CChar(MINCORE_INCORE)) == 0 }) {
+                    queue.add(skipped: chunk.length)
                     continue
                 }
                 var done = 0
@@ -127,7 +135,8 @@ public enum CompiledProgramReadahead {
             }
         }
         return Report(files: mapped.count, bytes: Int64(mapped.reduce(0) { $0 + $1.size }),
-                      bytesRead: queue.bytesRead, seconds: ProcessInfo.processInfo.systemUptime - began)
+                      bytesRead: queue.bytesRead, bytesInMemory: queue.bytesSkipped,
+                      seconds: ProcessInfo.processInfo.systemUptime - began)
     }
 
     /// One loaded model's program: which files it is, learned once its first decode has run, and
@@ -205,6 +214,7 @@ public enum CompiledProgramReadahead {
         private let count: Int
         private var position = 0
         private var read: Int64 = 0
+        private var skipped: Int64 = 0
 
         init(count: Int) { self.count = count }
 
@@ -217,6 +227,8 @@ public enum CompiledProgramReadahead {
         }
 
         func add(read bytes: Int) { lock.withLock { read += Int64(bytes) } }
+        func add(skipped bytes: Int) { lock.withLock { skipped += Int64(bytes) } }
         var bytesRead: Int64 { lock.withLock { read } }
+        var bytesSkipped: Int64 { lock.withLock { skipped } }
     }
 }

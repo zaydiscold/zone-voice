@@ -12,43 +12,48 @@ import WidgetKit
 /// The intents are `AudioRecordingIntent`s, so iOS performs them in the Zone app, exactly as
 /// from the widget or a Shortcut. State comes from the same App Group file the widget reads.
 
-/// What a control shows: nothing running, this control's recording running, or recognizing.
+/// What a control shows, from the App Group file the app writes (`CarWidgetState.controlShows`).
 struct ControlPhase: Sendable, Equatable {
-    enum Kind: Sendable { case idle, recording, processing }
-    var kind: Kind
+    var shows: CarWidgetState.ControlShows
 
-    /// The phase for the control that starts notes (`noteMode` true) or dictations. A recording
-    /// of the other kind shows as idle here: pressing this control then does not stop it.
     static func current(noteMode: Bool, now: Date = Date()) -> ControlPhase {
-        let state = CarWidgetState.read()
-        // Zone stopped refreshing (killed, crashed): never claim a recording that is not running.
-        guard now < state.staleAt else { return ControlPhase(kind: .idle) }
-        switch state.phase {
-        case .idle: return ControlPhase(kind: .idle)
-        case .recording: return ControlPhase(kind: state.noteMode == noteMode ? .recording : .idle)
-        case .processing: return ControlPhase(kind: state.noteMode == noteMode ? .processing : .idle)
-        }
+        ControlPhase(shows: CarWidgetState.read().controlShows(noteMode: noteMode, now: now))
     }
+
+    /// On only for this control's own recording: iOS sends the toggle's opposite on a press, and
+    /// only that recording can be stopped from here.
+    var isOn: Bool { shows == .recording }
+    func title(off: String) -> String { shows.title(off: off) }
+    func glyph(off: String) -> String { shows.glyph(off: off) }
 }
 
 struct NoteControlProvider: ControlValueProvider {
-    var previewValue: ControlPhase { ControlPhase(kind: .idle) }
+    var previewValue: ControlPhase { ControlPhase(shows: .off) }
     func currentValue() async throws -> ControlPhase { .current(noteMode: true) }
 }
 
 struct DictateControlProvider: ControlValueProvider {
-    var previewValue: ControlPhase { ControlPhase(kind: .idle) }
+    var previewValue: ControlPhase { ControlPhase(shows: .off) }
     func currentValue() async throws -> ControlPhase { .current(noteMode: false) }
+}
+
+private func controlTint(isOn: Bool = false) -> Color {
+    let choice = LastAccentChoice.current
+    let light = UIColor(Color(hex: choice.lightHex))
+    let dark = UIColor(Color(hex: choice.darkHex))
+    return Color(uiColor: UIColor { traits in
+        isOn || traits.userInterfaceStyle != .dark ? light : dark
+    })
 }
 
 struct ZoneNoteControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: CarWidgetState.noteControlKind, provider: NoteControlProvider()) { phase in
-            ControlWidgetToggle("Voice note", isOn: phase.kind == .recording,
-                                action: SetZoneRecordingIntent(noteMode: true)) { isOn in
-                Label(isOn ? "Recording" : "Off", systemImage: isOn ? "stop.fill" : "mic.fill")
+            ControlWidgetToggle("Voice note", isOn: phase.isOn,
+                                action: SetZoneRecordingIntent(noteMode: true)) { _ in
+                Label(phase.title(off: "Off"), systemImage: phase.glyph(off: "mic.fill"))
             }
-            .tint(phase.kind == .recording ? .red : .orange)
+            .tint(controlTint(isOn: phase.isOn))
         }
         .displayName("Voice note")
         .description("Press to start a note, press again to finish. Saved in Zone; the app you are in stays in front.")
@@ -58,11 +63,11 @@ struct ZoneNoteControl: ControlWidget {
 struct ZoneDictateControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: CarWidgetState.dictateControlKind, provider: DictateControlProvider()) { phase in
-            ControlWidgetToggle("Dictate and copy", isOn: phase.kind == .recording,
-                                action: SetZoneRecordingIntent(noteMode: false)) { isOn in
-                Label(isOn ? "Recording" : "Off", systemImage: isOn ? "stop.fill" : "doc.on.clipboard")
+            ControlWidgetToggle("Dictate and copy", isOn: phase.isOn,
+                                action: SetZoneRecordingIntent(noteMode: false)) { _ in
+                Label(phase.title(off: "Off"), systemImage: phase.glyph(off: "doc.on.clipboard"))
             }
-            .tint(phase.kind == .recording ? .red : .orange)
+            .tint(controlTint(isOn: phase.isOn))
         }
         .displayName("Dictate and copy")
         .description("Press to start, press again to finish. The words are copied, ready to paste or insert from the Zone keyboard.")
@@ -86,9 +91,28 @@ struct ZoneStandbyControl: ControlWidget {
                     Label(isOn ? "On" : "Off", systemImage: isOn ? "waveform" : "waveform.slash")
                 }
             }
-            .tint(.orange)
+            .tint(controlTint(isOn: state.isOn()))
         }
         .displayName("Toggle Zone")
-        .description("Turns Zone on so the keyboard microphone starts at once, for the time set in Zone. Turning it on opens Zone.")
+        .description("Keeps the mic ready. Opens Zone to turn it on.")
+    }
+}
+
+/// Bring back Zone's island, as a button for Control Center, the Lock Screen or the Action
+/// Button. While Zone is on, one press puts Zone's card back in the Dynamic Island when iOS took
+/// it away (its eight-hour limit, say), without opening Zone; iOS allows a new card from the
+/// background only inside a press like this. With Zone off it does nothing.
+struct ZoneIslandControl: ControlWidget {
+    static let kind = StandbyControlState.islandControlKind
+
+    var body: some ControlWidgetConfiguration {
+        StaticControlConfiguration(kind: Self.kind) {
+            ControlWidgetButton(action: ShowIslandIntent()) {
+                Label("Zone island", systemImage: "capsule.inset.filled")
+            }
+            .tint(controlTint())
+        }
+        .displayName("Bring back Zone's island")
+        .description("Put Zone back in the Dynamic Island while Zone is on.")
     }
 }

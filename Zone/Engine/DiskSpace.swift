@@ -1,6 +1,7 @@
 // by zayd/cold @ zayd.wtf
 
 import Foundation
+import ZoneCore
 
 /// Free-space checks before a download or a long recording, so a full phone says so up front
 /// instead of failing halfway (failure map L10, L11). The manifest already declares the
@@ -27,7 +28,7 @@ enum DiskSpace {
     /// Throws unless `bytes` plus a margin (the larger of 50 MB and a fifth of the download) fit.
     static func ensureRoom(for bytes: Int64, what: String) throws {
         guard bytes > 0, let available = available() else { return }
-        let needed = bytes + max(50_000_000, bytes / 5)
+        let needed = WorkerStorage.requiredRoom(bytes)
         if available < needed { throw NotEnough(what: what, needed: needed, available: available) }
     }
 }
